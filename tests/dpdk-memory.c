@@ -290,6 +290,150 @@ static void test_packet_pool(void)
     CHECK(ker_packet_pool_cleanup(&pool) == 0);
     CHECK(ker_packet_pool_cleanup(&pool) == 0);
 }
+static struct ker_memory_budget_stats budget_stats(enum ker_memory_domain domain)
+{
+    struct ker_memory_budget_stats stats;
+    CHECK(ker_memory_budget_stats(domain, &stats) == 0);
+    return stats;
+}
+struct budget_return {
+    void *objects[2];
+    pthread_barrier_t *barrier;
+};
+static void barrier_wait(pthread_barrier_t *barrier)
+{
+    int result = pthread_barrier_wait(barrier);
+    CHECK(result == 0 || result == PTHREAD_BARRIER_SERIAL_THREAD);
+}
+static void *budget_foreign_return(void *opaque)
+{
+    struct budget_return *task = opaque;
+    CHECK(rte_thread_register() == 0);
+    CHECK(ker_memory_init(SOCKET_ID_ANY, 7) == 0);
+    barrier_wait(task->barrier);
+    for (size_t i = 0; i < 2; ++i) kfree(task->objects[i]);
+    /* Returned capacity belongs to the original allocation worker. */
+    CHECK(budget_stats(KER_MEMORY_CONTROL).used == 0);
+    barrier_wait(task->barrier);
+    CHECK(ker_memory_shutdown() == 0);
+    rte_thread_unregister();
+    return NULL;
+}
+static void test_budgets(void)
+{
+    const size_t line = RTE_CACHE_LINE_SIZE;
+    struct ker_memory_budget_config control = {3 * line, 2 * line, line};
+    struct ker_memory_budget_config objects = {4 * line, 3 * line, line};
+    struct ker_memory_budget_config atomic = {4 * line, 3 * line, line};
+    struct ker_memory_budget_config invalid = {line, 2 * line, 0};
+    CHECK(ker_memory_budget_configure(KER_MEMORY_CONTROL, &invalid) == -EINVAL);
+    CHECK(ker_memory_budget_configure(KER_MEMORY_CONTROL, &control) == 0);
+    CHECK(ker_memory_budget_configure(KER_MEMORY_CACHE, &objects) == 0);
+    CHECK(ker_memory_budget_configure(KER_MEMORY_ATOMIC, &atomic) == 0);
+    void *heap[3];
+    heap[0] = kmalloc(1, GFP_KERNEL);
+    CHECK(heap[0] != NULL && budget_stats(KER_MEMORY_CONTROL).used == line);
+    CHECK(!budget_stats(KER_MEMORY_CONTROL).pressure);
+    CHECK(ker_memory_budget_configure(KER_MEMORY_CONTROL, &control) == -EBUSY);
+    heap[1] = kmalloc(1, GFP_KERNEL);
+    heap[2] = kmalloc(1, GFP_KERNEL);
+    CHECK(heap[1] != NULL && heap[2] != NULL);
+    CHECK(budget_stats(KER_MEMORY_CONTROL).pressure);
+    CHECK(kmalloc(1, GFP_KERNEL) == NULL);
+    memset(heap[0], 0x7b, line);
+    CHECK(krealloc(heap[0], line + 1, GFP_KERNEL) == NULL);
+    CHECK(ksize(heap[0]) == line && ((unsigned char *)heap[0])[0] == 0x7b);
+    /* Saturating control memory must not consume the atomic domain budget. */
+    void *small = kmalloc(1, GFP_ATOMIC);
+    CHECK(small != NULL && budget_stats(KER_MEMORY_ATOMIC).used == line);
+    kfree(small);
+    kfree(heap[2]);
+    CHECK(budget_stats(KER_MEMORY_CONTROL).used == 2 * line);
+    CHECK(budget_stats(KER_MEMORY_CONTROL).pressure); /* between high and low */
+    kfree(heap[1]);
+    CHECK(!budget_stats(KER_MEMORY_CONTROL).pressure);
+    ker_memory_fail_after(0);
+    CHECK(kmalloc(1, GFP_KERNEL) == NULL);
+    ker_memory_fail_after(-1);
+    CHECK(budget_stats(KER_MEMORY_CONTROL).used == line);
+    CHECK(!budget_stats(KER_MEMORY_CONTROL).pressure);
+    CHECK(budget_stats(KER_MEMORY_CONTROL).denied == 2);
+    kfree(heap[0]);
+    struct kmem_cache *cache = kmem_cache_create("ker_budget_objects", 2 * line, 0, 0, NULL);
+    CHECK(cache != NULL);
+    void *first = kmem_cache_alloc(cache, GFP_ATOMIC);
+    void *second = kmem_cache_alloc(cache, GFP_ATOMIC);
+    CHECK(first != NULL && second != NULL);
+    CHECK(kmem_cache_alloc(cache, GFP_ATOMIC) == NULL);
+    CHECK(budget_stats(KER_MEMORY_CACHE).used == 4 * line);
+    CHECK(budget_stats(KER_MEMORY_CACHE).pressure);
+    CHECK(budget_stats(KER_MEMORY_CONTROL).used == line); /* cache descriptor */
+    kmem_cache_free(cache, first);
+    CHECK(budget_stats(KER_MEMORY_CACHE).pressure);
+    kmem_cache_free(cache, second);
+    CHECK(budget_stats(KER_MEMORY_CACHE).used == 0 && !budget_stats(KER_MEMORY_CACHE).pressure);
+    kmem_cache_destroy(cache);
+    small = kmalloc(1, GFP_ATOMIC);
+    CHECK(small != NULL);
+    memset(small, 0x42, line);
+    /* Requested bytes would fit, but the selected 4-line class would exceed
+     * the quota while the old allocation is retained during realloc. */
+    CHECK(krealloc(small, line + 1, GFP_ATOMIC) == NULL);
+    CHECK(budget_stats(KER_MEMORY_ATOMIC).used == line && ((unsigned char *)small)[0] == 0x42);
+    kfree(small);
+    small = kmalloc(line + 1, GFP_ATOMIC);
+    CHECK(small != NULL && budget_stats(KER_MEMORY_ATOMIC).used == 4 * line);
+    CHECK(budget_stats(KER_MEMORY_ATOMIC).pressure);
+    kfree(small);
+    CHECK(!budget_stats(KER_MEMORY_ATOMIC).pressure);
+    ker_memory_fail_after(0);
+    CHECK(kmalloc(line + 1, GFP_ATOMIC) == NULL);
+    ker_memory_fail_after(-1);
+    CHECK(budget_stats(KER_MEMORY_ATOMIC).used == 0);
+    CHECK(!budget_stats(KER_MEMORY_ATOMIC).pressure);
+    CHECK(budget_stats(KER_MEMORY_ATOMIC).denied == 1);
+    void *pooled[3];
+    for (size_t i = 0; i < 3; ++i) {
+        pooled[i] = kmalloc(1, GFP_ATOMIC);
+        CHECK(pooled[i] != NULL);
+    }
+    CHECK(kmalloc(1, GFP_ATOMIC) == NULL); /* physical pool, rather than budget, exhausted */
+    CHECK(budget_stats(KER_MEMORY_ATOMIC).used == 3 * line);
+    for (size_t i = 0; i < 3; ++i) kfree(pooled[i]);
+    CHECK(budget_stats(KER_MEMORY_ATOMIC).used == 0);
+    /* Concurrent returns must debit the owner budget and clear hysteresis
+     * atomically; each returning worker has a separate zero-usage budget. */
+    control = (struct ker_memory_budget_config){8 * line, 6 * line, 2 * line};
+    CHECK(ker_memory_budget_configure(KER_MEMORY_CONTROL, &control) == 0);
+    small = kmalloc(1, GFP_ATOMIC);
+    CHECK(small != NULL);
+    memset(small, 0x6e, line);
+    small = krealloc(small, line + 1, GFP_KERNEL);
+    CHECK(small != NULL && ((unsigned char *)small)[0] == 0x6e);
+    CHECK(budget_stats(KER_MEMORY_ATOMIC).used == 0);
+    CHECK(budget_stats(KER_MEMORY_CONTROL).used == 2 * line);
+    kfree(small);
+    pthread_barrier_t barrier;
+    CHECK(pthread_barrier_init(&barrier, NULL, 4) == 0);
+    struct budget_return tasks[3];
+    pthread_t threads[3];
+    for (size_t i = 0; i < 3; ++i) {
+        tasks[i].barrier = &barrier;
+        for (size_t j = 0; j < 2; ++j) {
+            tasks[i].objects[j] = kmalloc(1, GFP_KERNEL);
+            CHECK(tasks[i].objects[j] != NULL);
+        }
+        CHECK(pthread_create(&threads[i], NULL, budget_foreign_return, &tasks[i]) == 0);
+    }
+    CHECK(budget_stats(KER_MEMORY_CONTROL).used == 6 * line && budget_stats(KER_MEMORY_CONTROL).pressure);
+    barrier_wait(&barrier);
+    barrier_wait(&barrier);
+    for (size_t i = 0; i < 3; ++i) CHECK(pthread_join(threads[i], NULL) == 0);
+    CHECK(pthread_barrier_destroy(&barrier) == 0);
+    struct ker_memory_budget_stats stats = budget_stats(KER_MEMORY_CONTROL);
+    CHECK(stats.used == 0 && stats.peak == 6 * line && !stats.pressure);
+    CHECK(ker_memory_live_allocations() == 0);
+}
 int main(void)
 {
     CHECK(kmalloc(1, GFP_KERNEL) == NULL);
@@ -300,6 +444,7 @@ int main(void)
     test_object_pool();
     test_packet_pool();
     test_atomic_pools();
+    test_budgets();
     CHECK(ker_memory_live_allocations() == 0);
     CHECK(ker_memory_shutdown() == 0);
     CHECK(kmalloc(1, GFP_KERNEL) == NULL);
