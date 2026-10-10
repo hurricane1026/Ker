@@ -5,3 +5,19 @@ add_test(NAME checksum COMMAND ker-checksum-test)
 add_executable(ker-timer-test timer.c)
 target_link_libraries(ker-timer-test PRIVATE ker_port_headers ker_linux_port)
 add_test(NAME timer COMMAND ker-timer-test)
+
+add_executable(ker-refcount-test refcount.c)
+target_link_libraries(ker-refcount-test PRIVATE ker_port_headers ker_linux_port Threads::Threads)
+add_test(NAME refcount COMMAND ker-refcount-test)
+
+if(KER_WITH_DPDK)
+    add_executable(ker-dpdk-memory-test dpdk-memory.c)
+    target_compile_definitions(ker-dpdk-memory-test PRIVATE _GNU_SOURCE)
+    target_link_libraries(ker-dpdk-memory-test PRIVATE
+        ker_port_headers ker_linux_port ker_dpdk_port PkgConfig::DPDK Threads::Threads)
+    add_test(NAME dpdk-memory COMMAND ker-dpdk-memory-test)
+    set_tests_properties(dpdk-memory PROPERTIES TIMEOUT 30)
+    list(JOIN DPDK_LIBRARY_DIRS ":" ker_dpdk_library_path)
+    set_tests_properties(checksum timer refcount dpdk-memory PROPERTIES
+        ENVIRONMENT "LD_LIBRARY_PATH=${ker_dpdk_library_path}:$ENV{LD_LIBRARY_PATH}")
+endif()

@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <limits.h>
 #include <time.h>
+#include <linux/irqflags.h>
 
 void ker_runtime_init(struct ker_runtime *runtime)
 {
@@ -49,7 +50,7 @@ int ker_runtime_poll(struct ker_runtime *runtime, int64_t now_ns, unsigned int b
     int count = 0;
     if (!runtime || now_ns < 0 || budget > INT_MAX)
         return -EINVAL;
-    if (runtime->polling)
+    if (runtime->polling || ker_local_irq_disabled())
         return -EBUSY;
     if (now_ns < runtime->now_ns)
         return -EINVAL;

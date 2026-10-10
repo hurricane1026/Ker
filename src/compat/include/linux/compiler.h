@@ -9,6 +9,8 @@
 #endif
 #define __force
 #define __user
+#define __must_check __attribute__((warn_unused_result))
+#define __cond_acquires(condition, lock)
 #define likely(x) __builtin_expect(!!(x), 1)
 #define unlikely(x) __builtin_expect(!!(x), 0)
 #define __same_type(a, b) __builtin_types_compatible_p(__typeof__(a), __typeof__(b))

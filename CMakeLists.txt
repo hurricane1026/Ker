@@ -7,15 +7,26 @@ include(CMakePackageConfigHelpers)
 option(KER_BUILD_EXAMPLES "Build API examples" ON)
 include(CTest)
 include(cmake/LinuxPort.cmake)
+option(KER_WITH_DPDK "Build the DPDK memory and packet adapter" ON)
+if(KER_WITH_DPDK)
+    include(cmake/DPDK.cmake)
+endif()
 
 add_library(ker src/ker.c src/checksum.c $<TARGET_OBJECTS:ker_linux_port>)
+if(KER_WITH_DPDK)
+    target_sources(ker PRIVATE $<TARGET_OBJECTS:ker_dpdk_port>)
+    target_link_libraries(ker PRIVATE PkgConfig::DPDK)
+    foreach(ker_dpdk_libdir IN LISTS DPDK_LIBRARY_DIRS)
+        target_link_options(ker INTERFACE "$<BUILD_INTERFACE:LINKER:-rpath-link,${ker_dpdk_libdir}>")
+    endforeach()
+endif()
 add_library(ker::ker ALIAS ker)
 target_compile_features(ker PUBLIC c_std_11)
 target_include_directories(ker PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 target_compile_definitions(ker PRIVATE KER_VERSION="${PROJECT_VERSION}")
-target_link_libraries(ker PRIVATE $<BUILD_INTERFACE:ker_port_headers>)
+target_link_libraries(ker PRIVATE $<BUILD_INTERFACE:ker_port_headers> Threads::Threads)
 set_target_properties(ker PROPERTIES VERSION ${PROJECT_VERSION} SOVERSION 0
     C_VISIBILITY_PRESET hidden)
 
