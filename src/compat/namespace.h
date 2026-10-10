@@ -2,6 +2,8 @@
 #define KER_LINUX_NAMESPACE_H
 
 #include <linux/types.h>
+#include <linux/refcount_types.h>
+#include <linux/spinlock_types.h>
 
 /* Assembler linkage names preserve upstream #ifndef function guards. Macro
  * renaming would incorrectly suppress generic checksum definitions. */
@@ -38,6 +40,17 @@ extern bool timerqueue_add(struct timerqueue_head *, struct timerqueue_node *) K
 extern bool timerqueue_del(struct timerqueue_head *, struct timerqueue_node *) KER_LINUX_LINKAGE(timerqueue_del);
 extern struct timerqueue_node *timerqueue_iterate_next(struct timerqueue_node *) KER_LINUX_LINKAGE(timerqueue_iterate_next);
 extern bool timerqueue_linked_add(struct timerqueue_linked_head *, struct timerqueue_linked_node *) KER_LINUX_LINKAGE(timerqueue_linked_add);
+
+struct mutex;
+enum refcount_saturation_type;
+extern void refcount_warn_saturate(refcount_t *, enum refcount_saturation_type) KER_LINUX_LINKAGE(refcount_warn_saturate);
+extern bool refcount_dec_if_one(refcount_t *) KER_LINUX_LINKAGE(refcount_dec_if_one);
+extern bool refcount_dec_not_one(refcount_t *) KER_LINUX_LINKAGE(refcount_dec_not_one);
+extern bool refcount_dec_and_mutex_lock(refcount_t *, struct mutex *) KER_LINUX_LINKAGE(refcount_dec_and_mutex_lock);
+extern bool refcount_dec_and_lock(refcount_t *, spinlock_t *) KER_LINUX_LINKAGE(refcount_dec_and_lock);
+extern bool refcount_dec_and_lock_irqsave(refcount_t *, spinlock_t *, unsigned long *) KER_LINUX_LINKAGE(refcount_dec_and_lock_irqsave);
+
+#include <linux/export.h>
 
 #undef KER_LINUX_LINKAGE
 #endif

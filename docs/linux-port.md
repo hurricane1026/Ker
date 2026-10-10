@@ -1,16 +1,16 @@
 # 首批 Linux 基础代码移植
 
-这一阶段把 Linux 原始的网络校验和、红黑树和定时器队列编译到用户态 `libker`，验证直接复用内核源码的构建边界，并提供后续收发包和协议定时器所需的基础能力。尚未接入 skb、IP/UDP/TCP 协议处理或 DPDK。
+这一阶段把 Linux 原始的网络校验和、红黑树和定时器队列编译到用户态 `libker`，验证直接复用内核源码的构建边界，并提供后续收发包和协议定时器所需的基础能力。后续已增加原始 refcount 和 DPDK 内存后端，见 [DPDK 内存与 skb 所有权](dpdk-memory.md)。Linux 原始 skb 和 IP/UDP/TCP 协议处理仍待实现。
 
 ## 编译源码和头文件
 
-`cmake/LinuxPort.cmake` 显式列出 `lib/checksum.c`、`lib/rbtree.c`、`lib/timerqueue.c`，编译源文件仍位于固定的 Linux submodule 中，未修改它们。构建时将所需原始头文件按白名单复制到构建目录的 `linux-include`，私有兼容头文件优先于这些头文件。没有把整棵 Linux include 目录暴露给应用。
+`cmake/LinuxPort.cmake` 显式列出 `lib/checksum.c`、`lib/rbtree.c`、`lib/timerqueue.c` 和 `lib/refcount.c`，编译源文件仍位于固定的 Linux submodule 中，未修改它们。构建时将所需原始头文件按白名单复制到构建目录的 `linux-include`，私有兼容头文件优先于这些头文件。没有把整棵 Linux include 目录暴露给应用。
 
-原始头文件包括 `net/checksum.h`、`asm-generic/checksum.h`、`linux/container_of.h`、`linux/rbtree.h`、`linux/rbtree_augmented.h`、`linux/rbtree_types.h`、`linux/timerqueue.h`、`linux/timerqueue_types.h`，以及 Linux UAPI 的 `asm-generic/errno.h` 和 `errno-base.h`。
+新增的原始头文件为 `linux/refcount.h`、`linux/refcount_types.h` 和 `linux/gfp_types.h`。首批原始头文件包括 `net/checksum.h`、`asm-generic/checksum.h`、`linux/container_of.h`、`linux/rbtree.h`、`linux/rbtree_augmented.h`、`linux/rbtree_types.h`、`linux/timerqueue.h`、`linux/timerqueue_types.h`，以及 Linux UAPI 的 `asm-generic/errno.h` 和 `errno-base.h`。
 
 配置阶段扫描这些源码和头文件中的 Linux include，未在白名单或兼容目录中的依赖直接阻止配置，避免静默引用宿主机的同名 UAPI 头文件。扫描也包含条件编译分支，当前有意采用保守策略。
 
-Linux 代码使用 GNU C 扩展，checksum 还通过整数指针访问包缓冲区，因此内部编译使用 `-fno-strict-aliasing`。仅对上游源文件关闭 unused parameter 警告，因为它们包含空的回调实现；自有源文件仍可使用 `-Wall -Wextra -Werror`。原始头文件作为 system include 处理。
+Linux 代码使用 GNU C 扩展，checksum 还通过整数指针访问包缓冲区，因此内部编译使用 `-fno-strict-aliasing`，并用 `-fwrapv` 保留内核 refcount 所需的有符号回绕语义。仅对上游源文件关闭 unused parameter 警告，因为它们包含空的回调实现。`lib/refcount.c` 还局部关闭 sign compare 警告，以保留上游对负饱和值的无符号比较；自有源文件仍可使用 `-Wall -Wextra -Werror`。原始头文件作为 system include 处理。
 
 ## 私有兼容层
 
@@ -43,7 +43,7 @@ API 返回零表示成功，失败返回负 errno，并保持输出值不变。�
 
 timer 必须先初始化，入队后不能移动或复制，释放前必须取消。`ker_timer_arm` 支持添加与重设；将仍在队列中的 timer 移到其他 runtime 返回 `-EXDEV`。`ker_timer_cancel` 可重复调用。
 
-`ker_runtime_poll` 接收单调递增的纳秒时间和回调预算。时间倒退返回 `-EINVAL`，递归轮询返回 `-EBUSY`。到期 timer 先移出队列，再执行回调，回调可取消其他 timer、重设自身或释放自身。重复重设到当前时间的 timer 也受预算限制。相同到期时间的 timer 不承诺回调顺序。
+`ker_runtime_poll` 接收单调递增的纳秒时间和回调预算。时间倒退返回 `-EINVAL`，递归轮询或本地事件被屏蔽时返回 `-EBUSY`。到期 timer 先移出队列，再执行回调，回调可取消其他 timer、重设自身或释放自身。重复重设到当前时间的 timer 也受预算限制。相同到期时间的 timer 不承诺回调顺序。
 
 `ker_monotonic_ns` 提供 CLOCK_MONOTONIC 时间。测试可以直接推进显式时间而无需 sleep。`ker_runtime_next_deadline` 供后续 worker 选择轮询或等待策略；cleanup 取消所有待执行 timer 而不调用回调。runtime 尚未提供 Linux timer_list、jiffies、hrtimer、调度器或 softirq 接口。
 

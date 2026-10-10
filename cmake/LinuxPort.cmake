@@ -8,6 +8,9 @@ set(KER_LINUX_INCLUDE "${PROJECT_BINARY_DIR}/linux-include")
 set(KER_LINUX_HEADERS
     asm-generic/checksum.h
     linux/container_of.h
+    linux/gfp_types.h
+    linux/refcount.h
+    linux/refcount_types.h
     linux/rbtree.h
     linux/rbtree_augmented.h
     linux/rbtree_types.h
@@ -16,6 +19,7 @@ set(KER_LINUX_HEADERS
     net/checksum.h)
 set(KER_LINUX_SOURCES
     "${KER_LINUX_DIR}/lib/checksum.c"
+    "${KER_LINUX_DIR}/lib/refcount.c"
     "${KER_LINUX_DIR}/lib/rbtree.c"
     "${KER_LINUX_DIR}/lib/timerqueue.c")
 
@@ -66,13 +70,16 @@ target_include_directories(ker_port_headers INTERFACE
     "${PROJECT_SOURCE_DIR}/src")
 target_include_directories(ker_port_headers SYSTEM INTERFACE "${KER_LINUX_INCLUDE}")
 target_compile_options(ker_port_headers INTERFACE
-    -include "${PROJECT_SOURCE_DIR}/src/compat/namespace.h"
-    -fno-strict-aliasing)
+    "SHELL:-include \"${PROJECT_SOURCE_DIR}/src/compat/namespace.h\""
+    -fno-strict-aliasing -fwrapv)
 
-add_library(ker_linux_port OBJECT ${KER_LINUX_SOURCES} src/runtime/timer.c)
+find_package(Threads REQUIRED)
+add_library(ker_linux_port OBJECT ${KER_LINUX_SOURCES}
+    src/runtime/timer.c src/runtime/irq.c src/compat/locks.c)
 # Upstream uses empty callbacks with intentionally unused parameters.
 set_source_files_properties(${KER_LINUX_SOURCES} PROPERTIES COMPILE_OPTIONS -Wno-unused-parameter)
-target_link_libraries(ker_linux_port PRIVATE ker_port_headers)
+set_property(SOURCE "${KER_LINUX_DIR}/lib/refcount.c" APPEND PROPERTY COMPILE_OPTIONS -Wno-sign-compare)
+target_link_libraries(ker_linux_port PRIVATE ker_port_headers Threads::Threads)
 target_compile_features(ker_linux_port PRIVATE c_std_11)
 set_target_properties(ker_linux_port PROPERTIES
     POSITION_INDEPENDENT_CODE ON C_VISIBILITY_PRESET hidden C_EXTENSIONS ON)
