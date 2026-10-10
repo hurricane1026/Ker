@@ -60,5 +60,6 @@ worker 和最终回收。worker RX 回调测试按预算接管 IP/ARP EtherType 
 导入测试逐字验证片段、稳定输出及版权来源，使用真实编译器拒绝未适配配置，
 验证 host endian 常量恢复，并确认 Linux 输入变更会在生成文件之前被拒绝。
 
-下一步适配原始 NAPI 调度与接收分发，然后接入 ARP、IPv4、ICMP 和邻居/地址
+单 worker 的 NAPI 调度与完成已接入，范围见 [NAPI 边界](linux-napi.md)。
+下一步适配原始接收分发，然后接入 ARP、IPv4、ICMP 和邻居/地址
 配置，以软件测试链路验证 ARP 应答与 ping。公共 capability 仍仅声明 checksum。
