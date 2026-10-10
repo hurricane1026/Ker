@@ -47,8 +47,7 @@ add/remove/lookup/release/snapshot 只能由同一个初始化 worker 调用。n
 
 ## 边界和验证
 
-ARP parms 当前仅提供对象/设备关联和引用基础，data/reachable-time 没有配置
-动态 NUD 参数。probe timers、GC/managed work、pending skb/proxy queues、
+ARP parms 提供对象/设备关联、引用基础及显式离线 timing/probe 参数配置。probe timers、GC/managed work、pending skb/proxy queues、
 header cache、output callbacks 和 neighbor learning 不活跃；没有 neigh_update、
 neigh_event_send、ARP 收包解析、自动应答或 PMD 发送。上层可取得稳定的永久
 MAC 用于现有原始 ARP 构造测试，但这不代表解析流程已实现。
@@ -61,3 +60,31 @@ worker、duplicate key、表上限与底层池耗尽的区别、容量回收和�
 
 下一步接动态邻居更新、probe/重试定时器及发送调度，再接真正的 ARP 接收与
 IPv4/ICMP 入口。公共 capability 仍仅为 checksum，当前无法提供网络服务。
+
+## 离线邻居参数适配
+
+`ker_neighbor_configure` 在空表且无额外 parms 引用、活 skb、NAPI 或协议注册时，
+配置明确的 retrans、base reachable、delay tick 数以及 unicast、multicast、
+multicast reprobe 次数。timer_list profile 的 tick 为 1ms；没有隐式默认值。
+当前永久邻居表仍不发 probe，也不因此启用动态解析。
+
+原始 `neigh_var_set`、NEIGH_VAR 系列宏、`neigh_set_reach_time` 和
+`neigh_rand_reach_time` 均逐字导入并保留来源。原始 set helper 更新真实
+`data_state` 位图，并通过 WRITE_ONCE 写参数。适配层仅提供 namespaced
+原子 set-bit 与有界随机数 primitive，不改 Linux 函数或数据布局。
+随机 reachable time 遵循上游 `base / 2 + random_below(base)`，范围为
+`[floor(base/2), base + floor(base/2))`。真实 host getrandom 加拒绝采样
+避免 modulo bias；这是离线配置路径，允许等待系统 entropy，不属于包轮询路径。
+熵源失败会 fail closed，不能伪装为固定随机结果。
+
+所有 interval 必须非零且能存入 Linux 的 signed int；reachable base 额外限制
+为 `2 * floor(INT_MAX / 3)`，保证随机上界不会截断。每个 probe 次数及
+unicast 加对应 multicast 总和必须能存入 signed int。0 probes 允许显式禁用。
+APP_PROBES 固定为 0 并标记已配置，因为当前没有 ARPD application probe 服务；
+其余 proxy、queue、GC 参数仍不启用。全部输入及离线条件通过后才写入字段；
+非法配置、错误 worker 或在线状态不会部分修改已有参数。配置不分配 DPDK 内存。
+
+真实 EAL 测试覆盖配置读取、真实 data_state 位图、错误 worker、额外 parameter
+引用与活 skb 阻止配置、已有条目阻止重配、无分配路径、非法值原子拒绝，
+以及靠近 INT_MAX 的随机范围。导入测试同时校验 neighbour.c 原始随机函数的
+逐字代码和 provenance，并拒绝 unreviewed upstream source。

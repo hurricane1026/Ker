@@ -53,7 +53,7 @@ with tempfile.TemporaryDirectory(prefix="ker-skb-import-") as temporary:
         path = linux / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes((root / "third_party/linux" / name).read_bytes())
-    changed = linux / "include/net/neighbour.h"
+    changed = linux / "net/core/neighbour.c"
     changed.write_text(changed.read_text() + "\n/* unreviewed change */\n")
     args[args.index("--linux") + 1] = str(linux)
     args[args.index("--out") + 1] = str(directory / "rejected")

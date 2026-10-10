@@ -61,3 +61,7 @@ DPDK 默认启用，从 fork 的本地安装目录查找，要求版本至少为
 The private [Linux timer_list adapter](docs/linux-timer-list.md) associates unchanged
 native timer fields with worker timerqueues, including scoped jiffies, bounded
 callback delivery, shutdown, and lifetime guards.
+
+The private neighbor adapter also accepts explicit offline timing and probe
+parameters through verbatim Linux setters and reachable-time randomization;
+this does not enable dynamic neighbor resolution yet.
