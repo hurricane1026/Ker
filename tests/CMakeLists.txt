@@ -16,6 +16,12 @@ if(KER_WITH_DPDK)
     target_link_libraries(ker-dpdk-memory-test PRIVATE
         ker_port_headers ker_linux_port ker_dpdk_port PkgConfig::DPDK Threads::Threads)
     add_test(NAME dpdk-memory COMMAND ker-dpdk-memory-test)
+    add_executable(ker-worker-test worker.c)
+    target_compile_definitions(ker-worker-test PRIVATE _GNU_SOURCE)
+    target_link_libraries(ker-worker-test PRIVATE
+        ker_port_headers ker_linux_port ker_dpdk_port PkgConfig::DPDK Threads::Threads)
+    add_test(NAME worker COMMAND ker-worker-test)
+    set_tests_properties(worker PROPERTIES TIMEOUT 30)
     add_executable(ker-skb-test skb.c)
     target_compile_definitions(ker-skb-test PRIVATE _GNU_SOURCE)
     target_link_libraries(ker-skb-test PRIVATE
@@ -27,6 +33,6 @@ if(KER_WITH_DPDK)
     set_tests_properties(skb PROPERTIES TIMEOUT 30)
     set_tests_properties(dpdk-memory PROPERTIES TIMEOUT 30)
     list(JOIN DPDK_LIBRARY_DIRS ":" ker_dpdk_library_path)
-    set_tests_properties(checksum timer refcount dpdk-memory skb PROPERTIES
+    set_tests_properties(checksum timer refcount dpdk-memory skb worker PROPERTIES
         ENVIRONMENT "LD_LIBRARY_PATH=${ker_dpdk_library_path}:$ENV{LD_LIBRARY_PATH}")
 endif()
