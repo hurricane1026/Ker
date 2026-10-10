@@ -21,6 +21,17 @@ struct atomic_pool {
     size_t requests;
     size_t failures;
 };
+/* Capacity and hysteresis state share one CAS word, so concurrent returns
+ * cannot apply a stale pressure transition to a newer occupancy. */
+#define BUDGET_PRESSURE (SIZE_MAX / 2 + 1)
+#define BUDGET_CAPACITY (BUDGET_PRESSURE - 1)
+struct memory_budget {
+    struct ker_memory_budget_config config;
+    size_t state;
+    size_t peak;
+    size_t denied;
+};
+static _Thread_local struct memory_budget budgets[KER_MEMORY_DOMAIN_COUNT];
 struct allocation {
     uint64_t magic;
     size_t capacity;
@@ -28,6 +39,7 @@ struct allocation {
     void *base;
     struct kmem_cache *cache;
     struct atomic_pool *atomic_pool;
+    struct memory_budget *budget;
 };
 #define HEADER_SIZE RTE_CACHE_LINE_ROUNDUP(sizeof(struct allocation))
 static _Thread_local bool initialized;
@@ -58,6 +70,7 @@ int ker_memory_init(int socket_id, unsigned int cache_objects)
         if (!found)
             return -EINVAL;
     }
+    memset(budgets, 0, sizeof(budgets));
     memory_lcore = rte_lcore_id();
     memory_socket = socket_id;
     object_count = cache_objects;
@@ -79,6 +92,76 @@ int ker_memory_shutdown(void)
     initialized = false;
     fail_after = -1;
     return 0;
+}
+int ker_memory_budget_configure(enum ker_memory_domain domain,
+    const struct ker_memory_budget_config *config)
+{
+    if (!worker_active() || ker_local_irq_disabled())
+        return -EPERM;
+    if ((unsigned int)domain >= KER_MEMORY_DOMAIN_COUNT || !config ||
+        config->limit > BUDGET_CAPACITY || config->high > BUDGET_CAPACITY ||
+        (!config->high && config->low) ||
+        (config->high && config->low >= config->high) ||
+        (config->limit && config->high > config->limit))
+        return -EINVAL;
+    if (ker_memory_live_allocations())
+        return -EBUSY;
+    budgets[domain] = (struct memory_budget){.config = *config};
+    return 0;
+}
+int ker_memory_budget_stats(enum ker_memory_domain domain,
+    struct ker_memory_budget_stats *stats)
+{
+    if (!worker_active())
+        return -EPERM;
+    if ((unsigned int)domain >= KER_MEMORY_DOMAIN_COUNT || !stats)
+        return -EINVAL;
+    struct memory_budget *budget = &budgets[domain];
+    size_t state = __atomic_load_n(&budget->state, __ATOMIC_ACQUIRE);
+    *stats = (struct ker_memory_budget_stats){.used = state & BUDGET_CAPACITY,
+        .peak = __atomic_load_n(&budget->peak, __ATOMIC_RELAXED),
+        .denied = __atomic_load_n(&budget->denied, __ATOMIC_RELAXED),
+        .pressure = !!(state & BUDGET_PRESSURE)};
+    return 0;
+}
+static size_t budget_state(struct memory_budget *budget, size_t old, size_t used)
+{
+    bool pressure = budget->config.high &&
+        (used >= budget->config.high || ((old & BUDGET_PRESSURE) && used > budget->config.low));
+    return used | (pressure ? BUDGET_PRESSURE : 0);
+}
+static bool budget_reserve(struct memory_budget *budget, size_t capacity)
+{
+    size_t old = __atomic_load_n(&budget->state, __ATOMIC_RELAXED);
+    for (;;) {
+        size_t used = old & BUDGET_CAPACITY;
+        if (capacity > BUDGET_CAPACITY - used ||
+            (budget->config.limit && capacity > budget->config.limit - used)) {
+            __atomic_add_fetch(&budget->denied, 1, __ATOMIC_RELAXED);
+            return false;
+        }
+        size_t next = budget_state(budget, old, used + capacity);
+        if (__atomic_compare_exchange_n(&budget->state, &old, next, false,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+            size_t peak = __atomic_load_n(&budget->peak, __ATOMIC_RELAXED);
+            while (peak < used + capacity &&
+                   !__atomic_compare_exchange_n(&budget->peak, &peak, used + capacity,
+                                                false, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {}
+            return true;
+        }
+    }
+}
+static void budget_release(struct memory_budget *budget, size_t capacity)
+{
+    size_t old = __atomic_load_n(&budget->state, __ATOMIC_RELAXED);
+    for (;;) {
+        size_t used = old & BUDGET_CAPACITY;
+        WARN_ON_ONCE(capacity > used);
+        size_t next = budget_state(budget, old, used - capacity);
+        if (__atomic_compare_exchange_n(&budget->state, &old, next, false,
+                                        __ATOMIC_RELEASE, __ATOMIC_RELAXED))
+            return;
+    }
 }
 void ker_memory_fail_after(long count) { fail_after = count; }
 size_t ker_memory_live_allocations(void)
@@ -111,12 +194,12 @@ static struct allocation *header_of(const void *ptr)
     return header;
 }
 static void *initialize_allocation(void *base, size_t capacity, size_t requested,
-    struct kmem_cache *cache, gfp_t flags)
+    struct kmem_cache *cache, gfp_t flags, struct memory_budget *budget)
 {
     void *ptr = (unsigned char *)base + HEADER_SIZE;
     struct allocation *header = (struct allocation *)ptr - 1;
     *header = (struct allocation){.magic = KER_MEMORY_MAGIC, .capacity = capacity,
-        .requested = requested, .base = base, .cache = cache};
+        .requested = requested, .base = base, .cache = cache, .budget = budget};
     if (flags & __GFP_ZERO)
         memset(ptr, 0, capacity);
     __atomic_add_fetch(&live_allocations, 1, __ATOMIC_RELAXED);
@@ -200,23 +283,34 @@ void *ker_kmalloc(size_t size, gfp_t flags)
                 continue;
             void *base;
             ++pool->requests;
-            /* Never steal from larger classes or fall back to heap. */
-            if (should_fail() || rte_mempool_get(pool->pool, &base) != 0) {
+            struct memory_budget *budget = &budgets[KER_MEMORY_ATOMIC];
+            if (!budget_reserve(budget, pool->size)) {
                 ++pool->failures;
                 return NULL;
             }
-            void *ptr = initialize_allocation(base, pool->size, size, NULL, flags);
+            /* Never steal from larger classes or fall back to heap. */
+            if (should_fail() || rte_mempool_get(pool->pool, &base) != 0) {
+                ++pool->failures;
+                budget_release(budget, pool->size);
+                return NULL;
+            }
+            void *ptr = initialize_allocation(base, pool->size, size, NULL, flags, budget);
             header_of(ptr)->atomic_pool = pool;
             __atomic_add_fetch(&pool->in_use, 1, __ATOMIC_RELAXED);
             return ptr;
         }
         return NULL;
     }
-    if (should_fail())
+    struct memory_budget *budget = &budgets[KER_MEMORY_CONTROL];
+    if (!budget_reserve(budget, capacity))
         return NULL;
-    void *base = rte_malloc_socket("ker_control", capacity + HEADER_SIZE,
+    void *base = should_fail() ? NULL : rte_malloc_socket("ker_control", capacity + HEADER_SIZE,
                                   RTE_CACHE_LINE_SIZE, memory_socket);
-    return base ? initialize_allocation(base, capacity, size, NULL, flags) : NULL;
+    if (!base) {
+        budget_release(budget, capacity);
+        return NULL;
+    }
+    return initialize_allocation(base, capacity, size, NULL, flags, budget);
 }
 void *ker_kzalloc(size_t size, gfp_t flags) { return ker_kmalloc(size, flags | __GFP_ZERO); }
 void *ker_kcalloc(size_t count, size_t size, gfp_t flags)
@@ -237,6 +331,8 @@ void ker_kfree(const void *ptr)
     WARN_ON_ONCE(header->cache != NULL);
     void *base = header->base;
     struct atomic_pool *pool = header->atomic_pool;
+    struct memory_budget *budget = header->budget;
+    size_t capacity = header->capacity;
     if (pool)
         WARN_ON_ONCE(!worker_active());
     header->magic = 0;
@@ -251,6 +347,7 @@ void ker_kfree(const void *ptr)
     } else {
         rte_free(base);
     }
+    budget_release(budget, capacity);
     __atomic_sub_fetch(&live_allocations, 1, __ATOMIC_RELEASE);
 }
 void *ker_krealloc(void *ptr, size_t size, gfp_t flags)
@@ -307,11 +404,17 @@ void *ker_kmem_cache_alloc(struct kmem_cache *cache, gfp_t flags)
     gfp_t profile = flags & ~(__GFP_ZERO | __GFP_NOWARN);
     if (!worker_active() || !cache ||
         (profile != GFP_KERNEL && profile != GFP_ATOMIC &&
-         profile != (GFP_NOWAIT & ~__GFP_NOWARN)) || should_fail())
+         profile != (GFP_NOWAIT & ~__GFP_NOWARN)))
         return NULL;
-    if (rte_mempool_generic_get(cache->pool, &base, 1, NULL) != 0)
+    size_t capacity = ker_kmalloc_size_roundup(cache->size);
+    struct memory_budget *budget = &budgets[KER_MEMORY_CACHE];
+    if (!budget_reserve(budget, capacity))
         return NULL;
-    return initialize_allocation(base, ker_kmalloc_size_roundup(cache->size), cache->size, cache, flags);
+    if (should_fail() || rte_mempool_generic_get(cache->pool, &base, 1, NULL) != 0) {
+        budget_release(budget, capacity);
+        return NULL;
+    }
+    return initialize_allocation(base, capacity, cache->size, cache, flags, budget);
 }
 void *ker_kmem_cache_zalloc(struct kmem_cache *cache, gfp_t flags)
 {
@@ -324,8 +427,11 @@ void ker_kmem_cache_free(struct kmem_cache *cache, void *ptr)
     struct allocation *header = header_of(ptr);
     WARN_ON_ONCE(!cache || header->cache != cache || rte_lcore_id() == LCORE_ID_ANY);
     void *base = header->base;
+    struct memory_budget *budget = header->budget;
+    size_t capacity = header->capacity;
     header->magic = 0;
-    __atomic_sub_fetch(&live_allocations, 1, __ATOMIC_RELAXED);
     rte_mempool_generic_put(cache->pool, &base, 1, NULL);
+    budget_release(budget, capacity);
+    __atomic_sub_fetch(&live_allocations, 1, __ATOMIC_RELEASE);
 }
 unsigned int ker_kmem_cache_size(struct kmem_cache *cache) { return cache ? cache->size : 0; }
