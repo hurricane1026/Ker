@@ -162,9 +162,13 @@ int main(void)
     for (unsigned int i = 0; i < 30; ++i) ker_packet_free(occupied[i]);
     CHECK(ker_worker_poll(&worker, 2, &result) == 0 && result.tx == 1 && state.sent == 1 && !state.pending);
     CHECK(ker_worker_cleanup(&worker) == 0);
-    CHECK(ker_skb_queue_cleanup(&queue) == 0 && ker_skb_queue_cleanup(&other) == 0 && !context.queue_live);
-    CHECK(ker_skb_context_cleanup(&other_context) == 0 && ker_skb_context_cleanup(&context) == 0);
+    CHECK(ker_skb_queue_cleanup(&queue) == 0 && context.queue_live == 1);
     CHECK(rte_mempool_avail_count(pool.mbufs) == 31 && ker_packet_pool_cleanup(&pool) == 0);
+    out = (void *)(uintptr_t)1;
+    CHECK(ker_skb_queue_pop(&other, &out) == -ESHUTDOWN && out == (void *)(uintptr_t)1);
+    CHECK(ker_skb_context_cleanup(&context) == -EBUSY);
+    CHECK(ker_skb_queue_cleanup(&other) == 0 && !context.queue_live);
+    CHECK(ker_skb_context_cleanup(&other_context) == 0 && ker_skb_context_cleanup(&context) == 0);
     CHECK(ker_memory_shutdown() == 0 && rte_eal_cleanup() == 0);
     puts("skb queue: native FIFO, count/truesize bounds, transfer guards, purge and worker TX retry passed");
     return 0;

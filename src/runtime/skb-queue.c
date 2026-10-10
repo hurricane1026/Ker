@@ -4,14 +4,15 @@
 #include <rte_lcore.h>
 #include <errno.h>
 #include <limits.h>
-static int valid(struct ker_skb_queue *queue)
+static int valid(struct ker_skb_queue *queue, bool require_packet_pool)
 {
     if (!queue || !queue->context) return -EINVAL;
     if (rte_lcore_id() != queue->context->lcore) return -EXDEV;
     if (queue->purging) return -EBUSY;
     struct ker_memory_budget_stats stats;
-    if (!queue->context->descriptors || !queue->context->packets->mbufs ||
+    if (!queue->context->descriptors || !queue->context->packets ||
         ker_memory_budget_stats(KER_MEMORY_CONTROL, &stats)) return -ESHUTDOWN;
+    if (require_packet_pool && !queue->context->packets->mbufs) return -ESHUTDOWN;
     return 0;
 }
 int ker_skb_queue_init(struct ker_skb_queue *queue, struct ker_skb_context *context,
@@ -31,7 +32,7 @@ int ker_skb_queue_init(struct ker_skb_queue *queue, struct ker_skb_context *cont
 }
 int ker_skb_queue_push(struct ker_skb_queue *queue, struct sk_buff **packet)
 {
-    int error = valid(queue);
+    int error = valid(queue, true);
     if (error) return error;
     if (!packet || !*packet) return -EINVAL;
     struct sk_buff *skb = *packet;
@@ -59,7 +60,7 @@ static struct sk_buff *pop(struct ker_skb_queue *queue)
 }
 int ker_skb_queue_pop(struct ker_skb_queue *queue, struct sk_buff **packet)
 {
-    int error = valid(queue);
+    int error = valid(queue, true);
     if (error) return error;
     if (!packet) return -EINVAL;
     struct sk_buff *skb = pop(queue);
@@ -69,7 +70,7 @@ int ker_skb_queue_pop(struct ker_skb_queue *queue, struct sk_buff **packet)
 }
 int ker_skb_queue_purge(struct ker_skb_queue *queue, unsigned int budget)
 {
-    int error = valid(queue);
+    int error = valid(queue, true);
     if (error) return error;
     if (budget > INT_MAX) return -EINVAL;
     queue->purging = true;
@@ -85,7 +86,9 @@ int ker_skb_queue_purge(struct ker_skb_queue *queue, unsigned int budget)
 }
 int ker_skb_queue_cleanup(struct ker_skb_queue *queue)
 {
-    int error = valid(queue);
+    /* Pool teardown is allowed before queue teardown when the queue is empty.
+     * Keep the context pinned until this cleanup releases queue_live. */
+    int error = valid(queue, false);
     if (error) return error;
     if (queue->native.qlen || queue->bytes) return -EBUSY;
     BUG_ON(!queue->context->queue_live);
