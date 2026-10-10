@@ -54,7 +54,24 @@ int ker_packet_make_writable(struct ker_packet_pool *pool, struct rte_mbuf **pac
         return -ENOTSUP;
     if (RTE_MBUF_DIRECT(old) && rte_mbuf_refcnt_read(old) == 1)
         return 0;
-    struct rte_mbuf *copy = rte_pktmbuf_copy(old, pool->mbufs, 0, UINT32_MAX);
+    struct rte_mbuf *copy;
+    if (old->pkt_len == 0) {
+        copy = rte_pktmbuf_alloc(pool->mbufs);
+        if (copy) {
+            /* Match rte_pktmbuf_copy's metadata handling for an empty packet. */
+            copy->port = old->port;
+            copy->vlan_tci = old->vlan_tci;
+            copy->vlan_tci_outer = old->vlan_tci_outer;
+            copy->tx_offload = old->tx_offload;
+            copy->hash = old->hash;
+            copy->packet_type = old->packet_type;
+            rte_mbuf_dynfield_copy(copy, old);
+            copy->ol_flags |= old->ol_flags &
+                ~(RTE_MBUF_F_INDIRECT | RTE_MBUF_F_EXTERNAL);
+        }
+    } else {
+        copy = rte_pktmbuf_copy(old, pool->mbufs, 0, UINT32_MAX);
+    }
     if (!copy)
         return -ENOMEM;
     if (copy->nb_segs != 1 || (uint32_t)old->data_off + old->data_len > copy->buf_len) {

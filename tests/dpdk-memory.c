@@ -120,6 +120,37 @@ static void test_packet_pool(void)
     for (int i = 1; i < 5; ++i)
         ker_packet_free(spares[i]);
     CHECK(rte_mempool_avail_count(pool.mbufs) == 7);
+    /* Empty shared packets need a descriptor allocation instead of copy(). */
+    packet = ker_packet_alloc(&pool);
+    CHECK(packet != NULL && packet->pkt_len == 0);
+    packet->data_off += 16;
+    memset(packet->buf_addr, 0x4d, packet->data_off);
+    packet->vlan_tci = 456;
+    packet->packet_type = RTE_PTYPE_L2_ETHER;
+    packet->ol_flags |= RTE_MBUF_F_RX_VLAN_STRIPPED;
+    clone = ker_packet_clone(&pool, packet);
+    CHECK(clone != NULL && !RTE_MBUF_DIRECT(clone));
+    for (int i = 0; i < 5; ++i) {
+        spares[i] = ker_packet_alloc(&pool);
+        CHECK(spares[i] != NULL);
+    }
+    old_clone = clone;
+    CHECK(ker_packet_make_writable(&pool, &clone) == -ENOMEM);
+    CHECK(clone == old_clone && rte_mbuf_refcnt_read(packet) == 2);
+    ker_packet_free(spares[0]);
+    CHECK(ker_packet_make_writable(&pool, &clone) == 0);
+    CHECK(clone != old_clone && RTE_MBUF_DIRECT(clone));
+    CHECK(clone->pkt_len == 0 && clone->data_len == 0);
+    CHECK(clone->data_off == packet->data_off);
+    CHECK(clone->vlan_tci == 456 && clone->packet_type == RTE_PTYPE_L2_ETHER);
+    CHECK(clone->ol_flags & RTE_MBUF_F_RX_VLAN_STRIPPED);
+    CHECK(memcmp(clone->buf_addr, packet->buf_addr, packet->data_off) == 0);
+    CHECK(rte_mbuf_refcnt_read(packet) == 1);
+    ker_packet_free(packet);
+    ker_packet_free(clone);
+    for (int i = 1; i < 5; ++i)
+        ker_packet_free(spares[i]);
+    CHECK(rte_mempool_avail_count(pool.mbufs) == 7);
     /* Holding two references to one direct descriptor also requires COW. */
     packet = ker_packet_alloc(&pool);
     CHECK(packet != NULL);
