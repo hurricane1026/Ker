@@ -45,7 +45,7 @@ int ker_eth_device_cleanup(struct ker_eth_device *device)
         return 0;
     if (rte_lcore_id() != device->lcore)
         return -EXDEV;
-    if (device->context->live || device->napi_live)
+    if (device->context->live || device->napi_live || device->protocol_live)
         return -EBUSY;
     mutex_destroy(&device->native->dev.mutex);
     mutex_destroy(&device->native->lock);

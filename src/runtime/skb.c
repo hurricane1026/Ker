@@ -96,7 +96,7 @@ int ker_skb_context_cleanup(struct ker_skb_context *ctx)
         return 0;
     if (!context_owned(ctx))
         return -EXDEV;
-    if (ctx->live)
+    if (ctx->live || ctx->receive_live)
         return -EBUSY;
     kmem_cache_destroy(ctx->descriptors);
     *ctx = (struct ker_skb_context){0};
@@ -144,6 +144,18 @@ int ker_skb_alloc(struct ker_skb_context *ctx, unsigned int payload_capacity,
     if (error)
         ker_packet_free(packet);
     return error;
+}
+int ker_skb_validate(struct sk_buff *skb, struct ker_skb_context *ctx)
+{
+    int error = supported(skb);
+    if (error) return error;
+    if (envelope(skb)->owner != ctx) return -EXDEV;
+    if (refcount_read(&skb->users) == 0 ||
+        (uintptr_t)skb->data < (uintptr_t)skb->head ||
+        skb_headroom(skb) > skb_end_offset(skb) ||
+        skb->len > skb_end_offset(skb) - skb_headroom(skb) ||
+        skb_tail_pointer(skb) != skb->data + skb->len) return -EINVAL;
+    return 0;
 }
 int ker_skb_get(struct sk_buff *skb)
 {

@@ -1,0 +1,9 @@
+{
+  "files": {
+    "include/linux/netdevice.h": "ad3de208c90c3ea51f7b4e234a63a6331732adcf64d8fd4d7b7681f89fe59117",
+    "include/linux/skbuff.h": "bcc75ea787040e9073f5bd3ae70fc5da4c2f9ae40694d565369c8093b7166e5b",
+    "include/uapi/linux/if_ether.h": "3b8e80de0d836b872edf92a63e1c9cf3db0a6faf65637c56fb3210ce0afc895b",
+    "net/core/dev.c": "3f6a1bbafe602aaace29e19237e2fd93f8a61696042ef629630e21169a22f16c",
+    "include/linux/if_vlan.h": "241902e8c7ba11f464ecbc296fba90306dd3474864798ec808cb5f3929d19786"
+  }
+}

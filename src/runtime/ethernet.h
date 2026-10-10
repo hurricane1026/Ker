@@ -9,12 +9,15 @@ struct ker_eth_device {
     struct net_device *native;
     struct ker_skb_context *context;
     unsigned int lcore;
+    void *receive_runtime; /* single receiver for bound protocol lists */
+    unsigned int protocol_handlers;
+    unsigned int protocol_live; /* registrations and dispatch pin */
     unsigned int napi_live; /* attached NAPI contexts pin this device */
 };
 int ker_eth_device_init(struct ker_eth_device *device, struct ker_skb_context *context,
     const char *name, int ifindex, const unsigned char mac[6]);
 /* Conservatively refuses cleanup while ANY skb in its context is live,
- * including clones, and while a NAPI context is attached. */
+ * including clones, and while NAPI/protocol contexts or dispatch pin the device. */
 int ker_eth_device_cleanup(struct ker_eth_device *device);
 /* Adopts mbuf only on success. Short or odd-aligned L2 headers are rejected
  * before mutation. Returns a classified skb owned by the caller; no dispatch. */
