@@ -63,12 +63,22 @@ if(KER_WITH_DPDK)
     add_test(NAME arp-import COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/arp-import.py" "${PROJECT_SOURCE_DIR}"
         "${CMAKE_C_COMPILER}" "${KER_LINUX_INCLUDE}" "${KER_SKB_IMPORT}" "${KER_ETH_IMPORT}" ${DPDK_INCLUDE_DIRS})
+    add_executable(ker-address-test ipv4-address.c)
+    target_compile_definitions(ker-address-test PRIVATE _GNU_SOURCE)
+    target_link_libraries(ker-address-test PRIVATE ker_address_headers ker_address_port ker_arp_headers
+        ker_arp_port ker_receive_headers ker_receive_port ker_napi_port ker_eth_port
+        ker_linux_port ker_dpdk_port ker_skb_port Threads::Threads)
+    add_test(NAME ipv4-address COMMAND ker-address-test)
+    set_tests_properties(ipv4-address PROPERTIES TIMEOUT 30)
+    add_test(NAME address-import COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/address-import.py" "${PROJECT_SOURCE_DIR}"
+        "${CMAKE_C_COMPILER}" "${KER_LINUX_INCLUDE}" "${KER_SKB_IMPORT}" "${KER_ETH_IMPORT}" ${DPDK_INCLUDE_DIRS})
     add_test(NAME skb-import COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/skb-import.py" "${PROJECT_SOURCE_DIR}"
         "${CMAKE_C_COMPILER}" "${KER_LINUX_INCLUDE}" ${DPDK_INCLUDE_DIRS})
     set_tests_properties(skb PROPERTIES TIMEOUT 30)
     set_tests_properties(dpdk-memory PROPERTIES TIMEOUT 30)
     list(JOIN DPDK_LIBRARY_DIRS ":" ker_dpdk_library_path)
-    set_tests_properties(checksum timer refcount dpdk-memory skb worker ethernet napi receive arp PROPERTIES
+    set_tests_properties(checksum timer refcount dpdk-memory skb worker ethernet napi receive arp ipv4-address PROPERTIES
         ENVIRONMENT "LD_LIBRARY_PATH=${ker_dpdk_library_path}:$ENV{LD_LIBRARY_PATH}")
 endif()
