@@ -1,0 +1,5 @@
+/build/
+/build-*/
+/third_party/dpdk/build/
+/third_party/dpdk/install/
+/third_party/linux/out/
