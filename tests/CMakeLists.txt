@@ -101,12 +101,22 @@ if(KER_WITH_DPDK)
         ker_address_port ker_napi_port ker_eth_port ker_linux_port ker_dpdk_port ker_skb_port Threads::Threads)
     add_test(NAME skb-queue COMMAND ker-skb-queue-test)
     set_tests_properties(skb-queue PROPERTIES TIMEOUT 30)
+    add_executable(ker-fstack-adapted-test fstack-adapted.c)
+    target_compile_definitions(ker-fstack-adapted-test PRIVATE _GNU_SOURCE)
+    target_link_libraries(ker-fstack-adapted-test PRIVATE ker_neighbor_headers ker_neighbor_port
+        ker_address_port ker_napi_port ker_eth_port ker_linux_port ker_dpdk_port ker_skb_port Threads::Threads)
+    foreach(fstack_case mbuf-release clock-monotonic empty-export null-context packet-export
+            multiseg-boundary queue-isolation queue-full-ownership)
+        add_test(NAME fstack-${fstack_case} COMMAND ker-fstack-adapted-test ${fstack_case})
+        set_tests_properties(fstack-${fstack_case} PROPERTIES TIMEOUT 30)
+        list(APPEND ker_fstack_tests fstack-${fstack_case})
+    endforeach()
     add_test(NAME skb-import COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/skb-import.py" "${PROJECT_SOURCE_DIR}"
         "${CMAKE_C_COMPILER}" "${KER_LINUX_INCLUDE}" ${DPDK_INCLUDE_DIRS})
     set_tests_properties(skb PROPERTIES TIMEOUT 30)
     set_tests_properties(dpdk-memory PROPERTIES TIMEOUT 30)
     list(JOIN DPDK_LIBRARY_DIRS ":" ker_dpdk_library_path)
-    set_tests_properties(checksum timer refcount dpdk-memory skb worker ethernet napi receive arp ipv4-address neighbor arp-receive skb-queue PROPERTIES
+    set_tests_properties(checksum timer refcount dpdk-memory skb worker ethernet napi receive arp ipv4-address neighbor arp-receive skb-queue ${ker_fstack_tests} PROPERTIES
         ENVIRONMENT "LD_LIBRARY_PATH=${ker_dpdk_library_path}:$ENV{LD_LIBRARY_PATH}")
 endif()
