@@ -75,8 +75,8 @@ if(KER_WITH_DPDK)
         "${CMAKE_C_COMPILER}" "${KER_LINUX_INCLUDE}" "${KER_SKB_IMPORT}" "${KER_ETH_IMPORT}" ${DPDK_INCLUDE_DIRS})
     add_executable(ker-neighbor-test neighbor.c)
     target_compile_definitions(ker-neighbor-test PRIVATE _GNU_SOURCE)
-    target_link_libraries(ker-neighbor-test PRIVATE ker_neighbor_headers ker_neighbor_port
-        ker_address_port ker_arp_headers ker_arp_port ker_napi_port ker_eth_port
+    target_link_libraries(ker-neighbor-test PRIVATE ker_neighbor_headers ker_neighbor_port ker_receive_headers
+        ker_address_port ker_arp_headers ker_arp_port ker_receive_port ker_napi_port ker_eth_port
         ker_linux_port ker_dpdk_port ker_skb_port Threads::Threads)
     add_test(NAME neighbor COMMAND ker-neighbor-test)
     set_tests_properties(neighbor PROPERTIES TIMEOUT 30)

@@ -84,6 +84,14 @@ struct workqueue_struct;
     header += definition('include/linux/hash.h', 'static inline u32 hash32_ptr(')
     header += definition('include/net/arp.h', 'static inline u32 arp_hashfn(')
     header += definition(nh, 'static inline bool neigh_key_eq32(')
+    header += '#include "compat/neighbor-parms.h"\n#define set_bit ker_neigh_parms_set_bit\n'
+    header += definition(nh, 'static inline void neigh_var_set(')
+    header += '#undef set_bit\n'
+    text = texts[nh]; start = text.index('#define __NEIGH_VAR(')
+    end = text.index('static inline void neigh_parms_data_state_setall', start)
+    header += emit(nh, start, end)
+    header += 'unsigned long neigh_rand_reach_time(unsigned long) __asm__("ker_linux_neigh_rand_reach_time");\n'
+    header += definition(nh, 'static inline void neigh_set_reach_time(')
     header += '#define neigh_for_each_in_bucket_rcu(pos, head) ker_neigh_for_each(pos, head)\n'
     for anchor in ['static inline struct neighbour *___neigh_lookup_noref(',
                    'static inline struct neighbour *__neigh_lookup_noref(',
@@ -104,7 +112,10 @@ struct workqueue_struct;
     guard = ''.join(f'#if defined({c}) || defined({c}_MODULE)\n#error Unsupported neighbor configuration {c}\n#endif\n'
                     for c in sorted(configs) if not c.endswith('_MODULE'))
     header = header.replace('#include "compat/neighbor-config.h"', '#include "compat/neighbor-config.h"\n' + guard)
-    body = '/* Original neighbor lookup and snapshot helpers are inline. */\n'
+    body = '/* SPDX-License-Identifier: GPL-2.0 */\n#include "ker/linux_neighbor.h"\n'
+    name = 'net/core/neighbour.c'
+    body += emit(name, 0, texts[name].index('#include'))
+    body += definition(name, 'unsigned long neigh_rand_reach_time(')
     (a.out / 'ker').mkdir(parents=True, exist_ok=True)
     for path, value in [(a.out / 'ker/linux_neighbor.h', header), (a.out / 'linux_neighbor.c', body),
                         (a.out / 'provenance.json', json.dumps(provenance, indent=2) + '\n')]:
