@@ -7,10 +7,11 @@ ker 的生产内存后端使用 DPDK 管理分配、NUMA 和包所有权。本�
 | 对象 | 分配 | 归还 | 当前边界 |
 | --- | --- | --- | --- |
 | 控制对象和可变长度状态 | `rte_malloc_socket` | `rte_free` | 只接受允许阻塞的 GFP_KERNEL，遵守选择的 NUMA socket 和 cache line 对齐 |
+| 原子上下文中的变长小对象 | 配置好的 DPDK 尺寸分级 mempool | kfree 按来源归还原池 | GFP_ATOMIC/NOWAIT，独立容量与每核缓存，耗尽无 heap 或跨尺寸回退 |
 | 固定大小的描述符 | `rte_mempool_create` 预分配，generic get 获取 | generic put 归还原池 | 支持 GFP_ATOMIC/NOWAIT；池耗尽返回 NULL，没有 heap fallback |
 | 包描述符及包数据 | `rte_pktmbuf_pool_create` 与 `rte_pktmbuf_alloc` | `rte_pktmbuf_free` | 使用原生 mbuf，引用计数和 indirect attachment 由 DPDK 维护 |
 
-`src/compat/include/linux/slab.h` 提供有限的私有 kmalloc、kcalloc、krealloc、ksize 与 kmem_cache 入口。控制分配前置元数据记录原始 DPDK allocation base，kfree 将这个 base 归还给 DPDK。对象池元数据记录来源 cache，不能把池对象交给 kfree，或归还到其他池。
+`src/compat/include/linux/slab.h` 提供有限的私有 kmalloc、kcalloc、krealloc、ksize 与 kmem_cache 入口。控制分配前置元数据记录原始 DPDK allocation base，kfree 将这个 base 归还给 DPDK。固定 kmem_cache 对象记录来源 cache，必须由 kmem_cache_free 归还；尺寸池的 kmalloc 对象则由 kfree 归还，不能混用释放入口。
 
 kmalloc 不用作包 payload 的生产分配路径。后续 skb head 分配需要专门接到 mbuf backing，并保留 Linux 所需的 headroom 和 shared info 布局。DMA 的地址与 IOVA 必须来自 DPDK backing，不能根据普通虚拟地址猜测。
 
@@ -22,7 +23,49 @@ kmalloc 不用作包 payload 的生产分配路径。后续 skb head 分配需�
 
 控制对象可以使用 DPDK heap 的阻塞分配；本地事件被屏蔽时不允许这种分配。固定 cache 在创建时预分配全部对象，分配和回收只访问 mempool，不扩容。初始描述符 cache 使用零容量的 per lcore cache，便于验证池耗尽与归还；packet pool 可以显式配置 DPDK cache size。
 
-对象与包池操作面向 EAL worker，不允许信号处理器重入同一池。当前没有为任意外部线程提供 user mempool cache，也没有验证多 worker 数据路径。关闭之前需要停止使用者并归还全部对象和 mbuf；描述符 cache 有在用对象时不能销毁，packet pool cleanup 返回 EBUSY。控制内存还有存活分配时，memory shutdown 返回 EBUSY。
+对象与包池操作面向 EAL worker，不允许信号处理器重入同一池。当前没有为任意外部线程提供 user mempool cache，也没有验证多 worker 数据路径。关闭之前需要停止使用者并归还全部对象和 mbuf；描述符 cache 有在用对象时不能销毁，packet pool cleanup 返回 EBUSY。控制内存或尺寸池仍有存活分配时，memory shutdown 返回 EBUSY。
+
+## 原子分配尺寸池
+
+EAL worker 调用 `ker_memory_init` 后、开始轮询前，可用私有
+`ker_memory_atomic_pools_init(name, classes, count)` 配置最多八个尺寸池。
+每项 `ker_memory_pool_config` 分别指定 `size`、`objects` 和 `cache_size`。
+尺寸须按升序排列且为 cache line 的整数倍。池使用该 worker 初始化时选择的
+NUMA socket；名称包含 lcore id，创建任何一项失败都会撤销已创建的池。
+没有默认容量或运行时扩容，应用/runtime 必须根据业务设置容量。
+
+例如 `{64, 1023, 32}` 与 `{256, 4095, 64}` 分别预留两个尺寸的对象。
+这些数值只是配置示例，不是推荐容量；非 64 字节 cache line 的平台需要调整尺寸。
+计数还须满足 DPDK 的 mempool cache 约束。
+
+`kmalloc/kzalloc/kcalloc` 的 GFP_ATOMIC/NOWAIT 分配选最小可容纳请求的池。
+即使更大的池还有对象，选中池耗尽也返回 NULL；未配置池、请求超出最大尺寸
+或不支持的 GFP 标志同样失败。GFP_KERNEL 仍使用 DPDK heap，本地事件屏蔽时
+不允许该 heap 路径。两条路径均无 libc fallback，也不宣称实现内核 reclaim。
+
+分配头记录实际来源与容量，`ksize` 返回完整可用容量；尺寸池容量可能大于
+`kmalloc_size_roundup` 的 cache-line 下界。kfree 可由另一个已注册且调用过
+`ker_memory_init` 的 worker 执行：所属 worker 使用 DPDK 每核缓存，其他 worker
+直接归还公共 ring，避免对象滞留在随后注销的线程缓存中。任意未注册线程、
+信号处理器重入、worker 注销后继续使用初始化上下文均不受支持。
+
+`krealloc` 在容量内保留原对象；增长使用调用者 GFP 指定的后端，失败时保留
+原指针、数据与所有权。`__GFP_ZERO` 清零新的可用容量，增长时保留原请求范围。
+原子池和 heap 之间的迁移仍按原来源释放旧对象。
+
+`ker_memory_atomic_pool_stats` 由所属 worker读取各尺寸的配置对象数、在用数、
+匹配请求数和失败数；超尺寸及无效标志请求不计入某个尺寸的统计。每核缓存
+中的空闲对象属于配置容量，不能把公共 ring 空闲量当成全部可用对象。
+
+关停仍采用保守的全局静止条件：停止所有使用者，等待跨 worker 归还完成，
+销毁固定 cache 并归还所有控制对象，之后调用 `ker_memory_shutdown` 回收
+当前 worker 的尺寸池。全局仍有存活分配时返回 EBUSY。所属 worker 必须在
+shutdown 成功后才注销或退出，因为归还路径会访问其池记录。
+这不是各 worker 独立在线销毁，也不是 RCU 延迟回收。
+
+本阶段验证了真实 EAL 下的尺寸池创建回滚、独立耗尽、清零、realloc 失败回滚
+以及已注册 pthread 的跨 worker 归还。尚未验证多 NUMA 压力和吞吐；socket
+内存记账、连接/请求预算、预留控制资源、水位背压及 TCP 长期持有数据仍待实现。
 
 ## 引用计数与锁
 

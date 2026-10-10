@@ -6,7 +6,8 @@
 #define ZERO_OR_NULL_PTR(ptr) ((uintptr_t)(ptr) <= (uintptr_t)ZERO_SIZE_PTR)
 #define SLAB_HWCACHE_ALIGN (1U << 4)
 struct kmem_cache;
-/* Heap allocations use the DPDK heap and GFP_KERNEL only. Fixed object caches
+/* GFP_KERNEL uses DPDK heap; GFP_ATOMIC/NOWAIT use explicitly configured
+ * size-class mempools without heap fallback. Fixed object caches
  * use rte_mempool and also support GFP_ATOMIC/NOWAIT without heap fallback.
  * Packet payloads use mbuf pools, not this general-purpose heap API. */
 void *ker_kmalloc(size_t size, gfp_t flags);

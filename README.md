@@ -2,7 +2,7 @@
 
 ker 的目标是把 Linux kernel 网络栈移植到用户态，以 DPDK 提供网卡收发和运行基础，向上层应用提供 C API，用于高性能 IP、UDP、TCP 服务以及 HTTP 和 WAF 应用。整体方向类似 F-Stack 的 FreeBSD 加 DPDK，但协议实现来自 Linux。
 
-目前已移植 checksum、rbtree、timerqueue 和 refcount 基础代码，并接入 DPDK heap、描述符 mempool、原生 mbuf 生命周期及 Linux 原始 skb 的线性子集。提供公共校验和 API，其他 runtime 与内存接口仍是私有接口。**完整 skb、IP/UDP/TCP 协议层、网卡收发和 socket API 尚未实现，当前不能提供网络服务。** `ker_capabilities()` 仍返回 `KER_CAP_CHECKSUM`（`0x20`），协议栈和网卡能力仍关闭。
+目前已移植 checksum、rbtree、timerqueue 和 refcount 基础代码，并接入 DPDK heap、原子分配尺寸池、描述符 mempool、原生 mbuf 生命周期及 Linux 原始 skb 的线性子集。提供公共校验和 API，其他 runtime 与内存接口仍是私有接口。**完整 skb、IP/UDP/TCP 协议层、网卡收发和 socket API 尚未实现，当前不能提供网络服务。** `ker_capabilities()` 仍返回 `KER_CAP_CHECKSUM`（`0x20`），协议栈和网卡能力仍关闭。
 
 ## 获取依赖
 
@@ -56,4 +56,4 @@ DPDK 默认启用，从 fork 的本地安装目录查找，要求版本至少为
 | `third_party/dpdk` | DPDK fork，以 submodule 管理 |
 | `docs/architecture.md` | 移植边界、运行模型与分阶段验收标准 |
 
-移植边界见 [Linux 基础代码移植](docs/linux-port.md)、[DPDK 内存与 skb 所有权](docs/dpdk-memory.md) 和 [Linux skb 线性子集](docs/linux-skb.md)。下一阶段推进 net_device、NAPI 和原始 Ethernet/ARP/IPv4 入口。整体路线见[架构与移植路线](docs/architecture.md)。
+移植边界见 [Linux 基础代码移植](docs/linux-port.md)、[DPDK 内存与 skb 所有权](docs/dpdk-memory.md) 和 [Linux skb 线性子集](docs/linux-skb.md)。下一阶段补齐内存预算、压力控制与 worker 生命周期，再推进 net_device、NAPI 和原始 Ethernet/ARP/IPv4 入口。整体路线见[架构与移植路线](docs/architecture.md)。

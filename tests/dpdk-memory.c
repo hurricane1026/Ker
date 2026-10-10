@@ -9,6 +9,7 @@
 #include <errno.h>
 #include <sched.h>
 #include <string.h>
+#include <pthread.h>
 #include "eal.h"
 
 static void test_heap(void)
@@ -79,6 +80,94 @@ static void test_object_pool(void)
         kmem_cache_free(cache, objects[i]);
     local_irq_restore(flags);
     kmem_cache_destroy(cache);
+    CHECK(ker_memory_live_allocations() == 0);
+}
+static void *foreign_return(void *ptr)
+{
+    CHECK(rte_thread_register() == 0);
+    CHECK(ker_memory_init(SOCKET_ID_ANY, 7) == 0);
+    CHECK(ksize(ptr) == 4 * RTE_CACHE_LINE_SIZE);
+    kfree(ptr);
+    struct ker_memory_pool_config config = {RTE_CACHE_LINE_SIZE, 3, 0};
+    CHECK(ker_memory_atomic_pools_init("ker_sizes", &config, 1) == 0);
+    void *local = kmalloc(1, GFP_ATOMIC);
+    CHECK(local != NULL);
+    kfree(local);
+    CHECK(ker_memory_shutdown() == 0);
+    rte_thread_unregister();
+    return NULL;
+}
+static void test_atomic_pools(void)
+{
+    const unsigned int line = RTE_CACHE_LINE_SIZE;
+    struct ker_memory_pool_config config[] = {
+        {line, 3, 0}, {4 * line, 7, 2}, {16 * line, 7, 0},
+    };
+    struct ker_memory_pool_config invalid[] = {{line, 3, 0}, {line, 7, 0}};
+    CHECK(ker_memory_atomic_pools_init("ker_sizes", invalid, 2) == -EINVAL);
+    /* Force failure after the first class was created: retry must not see a
+     * leaked name or consume part of the configured capacity. */
+    char occupied_name[RTE_MEMPOOL_NAMESIZE];
+    snprintf(occupied_name, sizeof(occupied_name), "ker_sizes_%u_1", rte_lcore_id());
+    struct rte_mempool *occupied = rte_mempool_create(occupied_name, 3, line, 0, 0,
+        NULL, NULL, NULL, NULL, SOCKET_ID_ANY, 0);
+    CHECK(occupied != NULL);
+    CHECK(ker_memory_atomic_pools_init("ker_sizes", config, 3) < 0);
+    rte_mempool_free(occupied);
+    unsigned long flags;
+    local_irq_save(flags);
+    CHECK(ker_memory_atomic_pools_init("ker_sizes", config, 3) == -EPERM);
+    local_irq_restore(flags);
+    CHECK(ker_memory_atomic_pools_init("ker_sizes", config, 3) == 0);
+    CHECK(ker_memory_atomic_pools_init("ker_sizes", config, 3) == -EALREADY);
+    CHECK(kmalloc(0, GFP_ATOMIC) == ZERO_SIZE_PTR);
+    CHECK(kmalloc(16 * line + 1, GFP_ATOMIC) == NULL);
+    CHECK(kmalloc(1, GFP_ATOMIC | __GFP_DMA) == NULL);
+    void *small[3];
+    local_irq_save(flags);
+    for (size_t i = 0; i < 3; ++i) {
+        small[i] = kzalloc(1, GFP_ATOMIC);
+        CHECK(small[i] != NULL && ksize(small[i]) == line);
+        CHECK((uintptr_t)small[i] % line == 0);
+        for (size_t j = 0; j < line; ++j) CHECK(((unsigned char *)small[i])[j] == 0);
+    }
+    CHECK(kmalloc(1, GFP_NOWAIT) == NULL);
+    /* Larger classes remain available but never mask small-class exhaustion. */
+    void *larger = kmalloc(line + 1, GFP_NOWAIT);
+    CHECK(larger != NULL && ksize(larger) == 4 * line);
+    struct ker_memory_pool_stats stats;
+    CHECK(ker_memory_atomic_pool_stats(0, &stats) == 0);
+    CHECK(stats.in_use == 3 && stats.requests == 4 && stats.failures == 1);
+    memset(small[0], 0x7b, line);
+    CHECK(krealloc(small[0], 2, GFP_ATOMIC | __GFP_ZERO) == small[0]);
+    CHECK(((unsigned char *)small[0])[0] == 0x7b && ((unsigned char *)small[0])[1] == 0);
+    ker_memory_fail_after(0);
+    CHECK(krealloc(small[0], line + 1, GFP_ATOMIC) == NULL);
+    CHECK(ksize(small[0]) == line && ((unsigned char *)small[0])[0] == 0x7b);
+    ker_memory_fail_after(-1);
+    small[0] = krealloc(small[0], line + 1, GFP_ATOMIC | __GFP_ZERO);
+    CHECK(small[0] != NULL && ksize(small[0]) == 4 * line);
+    for (size_t i = 2; i < line + 1; ++i) CHECK(((unsigned char *)small[0])[i] == 0);
+    CHECK(ker_memory_shutdown() == -EBUSY);
+    for (size_t i = 0; i < 3; ++i) kfree(small[i]);
+    kfree(larger);
+    local_irq_restore(flags);
+    CHECK(ker_memory_live_allocations() == 0);
+    /* Return a cached-class object from a registered foreign worker, then
+     * unregister it. The owner must still recover the class's full capacity. */
+    larger = kmalloc(line + 1, GFP_ATOMIC);
+    CHECK(larger != NULL);
+    pthread_t thread;
+    CHECK(pthread_create(&thread, NULL, foreign_return, larger) == 0);
+    CHECK(pthread_join(thread, NULL) == 0);
+    void *all[7];
+    for (size_t i = 0; i < 7; ++i) {
+        all[i] = kmalloc(line + 1, GFP_ATOMIC);
+        CHECK(all[i] != NULL);
+    }
+    CHECK(kmalloc(line + 1, GFP_ATOMIC) == NULL);
+    for (size_t i = 0; i < 7; ++i) kfree(all[i]);
+    CHECK(ker_memory_atomic_pool_stats(1, &stats) == 0 && stats.in_use == 0);
     CHECK(ker_memory_live_allocations() == 0);
 }
 static void test_packet_pool(void)
@@ -210,9 +299,18 @@ int main(void)
     test_heap();
     test_object_pool();
     test_packet_pool();
+    test_atomic_pools();
     CHECK(ker_memory_live_allocations() == 0);
     CHECK(ker_memory_shutdown() == 0);
     CHECK(kmalloc(1, GFP_KERNEL) == NULL);
+    /* Shutdown must return pool storage and names so the runtime can restart. */
+    CHECK(ker_memory_init(SOCKET_ID_ANY, 7) == 0);
+    struct ker_memory_pool_config config = {RTE_CACHE_LINE_SIZE, 3, 0};
+    CHECK(ker_memory_atomic_pools_init("ker_sizes", &config, 1) == 0);
+    void *restarted = kcalloc(2, 1, GFP_NOWAIT);
+    CHECK(restarted != NULL && ((unsigned char *)restarted)[0] == 0);
+    kfree(restarted);
+    CHECK(ker_memory_shutdown() == 0);
     CHECK(rte_eal_cleanup() == 0);
     puts("DPDK: native heap, NUMA API, object/mbuf pools, exhaustion, COW and final reclamation passed");
     return 0;
