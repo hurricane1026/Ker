@@ -96,7 +96,7 @@ int ker_skb_context_cleanup(struct ker_skb_context *ctx)
         return 0;
     if (!context_owned(ctx))
         return -EXDEV;
-    if (ctx->live || ctx->receive_live)
+    if (ctx->live || ctx->receive_live || ctx->address_live)
         return -EBUSY;
     kmem_cache_destroy(ctx->descriptors);
     *ctx = (struct ker_skb_context){0};

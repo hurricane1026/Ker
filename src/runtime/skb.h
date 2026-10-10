@@ -12,6 +12,7 @@ struct ker_skb_context {
     struct ker_packet_pool *packets;
     unsigned int lcore;
     size_t live;
+    unsigned int address_live; /* IPv4 address views pin the context */
     unsigned int receive_live; /* protocol runtimes pin the context */
 };
 int ker_skb_context_init(struct ker_skb_context *ctx, struct ker_packet_pool *packets, const char *name);
