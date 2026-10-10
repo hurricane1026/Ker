@@ -42,7 +42,8 @@ static unsigned int backing_size(const struct rte_mbuf *packet)
 }
 static int packet_geometry(const struct rte_mbuf *packet, unsigned int *size)
 {
-    if (!packet || packet->nb_segs != 1 || packet->next || !RTE_MBUF_DIRECT(packet) ||
+    if (!packet || RTE_MBUF_HAS_EXTBUF(packet) || packet->nb_segs != 1 || packet->next ||
+        !RTE_MBUF_DIRECT(packet) ||
         packet->pkt_len != packet->data_len)
         return -ENOTSUP;
     if (rte_mbuf_refcnt_read(packet) != 1)

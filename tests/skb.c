@@ -4,9 +4,25 @@
 #include "runtime/memory.h"
 #include <errno.h>
 #include <pthread.h>
+#include <rte_malloc.h>
 
 static struct ker_packet_pool pool;
 static struct ker_skb_context ctx;
+static unsigned int extbuf_frees;
+static void extbuf_free(void *addr, void *opaque)
+{
+    (void)opaque;
+    ++extbuf_frees;
+    rte_free(addr);
+}
+static void check_external_tail(const struct rte_mbuf *packet, const void *buffer)
+{
+    unsigned int start = RTE_ALIGN_FLOOR(packet->buf_len, SMP_CACHE_BYTES) -
+        ker_skb_shared_info_size();
+    const uint8_t *tail = (const uint8_t *)buffer + start;
+    for (size_t i = 0; i < ker_skb_shared_info_size(); ++i)
+        CHECK(tail[i] == 0x5a);
+}
 static void check_pool(unsigned int available)
 {
     CHECK(rte_mempool_avail_count(pool.mbufs) == available);
@@ -255,6 +271,60 @@ static void test_foreign_backing(void)
     CHECK(rte_mempool_avail_count(foreign.mbufs) == 7);
     CHECK(ker_packet_pool_cleanup(&foreign) == 0);
 }
+static struct rte_mbuf *external_packet(void **buffer_out)
+{
+    const uint16_t buffer_len = 2048;
+    void *buffer = rte_malloc(NULL, buffer_len, RTE_CACHE_LINE_SIZE);
+    CHECK(buffer != NULL);
+    memset(buffer, 0xa5, buffer_len);
+    struct rte_mbuf *packet = ker_packet_alloc(&pool);
+    CHECK(packet != NULL);
+    uint16_t usable_len = buffer_len;
+    struct rte_mbuf_ext_shared_info *shinfo = rte_pktmbuf_ext_shinfo_init_helper(
+        buffer, &usable_len, extbuf_free, NULL);
+    CHECK(shinfo != NULL);
+    rte_pktmbuf_attach_extbuf(packet, buffer, RTE_BAD_IOVA, usable_len, shinfo);
+    rte_pktmbuf_reset_headroom(packet);
+    CHECK(rte_pktmbuf_append(packet, 4) != NULL);
+    memcpy(rte_pktmbuf_mtod(packet, void *), "ext!", 4);
+    unsigned int tail_offset = RTE_ALIGN_FLOOR(usable_len, SMP_CACHE_BYTES) -
+        ker_skb_shared_info_size();
+    memset((uint8_t *)buffer + tail_offset, 0x5a, ker_skb_shared_info_size());
+    CHECK(RTE_MBUF_HAS_EXTBUF(packet));
+    *buffer_out = buffer;
+    return packet;
+}
+static void test_external_backing_rejection(void)
+{
+    void *buffer = NULL;
+    struct rte_mbuf *packet = external_packet(&buffer);
+    struct rte_mbuf_ext_shared_info *shinfo = packet->shinfo;
+    struct rte_mbuf *shared = rte_pktmbuf_clone(packet, pool.mbufs);
+    CHECK(shared != NULL && rte_mbuf_refcnt_read(packet) == 1);
+    CHECK(rte_mbuf_ext_refcnt_read(shinfo) == 2);
+    unsigned int live = ctx.live;
+    uint16_t data_off = packet->data_off, data_len = packet->data_len;
+    uint32_t pkt_len = packet->pkt_len;
+    struct sk_buff *result = (struct sk_buff *)(uintptr_t)1;
+    CHECK(ker_skb_from_mbuf(&ctx, packet, &result) == -ENOTSUP);
+    CHECK(result == (struct sk_buff *)(uintptr_t)1 && ctx.live == live);
+    CHECK(packet->buf_addr == buffer && packet->shinfo == shinfo);
+    CHECK(packet->data_off == data_off && packet->data_len == data_len && packet->pkt_len == pkt_len);
+    CHECK(rte_mbuf_refcnt_read(packet) == 1 && rte_mbuf_ext_refcnt_read(shinfo) == 2);
+    CHECK(memcmp(rte_pktmbuf_mtod(packet, void *), "ext!", 4) == 0);
+    check_external_tail(packet, buffer);
+    ker_packet_free(shared);
+    CHECK(rte_mbuf_ext_refcnt_read(shinfo) == 1);
+    CHECK(extbuf_frees == 0);
+    result = NULL;
+    CHECK(ker_skb_from_mbuf(&ctx, packet, &result) == -ENOTSUP && result == NULL);
+    CHECK(ctx.live == live && packet->buf_addr == buffer && packet->shinfo == shinfo);
+    CHECK(rte_mbuf_refcnt_read(packet) == 1 && rte_mbuf_ext_refcnt_read(shinfo) == 1);
+    CHECK(memcmp(rte_pktmbuf_mtod(packet, void *), "ext!", 4) == 0);
+    check_external_tail(packet, buffer);
+    ker_packet_free(packet);
+    CHECK(extbuf_frees == 1);
+}
 int main(void)
 {
     ker_test_eal_init();
@@ -267,6 +337,7 @@ int main(void)
     test_cow_and_export();
     test_exhaustion_and_rollback();
     test_rx_and_rejection();
+    test_external_backing_rejection();
     test_foreign_backing();
     CHECK(ctx.live == 0);
     CHECK(ker_packet_pool_cleanup(&pool) == 0);
