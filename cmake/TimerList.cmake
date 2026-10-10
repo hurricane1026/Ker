@@ -1,0 +1,25 @@
+set(KER_TIMER_LIST_IMPORT "${PROJECT_BINARY_DIR}/linux-timer-list")
+set(KER_TIMER_LIST_MANIFEST "${PROJECT_SOURCE_DIR}/src/compat/linux-timer-list-manifest.json")
+execute_process(COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tools/import-linux-timer-list.py"
+    --linux "${KER_LINUX_DIR}" --manifest "${KER_TIMER_LIST_MANIFEST}" --out "${KER_TIMER_LIST_IMPORT}"
+    RESULT_VARIABLE ker_timer_list_result ERROR_VARIABLE ker_timer_list_error)
+if(NOT ker_timer_list_result EQUAL 0)
+    message(FATAL_ERROR "Linux timer list import failed: ${ker_timer_list_error}")
+endif()
+file(READ "${KER_TIMER_LIST_MANIFEST}" ker_timer_list_manifest_json)
+string(JSON ker_timer_list_files LENGTH "${ker_timer_list_manifest_json}" files)
+math(EXPR ker_timer_list_last "${ker_timer_list_files} - 1")
+foreach(ker_timer_list_index RANGE ${ker_timer_list_last})
+    string(JSON ker_timer_list_file MEMBER "${ker_timer_list_manifest_json}" files ${ker_timer_list_index})
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${KER_LINUX_DIR}/${ker_timer_list_file}")
+endforeach()
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${KER_TIMER_LIST_MANIFEST}"
+    "${PROJECT_SOURCE_DIR}/tools/import-linux-timer-list.py" "${PROJECT_SOURCE_DIR}/tools/import-linux-skb.py")
+add_library(ker_timer_list_headers INTERFACE)
+target_include_directories(ker_timer_list_headers SYSTEM INTERFACE "${KER_TIMER_LIST_IMPORT}")
+target_link_libraries(ker_timer_list_headers INTERFACE ker_eth_headers)
+add_library(ker_timer_list_port OBJECT src/runtime/timer-list.c)
+target_link_libraries(ker_timer_list_port PRIVATE ker_timer_list_headers)
+target_compile_features(ker_timer_list_port PRIVATE c_std_11)
+set_target_properties(ker_timer_list_port PROPERTIES POSITION_INDEPENDENT_CODE ON C_VISIBILITY_PRESET hidden)
+

@@ -95,6 +95,15 @@ if(KER_WITH_DPDK)
         "${CMAKE_CURRENT_SOURCE_DIR}/arp-receive-import.py" "${PROJECT_SOURCE_DIR}"
         "${CMAKE_C_COMPILER}" "${KER_LINUX_INCLUDE}" "${KER_SKB_IMPORT}" "${KER_ETH_IMPORT}"
         "${KER_NAPI_IMPORT}" "${KER_RX_IMPORT}" "${KER_ARP_IMPORT}" ${DPDK_INCLUDE_DIRS})
+    add_executable(ker-timer-list-test timer-list.c)
+    target_compile_definitions(ker-timer-list-test PRIVATE _GNU_SOURCE)
+    target_link_libraries(ker-timer-list-test PRIVATE ker_timer_list_headers ker_timer_list_port
+        ker_linux_port ker_dpdk_port Threads::Threads)
+    add_test(NAME timer-list COMMAND ker-timer-list-test)
+    set_tests_properties(timer-list PROPERTIES TIMEOUT 30)
+    add_test(NAME timer-list-import COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/timer-list-import.py" "${PROJECT_SOURCE_DIR}"
+        "${CMAKE_C_COMPILER}" "${KER_LINUX_INCLUDE}" "${KER_SKB_IMPORT}" "${KER_ETH_IMPORT}" ${DPDK_INCLUDE_DIRS})
     add_executable(ker-skb-queue-test skb-queue.c)
     target_compile_definitions(ker-skb-queue-test PRIVATE _GNU_SOURCE)
     target_link_libraries(ker-skb-queue-test PRIVATE ker_neighbor_headers ker_neighbor_port
@@ -107,6 +116,6 @@ if(KER_WITH_DPDK)
     set_tests_properties(skb PROPERTIES TIMEOUT 30)
     set_tests_properties(dpdk-memory PROPERTIES TIMEOUT 30)
     list(JOIN DPDK_LIBRARY_DIRS ":" ker_dpdk_library_path)
-    set_tests_properties(checksum timer refcount dpdk-memory skb worker ethernet napi receive arp ipv4-address neighbor arp-receive skb-queue PROPERTIES
+    set_tests_properties(checksum timer refcount dpdk-memory skb worker ethernet napi receive arp ipv4-address neighbor arp-receive skb-queue timer-list PROPERTIES
         ENVIRONMENT "LD_LIBRARY_PATH=${ker_dpdk_library_path}:$ENV{LD_LIBRARY_PATH}")
 endif()
