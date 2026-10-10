@@ -27,12 +27,21 @@ if(KER_WITH_DPDK)
     target_link_libraries(ker-skb-test PRIVATE
         ker_skb_headers ker_linux_port ker_dpdk_port ker_skb_port Threads::Threads)
     add_test(NAME skb COMMAND ker-skb-test)
+    add_executable(ker-ethernet-test ethernet.c)
+    target_compile_definitions(ker-ethernet-test PRIVATE _GNU_SOURCE)
+    target_link_libraries(ker-ethernet-test PRIVATE ker_eth_headers ker_eth_port
+        ker_linux_port ker_dpdk_port ker_skb_port Threads::Threads)
+    add_test(NAME ethernet COMMAND ker-ethernet-test)
+    set_tests_properties(ethernet PROPERTIES TIMEOUT 30)
+    add_test(NAME ethernet-import COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/ethernet-import.py" "${PROJECT_SOURCE_DIR}"
+        "${CMAKE_C_COMPILER}" "${KER_LINUX_INCLUDE}" "${KER_SKB_IMPORT}" ${DPDK_INCLUDE_DIRS})
     add_test(NAME skb-import COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/skb-import.py" "${PROJECT_SOURCE_DIR}"
         "${CMAKE_C_COMPILER}" "${KER_LINUX_INCLUDE}" ${DPDK_INCLUDE_DIRS})
     set_tests_properties(skb PROPERTIES TIMEOUT 30)
     set_tests_properties(dpdk-memory PROPERTIES TIMEOUT 30)
     list(JOIN DPDK_LIBRARY_DIRS ":" ker_dpdk_library_path)
-    set_tests_properties(checksum timer refcount dpdk-memory skb worker PROPERTIES
+    set_tests_properties(checksum timer refcount dpdk-memory skb worker ethernet PROPERTIES
         ENVIRONMENT "LD_LIBRARY_PATH=${ker_dpdk_library_path}:$ENV{LD_LIBRARY_PATH}")
 endif()
