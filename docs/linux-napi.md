@@ -53,5 +53,6 @@ netpoll、BPF 和可选结构配置均明确拒绝。原始完成函数中 hrtim
 不是有效 IPv4 报文，不代表 ARP/IPv4 已处理。导入测试验证逐字代码、稳定输出、
 输入变更拒绝及 CONFIG/MODULE 失败边界。
 
-下一步接入 Linux 接收协议分发与地址/邻居配置，再逐步实现 ARP 和 IPv4/ICMP。
+协议匹配与投递已接入，范围见 [协议分发边界](linux-receive.md)。
+下一步接入地址/邻居配置与原始 ARP 和 IPv4/ICMP 入口。
 公开能力仍仅为 checksum；网络 API 与真实收发性能仍待后续验证。

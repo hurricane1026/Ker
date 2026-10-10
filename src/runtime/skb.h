@@ -12,6 +12,7 @@ struct ker_skb_context {
     struct ker_packet_pool *packets;
     unsigned int lcore;
     size_t live;
+    unsigned int receive_live; /* protocol runtimes pin the context */
 };
 int ker_skb_context_init(struct ker_skb_context *ctx, struct ker_packet_pool *packets, const char *name);
 int ker_skb_context_cleanup(struct ker_skb_context *ctx);
@@ -21,6 +22,8 @@ int ker_skb_alloc(struct ker_skb_context *ctx, unsigned int payload_capacity,
 /* Adopts a unique direct single-segment mbuf only on success. Its tail must
  * leave room for skb_shared_info; failure retains caller's mbuf ownership. */
 int ker_skb_from_mbuf(struct ker_skb_context *ctx, struct rte_mbuf *packet, struct sk_buff **result);
+/* Validate a bridge skb and its owning context without taking a reference. */
+int ker_skb_validate(struct sk_buff *skb, struct ker_skb_context *ctx);
 int ker_skb_get(struct sk_buff *skb);
 int ker_skb_free(struct sk_buff *skb);
 int ker_skb_clone(struct sk_buff *skb, struct sk_buff **result);
