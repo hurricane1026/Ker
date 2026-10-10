@@ -12,6 +12,10 @@ struct ker_runtime {
     struct timerqueue_head timers;
     int64_t now_ns;
     bool polling;
+    unsigned int native_lcore;
+    bool native_owned;
+    unsigned int native_live; /* bound ker_timer_list containers pin this clock */
+    unsigned long jiffies_base;
 };
 
 struct ker_timer;

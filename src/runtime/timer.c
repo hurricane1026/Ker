@@ -10,6 +10,8 @@ void ker_runtime_init(struct ker_runtime *runtime)
     timerqueue_init_head(&runtime->timers);
     runtime->now_ns = 0;
     runtime->polling = false;
+    runtime->native_live = 0; runtime->jiffies_base = 0;
+    runtime->native_lcore = 0; runtime->native_owned = false;
 }
 
 void ker_timer_init(struct ker_timer *timer, ker_timer_callback callback, void *arg)
@@ -91,7 +93,7 @@ int ker_runtime_cleanup(struct ker_runtime *runtime)
     struct timerqueue_node *node;
     if (!runtime)
         return -EINVAL;
-    if (runtime->polling)
+    if (runtime->polling || runtime->native_live)
         return -EBUSY;
     while ((node = timerqueue_getnext(&runtime->timers)))
         ker_timer_cancel(container_of(node, struct ker_timer, node));
