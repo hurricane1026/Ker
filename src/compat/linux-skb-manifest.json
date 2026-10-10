@@ -1,0 +1,14 @@
+{
+  "scope": "linear skb types and selected native functions only",
+  "files": {
+    "include/linux/skbuff.h": "bcc75ea787040e9073f5bd3ae70fc5da4c2f9ae40694d565369c8093b7166e5b",
+    "net/core/skbuff.c": "568856f8ce11fed8ea7249fe003cfa2e519ba8e805a3ffcf7a060699d2f9508b",
+    "include/linux/types.h": "d3870af29e62be164368398d5bd0a359ad93e4c1c9ee68ba0b6a5b3757e611b6",
+    "include/linux/llist.h": "404f7c2131d420af2a88e00a47c0359b0582288d085c2598b27f403cb590d751",
+    "include/net/netmem.h": "8548e018e9e2849b0e84d373426520a1c03df9d3143b7bedced73a2c66d71a45",
+    "include/linux/kconfig.h": "1b51cc51b6e4beb9b249853e0a0774f63679599f9a27b9e9fb8cc26ca14265f1",
+    "include/linux/kcov.h": "b035cfdb9d17eb167cb1d210bb02efe8b69d39700b53634dd7e93789a68594a6",
+    "include/linux/stddef.h": "be64ec13fdb2d724c1830ebcd04854612ccab9593e2d829011c8352f73a378b2",
+    "include/uapi/linux/stddef.h": "3703ea363b0f4d3b75a3a1f59b7daaa0b81f2e18cc459fedd6b1df331e8662b8"
+  }
+}

@@ -1,6 +1,6 @@
 # ker 架构与移植路线
 
-ker 的目标是将 Linux 网络协议代码编译进用户态库，并通过 DPDK 驱动网卡。当前已编译原始 checksum、rbtree、timerqueue 与 refcount，建立定时器运行环境，并接入 DPDK heap、描述符 mempool 和原生 mbuf 生命周期；协议数据路径仍待实现。第一目标是可验证的单 worker IPv4 和 UDP 收发，再推进 TCP 和多核性能。
+ker 的目标是将 Linux 网络协议代码编译进用户态库，并通过 DPDK 驱动网卡。当前已编译原始 checksum、rbtree、timerqueue 与 refcount，建立定时器运行环境，并接入 DPDK heap、描述符 mempool 和原生 mbuf 生命周期；原始 skb 的线性子集也已接入；协议数据路径仍待实现。第一目标是可验证的单 worker IPv4 和 UDP 收发，再推进 TCP 和多核性能。
 
 ## 数据路径和模块边界
 
@@ -28,7 +28,7 @@ Linux 使用 `sk_buff` 管理网络包，NAPI 负责网络事件处理；DPDK �
 
 | 依赖 | 拟实现的用户态语义 |
 | --- | --- |
-| 内存与 slab | 控制对象走 DPDK heap，固定描述符走 mempool，包数据走 mbuf；已有对齐、失败传播、池耗尽和回收验证，Linux skb 接入仍待实现 |
+| 内存与 slab | 控制对象走 DPDK heap，固定描述符走 mempool，包数据走 mbuf；已有对齐、失败传播、池耗尽和回收验证，已接入原始线性 skb 的独立 users/dataref、clone、COW 和 mbuf 接管，非线性 skb 待实现 |
 | per CPU 与 current | worker 绑定的上下文和明确的访问规则 |
 | 锁与原子操作 | 已接入原始 refcount，使用原子操作、真实 spinlock 和 pthread mutex；本地事件屏蔽阻止 timer dispatch，尚无完整 softirq |
 | RCU | 读侧临界区、宽限期和延迟回收，先明确可验证的单 worker 模型 |
@@ -56,7 +56,7 @@ RX 获取的 mbuf 由适配层负责释放；交给 Linux 的 skb 由协议栈�
 | 阶段 | 交付 | 验收条件 |
 | --- | --- | --- |
 | 0 工程基础 | 固定依赖、基础库、公共头文件、安装包 | 已能编译、安装并从外部项目链接 |
-| 1 编译入口 | 最小 Linux 配置、依赖清单、兼容层、初始化 | 进行中：四个 Linux 基础源文件已编译，并有 DPDK 内存后端；原始 skb、协议源文件、配置和网络初始化仍待实现 |
+| 1 编译入口 | 最小 Linux 配置、依赖清单、兼容层、初始化 | 进行中：四个 Linux 基础源文件已编译，并有 DPDK 内存后端；原始 skb 线性子集已接入，完整 skb、协议源文件、配置和网络初始化仍待实现 |
 | 2 单 worker 数据路径 | DPDK 生命周期、虚拟 net_device、复制收发 | 用软件测试设备或测试链路验证 ARP、IPv4、ICMP，覆盖丢包和释放路径 |
 | 3 UDP | 地址和路由配置、非阻塞 datagram API | 与宿主机或独立对端互通，检查 checksum、MTU 和分片策略 |
 | 4 TCP | 连接与监听 API、事件通知、timer | 验证握手、重传、乱序、窗口、关闭、超时和背压 |

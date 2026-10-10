@@ -39,4 +39,10 @@ static inline void smp_acquire__after_ctrl_dep(void)
 {
     __atomic_thread_fence(__ATOMIC_ACQUIRE);
 }
+static inline void smp_rmb(void) { __atomic_thread_fence(__ATOMIC_ACQUIRE); }
+static inline void atomic_inc(atomic_t *v) { __atomic_fetch_add(&v->counter, 1, __ATOMIC_RELAXED); }
+static inline int atomic_sub_return(int value, atomic_t *v)
+{
+    return __atomic_sub_fetch(&v->counter, value, __ATOMIC_ACQ_REL);
+}
 #endif
