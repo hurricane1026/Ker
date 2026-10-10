@@ -15,13 +15,13 @@ static void extbuf_free(void *addr, void *opaque)
     ++extbuf_frees;
     rte_free(addr);
 }
-static void check_external_tail(const struct rte_mbuf *packet, const void *buffer)
+static void check_reserved_tail(const struct rte_mbuf *packet, const void *buffer, uint8_t value)
 {
     unsigned int start = RTE_ALIGN_FLOOR(packet->buf_len, SMP_CACHE_BYTES) -
         ker_skb_shared_info_size();
     const uint8_t *tail = (const uint8_t *)buffer + start;
     for (size_t i = 0; i < ker_skb_shared_info_size(); ++i)
-        CHECK(tail[i] == 0x5a);
+        CHECK(tail[i] == value);
 }
 static void check_pool(unsigned int available)
 {
@@ -312,7 +312,7 @@ static void test_external_backing_rejection(void)
     CHECK(packet->data_off == data_off && packet->data_len == data_len && packet->pkt_len == pkt_len);
     CHECK(rte_mbuf_refcnt_read(packet) == 1 && rte_mbuf_ext_refcnt_read(shinfo) == 2);
     CHECK(memcmp(rte_pktmbuf_mtod(packet, void *), "ext!", 4) == 0);
-    check_external_tail(packet, buffer);
+    check_reserved_tail(packet, buffer, 0x5a);
     ker_packet_free(shared);
     CHECK(rte_mbuf_ext_refcnt_read(shinfo) == 1);
     CHECK(extbuf_frees == 0);
@@ -321,9 +321,76 @@ static void test_external_backing_rejection(void)
     CHECK(ctx.live == live && packet->buf_addr == buffer && packet->shinfo == shinfo);
     CHECK(rte_mbuf_refcnt_read(packet) == 1 && rte_mbuf_ext_refcnt_read(shinfo) == 1);
     CHECK(memcmp(rte_pktmbuf_mtod(packet, void *), "ext!", 4) == 0);
-    check_external_tail(packet, buffer);
+    check_reserved_tail(packet, buffer, 0x5a);
     ker_packet_free(packet);
     CHECK(extbuf_frees == 1);
+}
+static void check_rx_flag_rejected(uint64_t flags)
+{
+    struct rte_mbuf *packet = ker_packet_alloc(&pool);
+    CHECK(packet != NULL);
+    CHECK(rte_pktmbuf_append(packet, 4) != NULL);
+    memcpy(rte_pktmbuf_mtod(packet, void *), "rx!!", 4);
+    packet->ol_flags = flags;
+    packet->vlan_tci = 0x123;
+    packet->vlan_tci_outer = 0x456;
+    packet->tso_segsz = 128;
+    unsigned int tail_offset = RTE_ALIGN_FLOOR(packet->buf_len, SMP_CACHE_BYTES) -
+        ker_skb_shared_info_size();
+    memset((uint8_t *)packet->buf_addr + tail_offset, 0x6b, ker_skb_shared_info_size());
+
+    void *buffer = packet->buf_addr;
+    uint16_t data_off = packet->data_off, data_len = packet->data_len;
+    uint16_t vlan_tci = packet->vlan_tci, vlan_tci_outer = packet->vlan_tci_outer;
+    uint16_t tso_segsz = packet->tso_segsz;
+    uint32_t pkt_len = packet->pkt_len;
+    unsigned int live = ctx.live;
+    struct sk_buff *result = (struct sk_buff *)(uintptr_t)1;
+    CHECK(ker_skb_from_mbuf(&ctx, packet, &result) == -ENOTSUP);
+    CHECK(result == (struct sk_buff *)(uintptr_t)1 && ctx.live == live);
+    CHECK(packet->buf_addr == buffer && packet->ol_flags == flags);
+    CHECK(packet->data_off == data_off && packet->data_len == data_len && packet->pkt_len == pkt_len);
+    CHECK(packet->vlan_tci == vlan_tci && packet->vlan_tci_outer == vlan_tci_outer);
+    CHECK(packet->tso_segsz == tso_segsz && rte_mbuf_refcnt_read(packet) == 1);
+    CHECK(memcmp(rte_pktmbuf_mtod(packet, void *), "rx!!", 4) == 0);
+    check_reserved_tail(packet, buffer, 0x6b);
+    ker_packet_free(packet);
+}
+static void test_rx_metadata_boundary(void)
+{
+    const uint64_t rejected[] = {
+        RTE_MBUF_F_RX_VLAN | RTE_MBUF_F_RX_VLAN_STRIPPED,
+        RTE_MBUF_F_RX_VLAN | RTE_MBUF_F_RX_QINQ | RTE_MBUF_F_RX_QINQ_STRIPPED,
+        RTE_MBUF_F_RX_VLAN | RTE_MBUF_F_RX_VLAN_STRIPPED |
+            RTE_MBUF_F_RX_QINQ | RTE_MBUF_F_RX_QINQ_STRIPPED,
+        RTE_MBUF_F_RX_LRO,
+        RTE_MBUF_F_RX_SEC_OFFLOAD,
+        RTE_MBUF_F_RX_SEC_OFFLOAD_FAILED,
+        RTE_MBUF_F_RX_RSS_HASH | RTE_MBUF_F_RX_IP_CKSUM_NONE,
+        RTE_MBUF_F_RX_RSS_HASH | RTE_MBUF_F_RX_L4_CKSUM_NONE,
+    };
+    for (size_t i = 0; i < sizeof(rejected) / sizeof(rejected[0]); ++i)
+        check_rx_flag_rejected(rejected[i]);
+    check_pool(31);
+
+    struct rte_mbuf *packet = ker_packet_alloc(&pool);
+    const uint8_t frame[] = {
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
+        0x88, 0xa8, 0x04, 0x56, 0x81, 0x00, 0x01, 0x23, 0x08, 0x00, 's', 'a', 'f', 'e',
+    };
+    CHECK(packet != NULL && rte_pktmbuf_append(packet, sizeof(frame)) != NULL);
+    memcpy(rte_pktmbuf_mtod(packet, void *), frame, sizeof(frame));
+    packet->ol_flags = RTE_MBUF_F_RX_VLAN | RTE_MBUF_F_RX_QINQ |
+        RTE_MBUF_F_RX_RSS_HASH | RTE_MBUF_F_RX_IP_CKSUM_GOOD | RTE_MBUF_F_RX_L4_CKSUM_BAD;
+    packet->vlan_tci = 0x123;
+    packet->vlan_tci_outer = 0x456;
+    struct sk_buff *skb = NULL;
+    CHECK(ker_skb_from_mbuf(&ctx, packet, &skb) == 0);
+    CHECK(skb->len == sizeof(frame) && memcmp(skb->data, frame, sizeof(frame)) == 0);
+    CHECK(skb->ip_summed == CHECKSUM_NONE);
+    CHECK(skb->hash == 0);
+    CHECK(ker_skb_free(skb) == 0);
+    check_pool(31);
 }
 int main(void)
 {
@@ -338,6 +405,7 @@ int main(void)
     test_exhaustion_and_rollback();
     test_rx_and_rejection();
     test_external_backing_rejection();
+    test_rx_metadata_boundary();
     test_foreign_backing();
     CHECK(ctx.live == 0);
     CHECK(ker_packet_pool_cleanup(&pool) == 0);

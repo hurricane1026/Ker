@@ -48,6 +48,8 @@ put/push 要求唯一描述符与唯一数据 backing；共享数据需要先 CO
 
 `ker_skb_from_mbuf` 仅在成功后接管输入 mbuf。它要求唯一 direct 单 segment，在足够的尾部空间内初始化 shared info，并用原始 reserve/put 设置 skb 几何。失败时输入 mbuf 仍由调用者负责。
 
+接收时拒绝 `RTE_MBUF_F_RX_VLAN_STRIPPED`、`RTE_MBUF_F_RX_QINQ_STRIPPED`、`RTE_MBUF_F_RX_LRO` 以及 RX security offload 成功或失败标记，因为这些状态可能表示报文字节已被移除、合并或转换，而桥接层没有对应的 skb 表达。IP/L4 checksum 状态为 `*_CKSUM_NONE` 时也拒绝；DPDK 表示报文中的 checksum 字节不正确，但数据完整性已验证，当前 skb 路径不能保留这一语义。普通 checksum GOOD/BAD/UNKNOWN 与 RSS hash 标记只作为 mbuf 元数据接受，不映射为 skb checksum/hash 状态；未 stripped 的 VLAN/QinQ 标记因标签仍在报文字节中而可接受。
+
 `ker_skb_to_mbuf` 从配置池分配另一份 mbuf，复制活跃 skb 字节。输出由调用者持有，原 skb 与 backing 不转移。当前不声明 TX offload；partial checksum 或 GSO 发送状态返回 ENOTSUP，不能把尚未完成的处理静默交给网卡。
 
 page fragments、frag_list、external/indirect mbuf 的接管、fclone、page pool recycling、路由 dst 引用等状态不支持。native packet pool 的多 segment 功能不代表这个 skb bridge 已支持非线性 skb。

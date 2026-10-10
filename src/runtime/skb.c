@@ -40,11 +40,24 @@ static unsigned int backing_size(const struct rte_mbuf *packet)
 {
     return RTE_ALIGN_FLOOR((unsigned int)packet->buf_len, SMP_CACHE_BYTES);
 }
+static int rx_metadata_supported(const struct rte_mbuf *packet)
+{
+    const uint64_t transformed = RTE_MBUF_F_RX_VLAN_STRIPPED |
+        RTE_MBUF_F_RX_QINQ_STRIPPED | RTE_MBUF_F_RX_LRO |
+        RTE_MBUF_F_RX_SEC_OFFLOAD | RTE_MBUF_F_RX_SEC_OFFLOAD_FAILED;
+    if ((packet->ol_flags & transformed) ||
+        (packet->ol_flags & RTE_MBUF_F_RX_IP_CKSUM_MASK) == RTE_MBUF_F_RX_IP_CKSUM_NONE ||
+        (packet->ol_flags & RTE_MBUF_F_RX_L4_CKSUM_MASK) == RTE_MBUF_F_RX_L4_CKSUM_NONE)
+        return -ENOTSUP;
+    return 0;
+}
 static int packet_geometry(const struct rte_mbuf *packet, unsigned int *size)
 {
     if (!packet || RTE_MBUF_HAS_EXTBUF(packet) || packet->nb_segs != 1 || packet->next ||
         !RTE_MBUF_DIRECT(packet) ||
         packet->pkt_len != packet->data_len)
+        return -ENOTSUP;
+    if (rx_metadata_supported(packet))
         return -ENOTSUP;
     if (rte_mbuf_refcnt_read(packet) != 1)
         return -EBUSY;
