@@ -7,5 +7,5 @@ const char *ker_version(void)
 
 uint64_t ker_capabilities(void)
 {
-    return 0;
+    return KER_CAP_CHECKSUM;
 }

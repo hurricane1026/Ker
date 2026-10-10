@@ -5,19 +5,29 @@ include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
 option(KER_BUILD_EXAMPLES "Build API examples" ON)
+include(CTest)
+include(cmake/LinuxPort.cmake)
 
-add_library(ker src/ker.c)
+add_library(ker src/ker.c src/checksum.c $<TARGET_OBJECTS:ker_linux_port>)
 add_library(ker::ker ALIAS ker)
 target_compile_features(ker PUBLIC c_std_11)
 target_include_directories(ker PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 target_compile_definitions(ker PRIVATE KER_VERSION="${PROJECT_VERSION}")
-set_target_properties(ker PROPERTIES VERSION ${PROJECT_VERSION} SOVERSION 0)
+target_link_libraries(ker PRIVATE $<BUILD_INTERFACE:ker_port_headers>)
+set_target_properties(ker PROPERTIES VERSION ${PROJECT_VERSION} SOVERSION 0
+    C_VISIBILITY_PRESET hidden)
 
 if(KER_BUILD_EXAMPLES)
     add_executable(ker-info examples/info.c)
     target_link_libraries(ker-info PRIVATE ker::ker)
+    add_executable(ker-checksum examples/checksum.c)
+    target_link_libraries(ker-checksum PRIVATE ker::ker)
+endif()
+
+if(BUILD_TESTING)
+    add_subdirectory(tests)
 endif()
 
 install(TARGETS ker EXPORT kerTargets
