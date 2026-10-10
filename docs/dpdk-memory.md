@@ -1,6 +1,6 @@
 # DPDK 内存与 skb 所有权
 
-ker 的生产内存后端使用 DPDK 管理分配、NUMA 和包所有权。本阶段增加 DPDK heap 与对象池适配、原生 mbuf 的 clone/COW 验证，并直接编译 Linux 的 `lib/refcount.c`。没有用自定义结构替代 Linux `sk_buff`；原始 skb 的编译和接入仍是下一阶段工作。
+ker 的生产内存后端使用 DPDK 管理分配、NUMA 和包所有权。本阶段增加 DPDK heap 与对象池适配、原生 mbuf 的 clone/COW 验证，并直接编译 Linux 的 `lib/refcount.c`。没有用自定义结构替代 Linux `sk_buff`；后续已接入原始 skb 的线性子集，详见 [Linux skb 线性子集](linux-skb.md)。
 
 ## 内存接口和归还路径
 
@@ -30,7 +30,7 @@ kmalloc 不用作包 payload 的生产分配路径。后续 skb head 分配需�
 
 mutex 使用 pthread mutex，spinlock 使用真实的 acquire/release 原子锁。本地 irqsave 在用户态的含义是屏蔽当前线程的 ker 事件回调，timer poll 在被屏蔽时返回 EBUSY；它不关闭硬件 IRQ，也不屏蔽 POSIX 信号。完整 softirq、任务调度和 RCU 宽限期仍未实现。
 
-未来 Linux skb 的 `users` 继续使用原始 refcount，`skb_shared_info.dataref` 必须保留 Linux 自己的共享数据与 header 引用语义。DPDK 的 mbuf refcount 不能直接替换这个字段。拟定的 bridge 是让一份 Linux backing 拥有一个 mbuf 引用，由最终 backing 释放路径归还它；这部分尚未接入。本阶段的 native mbuf clone/COW 只是验证 DPDK 包所有权。
+未来 Linux skb 的 `users` 继续使用原始 refcount，`skb_shared_info.dataref` 必须保留 Linux 自己的共享数据与 header 引用语义。DPDK 的 mbuf refcount 不能直接替换这个字段。线性 skb bridge 已让一份 Linux backing 拥有一个 mbuf 引用，由最终 backing 释放路径归还它。本阶段的 native mbuf clone/COW 只是验证 DPDK 包所有权。
 
 ## 原生 mbuf 和 COW
 

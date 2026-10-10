@@ -1,6 +1,6 @@
 # 首批 Linux 基础代码移植
 
-这一阶段把 Linux 原始的网络校验和、红黑树和定时器队列编译到用户态 `libker`，验证直接复用内核源码的构建边界，并提供后续收发包和协议定时器所需的基础能力。后续已增加原始 refcount 和 DPDK 内存后端，见 [DPDK 内存与 skb 所有权](dpdk-memory.md)。Linux 原始 skb 和 IP/UDP/TCP 协议处理仍待实现。
+这一阶段把 Linux 原始的网络校验和、红黑树和定时器队列编译到用户态 `libker`，验证直接复用内核源码的构建边界，并提供后续收发包和协议定时器所需的基础能力。后续已增加原始 refcount 和 DPDK 内存后端，见 [DPDK 内存与 skb 所有权](dpdk-memory.md)。原始 skb 线性子集也已接入，见 [Linux skb 线性子集](linux-skb.md)；完整 skb 和 IP/UDP/TCP 协议处理仍待实现。
 
 ## 编译源码和头文件
 
@@ -77,4 +77,4 @@ checksum 测试使用独立的逐字节参考实现，覆盖已知报文、IPv4 
 | `net/ipv4/udp.c` | socket、skb、内存页、timer、命名空间、路由、BPF、GRO 与复用端口 |
 | `net/socket.c` | file、poll、VFS、wait、任务上下文、uaccess、security 与 syscall 层 |
 
-这只是源码直接依赖清单，不是经过最小 Kconfig 预处理后的完整链接清单。后续先明确 skb 的线性缓冲区、引用计数、clone、headroom、扩容与释放语义，再实现内存分配和必要的页接口。暂不实现的内核设施需要通过配置或显式移植边界排除，保留的问题必须产生可见的编译或链接错误。
+这只是源码直接依赖清单，不是经过最小 Kconfig 预处理后的完整链接清单。线性 skb 的引用计数、clone、headroom、COW 和释放语义已接入。后续继续补齐必要的页接口，并推进 net_device 与协议源码。暂不实现的内核设施需要通过配置或显式移植边界排除，保留的问题必须产生可见的编译或链接错误。

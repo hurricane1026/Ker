@@ -42,6 +42,12 @@ extern struct timerqueue_node *timerqueue_iterate_next(struct timerqueue_node *)
 extern bool timerqueue_linked_add(struct timerqueue_linked_head *, struct timerqueue_linked_node *) KER_LINUX_LINKAGE(timerqueue_linked_add);
 
 struct mutex;
+struct sk_buff;
+extern void *skb_put(struct sk_buff *, unsigned int) KER_LINUX_LINKAGE(skb_put);
+extern void *skb_push(struct sk_buff *, unsigned int) KER_LINUX_LINKAGE(skb_push);
+extern void *skb_pull(struct sk_buff *, unsigned int) KER_LINUX_LINKAGE(skb_pull);
+extern void skb_trim(struct sk_buff *, unsigned int) KER_LINUX_LINKAGE(skb_trim);
+extern void skb_headers_offset_update(struct sk_buff *, int) KER_LINUX_LINKAGE(skb_headers_offset_update);
 enum refcount_saturation_type;
 extern void refcount_warn_saturate(refcount_t *, enum refcount_saturation_type) KER_LINUX_LINKAGE(refcount_warn_saturate);
 extern bool refcount_dec_if_one(refcount_t *) KER_LINUX_LINKAGE(refcount_dec_if_one);

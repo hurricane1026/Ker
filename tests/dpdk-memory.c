@@ -9,6 +9,7 @@
 #include <errno.h>
 #include <sched.h>
 #include <string.h>
+#include "eal.h"
 
 static void test_heap(void)
 {
@@ -172,16 +173,7 @@ static void test_packet_pool(void)
 int main(void)
 {
     CHECK(kmalloc(1, GFP_KERNEL) == NULL);
-    cpu_set_t allowed;
-    CHECK(sched_getaffinity(0, sizeof(allowed), &allowed) == 0);
-    int cpu;
-    for (cpu = 0; cpu < CPU_SETSIZE && !CPU_ISSET(cpu, &allowed); ++cpu) {}
-    CHECK(cpu < CPU_SETSIZE);
-    char mapping[64];
-    snprintf(mapping, sizeof(mapping), "--lcores=0@%d", cpu);
-    char *args[] = {"ker-dpdk-memory", mapping, "--no-huge", "--no-pci", "--no-shconf",
-                   "--iova-mode=va", "--no-telemetry", "-m", "64"};
-    CHECK(rte_eal_init((int)(sizeof(args) / sizeof(args[0])), args) >= 0);
+    ker_test_eal_init();
     CHECK(ker_memory_init(SOCKET_ID_ANY, 7) == 0);
     CHECK(ker_memory_init(SOCKET_ID_ANY, 7) == -EALREADY);
     test_heap();
