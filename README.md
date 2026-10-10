@@ -57,3 +57,5 @@ DPDK 默认启用，从 fork 的本地安装目录查找，要求版本至少为
 | `docs/architecture.md` | 移植边界、运行模型与分阶段验收标准 |
 
 移植边界见 [Linux 基础代码移植](docs/linux-port.md)、[DPDK 内存与 skb 所有权](docs/dpdk-memory.md) 和 [Linux skb 线性子集](docs/linux-skb.md)。下一阶段接入原始 ARP/IPv4 入口及邻居和发送路径，并补齐设备注册、连接预算与独立控制资源。Ethernet 边界见 [原始接收分类](docs/linux-ethernet.md)。NAPI 边界见 [调度与完成](docs/linux-napi.md)。协议投递边界见 [匹配与所有权](docs/linux-receive.md)。ARP 构造边界见 [报文与导出](docs/linux-arp.md)。ARP 接收边界见 [门控与消息回调](docs/linux-arp-receive.md)。地址边界见 [静态 IPv4 配置](docs/linux-ipv4-address.md)。邻居边界见 [永久表与引用](docs/linux-neighbor.md)。待发送队列见 [原始 FIFO 与限额](docs/linux-skb-queue.md)。Worker 边界见 [轮询与 RX 压力](docs/worker.md)。整体路线见[架构与移植路线](docs/architecture.md)。
+
+F-Stack 外部测试场景的适配范围与追溯见 [测试迁移](docs/fstack-tests.md)，当前已有 8 个真实 DPDK 回归场景。
