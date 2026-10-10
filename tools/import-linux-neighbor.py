@@ -93,7 +93,10 @@ struct workqueue_struct;
         header += definition(nh, anchor)
     header += '#include "compat/neighbor-sequence.h"\n'
     header += definition(nh, 'static inline void neigh_ha_snapshot(')
-    for anchor in ['static inline void __skb_queue_head_init(', 'static inline void skb_queue_head_init(']:
+    for anchor in ['static inline void __skb_queue_head_init(', 'static inline void skb_queue_head_init(',
+                   'static inline struct sk_buff *skb_peek(', 'static inline void __skb_insert(',
+                   'static inline void __skb_queue_before(', 'static inline void __skb_queue_tail(',
+                   'static inline void __skb_unlink(', 'static inline struct sk_buff *__skb_dequeue(']:
         header += definition('include/linux/skbuff.h', anchor)
     header += '\n#endif\n'
     configs = set(re.findall(r'\bCONFIG_[A-Z0-9_]+\b', header))

@@ -13,6 +13,7 @@ struct ker_skb_context {
     unsigned int lcore;
     size_t live;
     unsigned int address_live; /* IPv4 address views pin the context */
+    unsigned int queue_live; /* initialized bounded queues pin the context */
     unsigned int receive_live; /* protocol runtimes pin the context */
 };
 int ker_skb_context_init(struct ker_skb_context *ctx, struct ker_packet_pool *packets, const char *name);
@@ -25,6 +26,8 @@ int ker_skb_alloc(struct ker_skb_context *ctx, unsigned int payload_capacity,
 int ker_skb_from_mbuf(struct ker_skb_context *ctx, struct rte_mbuf *packet, struct sk_buff **result);
 /* Validate a bridge skb and its owning context without taking a reference. */
 int ker_skb_validate(struct sk_buff *skb, struct ker_skb_context *ctx);
+/* Queued descriptors reject validate/get/free/clone/export and mutation with
+ * EBUSY until dequeued. Raw native fields must not be changed while queued. */
 int ker_skb_get(struct sk_buff *skb);
 int ker_skb_free(struct sk_buff *skb);
 int ker_skb_clone(struct sk_buff *skb, struct sk_buff **result);
