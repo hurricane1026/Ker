@@ -18,7 +18,7 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${KER_NEIGH_MANI
 add_library(ker_neighbor_headers INTERFACE)
 target_include_directories(ker_neighbor_headers SYSTEM INTERFACE "${KER_NEIGH_IMPORT}")
 target_link_libraries(ker_neighbor_headers INTERFACE ker_address_headers ker_napi_headers)
-add_library(ker_neighbor_port OBJECT "${KER_NEIGH_IMPORT}/linux_neighbor.c" src/runtime/neighbor.c)
+add_library(ker_neighbor_port OBJECT "${KER_NEIGH_IMPORT}/linux_neighbor.c" src/runtime/neighbor.c src/runtime/skb-queue.c)
 target_link_libraries(ker_neighbor_port PRIVATE ker_neighbor_headers)
 target_compile_features(ker_neighbor_port PRIVATE c_std_11)
 set_target_properties(ker_neighbor_port PROPERTIES POSITION_INDEPENDENT_CODE ON C_VISIBILITY_PRESET hidden)

@@ -1,4 +1,5 @@
 #include "runtime/skb.h"
+#include "runtime/skb-queue-internal.h"
 #include <rte_lcore.h>
 #include <errno.h>
 #include <string.h>
@@ -8,6 +9,8 @@ struct skb_envelope {
     struct sk_buff skb;
     struct ker_skb_context *owner;
     struct rte_mbuf *backing;
+    const struct ker_skb_queue *queue;
+    unsigned int queued_charge;
 };
 static struct skb_envelope *envelope(struct sk_buff *skb)
 {
@@ -26,6 +29,7 @@ static int supported(struct sk_buff *skb)
 {
     if (!skb || !context_owned(envelope(skb)->owner))
         return -EXDEV;
+    if (envelope(skb)->queue) return -EBUSY;
     struct skb_shared_info *info = skb_shinfo(skb);
     if (skb->data_len || info->nr_frags || info->frag_list || info->flags ||
         info->destructor_arg || skb->_skb_refdst || skb->head_frag || skb->pp_recycle || skb->fclone)
@@ -96,7 +100,7 @@ int ker_skb_context_cleanup(struct ker_skb_context *ctx)
         return 0;
     if (!context_owned(ctx))
         return -EXDEV;
-    if (ctx->live || ctx->receive_live || ctx->address_live)
+    if (ctx->live || ctx->receive_live || ctx->address_live || ctx->queue_live)
         return -EBUSY;
     kmem_cache_destroy(ctx->descriptors);
     *ctx = (struct ker_skb_context){0};
@@ -319,4 +323,21 @@ int ker_skb_trim(struct sk_buff *skb, unsigned int length)
         return -EINVAL;
     skb_trim(skb, length);
     return 0;
+}
+
+/* Queue bookkeeping is private to the envelope; native cb and packet bytes
+ * remain untouched. Callers below are the validated synchronous queue adapter. */
+void ker_skb_queue_claim(struct sk_buff *skb, const struct ker_skb_queue *queue)
+{
+    BUG_ON(!queue || supported(skb) || skb_shared(skb) || skb->next || skb->prev || !skb->truesize);
+    envelope(skb)->queue = queue;
+    envelope(skb)->queued_charge = skb->truesize;
+}
+unsigned int ker_skb_queue_release(struct sk_buff *skb, const struct ker_skb_queue *queue)
+{
+    struct skb_envelope *desc = envelope(skb);
+    BUG_ON(!context_owned(desc->owner) || desc->queue != queue || skb->next || skb->prev);
+    unsigned int charge = desc->queued_charge;
+    desc->queue = NULL; desc->queued_charge = 0;
+    return charge;
 }
