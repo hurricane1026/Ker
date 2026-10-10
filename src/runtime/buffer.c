@@ -33,6 +33,23 @@ struct rte_mbuf *ker_packet_alloc(struct ker_packet_pool *pool)
 {
     return pool && pool->mbufs && rte_lcore_id() != LCORE_ID_ANY ? rte_pktmbuf_alloc(pool->mbufs) : NULL;
 }
+int ker_packet_pool_available(struct ker_packet_pool *pool, unsigned int *available)
+{
+    if (!pool || !pool->mbufs || !available || rte_lcore_id() == LCORE_ID_ANY)
+        return -EINVAL;
+    struct rte_mempool_cache *cache = rte_mempool_default_cache(pool->mbufs, rte_lcore_id());
+    /* The pinned DPDK exposes the backend through the same ops table used by
+     * its inline get/put paths. Avoid the non-exported get_count wrapper and
+     * the diagnostic avail_count scan across every lcore cache. */
+    struct rte_mempool_ops *ops = rte_mempool_get_ops(pool->mbufs->ops_index);
+    if (!ops->get_count)
+        return -ENOTSUP;
+    uint64_t count = ops->get_count(pool->mbufs);
+    if (cache)
+        count += cache->len;
+    *available = count > pool->mbufs->size ? pool->mbufs->size : (unsigned int)count;
+    return 0;
+}
 struct rte_mbuf *ker_packet_clone(struct ker_packet_pool *pool, struct rte_mbuf *packet)
 {
     if (!pool || !pool->mbufs || !packet || packet->nb_segs != 1 || packet->next ||
