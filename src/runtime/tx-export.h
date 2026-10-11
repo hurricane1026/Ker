@@ -6,6 +6,11 @@
 /* The sink accepts the copied mbuf only when it returns zero. Any nonzero
  * result means it accepted nothing; positive results are protocol errors. */
 typedef int (*ker_tx_export_sink_fn)(struct rte_mbuf *, void *);
+enum ker_tx_export_mode {
+    KER_TX_EXPORT_SINGLE,
+    KER_TX_EXPORT_CHAIN_NONE,
+    KER_TX_EXPORT_CHAIN_SOFTWARE_CHECKSUM,
+};
 struct ker_tx_export {
     struct ker_skb_queue queue;
     struct sk_buff *pending;
@@ -18,7 +23,7 @@ struct ker_tx_export {
     unsigned int last_completed;
     int last_error;
     bool polling;
-    bool chain_mode;
+    enum ker_tx_export_mode mode;
     ker_tx_export_sink_fn sink;
     void *sink_arg;
 };
@@ -27,11 +32,18 @@ struct ker_tx_export {
  * other return accepts nothing. */
 int ker_tx_export_init(struct ker_tx_export *, struct ker_skb_context *,
     unsigned int packet_limit, size_t byte_limit, ker_tx_export_sink_fn, void *);
-/* Opt into copied DPDK chains. Chain mode admits CHECKSUM_NONE only; the sink
+/* Opt into copied DPDK chains. This mode admits CHECKSUM_NONE only; the sink
  * accepts/frees or retains the entire chain as one ownership unit. */
 int ker_tx_export_init_chain(struct ker_tx_export *, struct ker_skb_context *,
     unsigned int packet_limit, size_t byte_limit, unsigned int segment_payload_limit,
     ker_tx_export_sink_fn, void *);
+/* Opt into copied chains admitting CHECKSUM_NONE and supported Internet
+ * CHECKSUM_PARTIAL packets. Partial checksums are completed in a private copy
+ * on every attempt; the original remains unchanged while queued/retried. The
+ * sink owns the whole chain only when it returns zero. */
+int ker_tx_export_init_chain_software_checksum(struct ker_tx_export *,
+    struct ker_skb_context *, unsigned int packet_limit, size_t byte_limit,
+    unsigned int segment_payload_limit, ker_tx_export_sink_fn, void *);
 int ker_tx_export_enqueue(struct ker_tx_export *, struct sk_buff **);
 /* Worker TX callback. Accepted copies are irreversible; failures after a
  * successful prefix return that count and expose the error in last_error. */

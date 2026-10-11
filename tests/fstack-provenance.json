@@ -166,6 +166,11 @@
       "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
       "source_case": ["test_ff_dpdk_if_send_udp_csum", "test_ff_dpdk_if_send_tcp_csum"],
       "adaptation": "Ker-specific software-completion extension motivated by the pinned IPv4 UDP/TCP checksum TX cases: completes a linear CHECKSUM_PARTIAL skb with the existing Linux checksum semantics, copies it into direct DPDK segments (including a checksum field split across segment boundaries), then validates it through native Ethernet classification and the actual worker transport receiver. The upstream cases exercise TX checksum offload; this does not claim NIC or hardware offload, nonlinear Linux skb support, sockets, or TCP state."
+    },
+    "tx-chain-software-checksum": {
+      "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
+      "source_case": ["test_ff_dpdk_if_send_udp_csum", "test_ff_dpdk_if_send_tcp_csum"],
+      "adaptation": "Ker-specific worker TX extension motivated by pinned UDP/TCP TX checksum cases. An explicit exporter mode admits CHECKSUM_NONE and supported Internet CHECKSUM_PARTIAL packets, completes partial checksums in a private direct-chain copy, and preserves the original skb on sink rejection for retry. Tests verify checksum bytes through the actual worker receive path. The upstream cases exercise offload; this does not claim NIC/hardware offload, nonlinear Linux skb support, sockets, or TCP state."
     }
   }
 }

@@ -7,6 +7,7 @@
 #include "runtime/udp-create.h"
 #include "runtime/tcp-create.h"
 #include "runtime/worker.h"
+#include "runtime/tx-export.h"
 #include <errno.h>
 #include <net/checksum.h>
 #include <pthread.h>
@@ -23,6 +24,10 @@ static struct ker_receive_runtime runtime;
 static struct ker_transport_receiver receiver;
 static struct ker_worker worker;
 static struct rte_mbuf *pending_chain;
+static struct ker_tx_export tx_export;
+static bool tx_reject_once;
+static bool tx_discard_none_copy;
+static int tx_sink_error;
 static enum ker_transport_protocol expected_protocol;
 static const unsigned char source_mac[6] = {2, 1, 2, 3, 4, 5};
 static const unsigned char destination_mac[6] = {2, 6, 7, 8, 9, 10};
@@ -34,12 +39,21 @@ static unsigned char expected_payload[16];
 static unsigned int expected_payload_length, received;
 
 struct foreign_call { struct sk_buff *skb; int error; };
+struct foreign_tx_call { struct ker_tx_export *tx; struct sk_buff *skb; int error; };
 static void *foreign_worker_call(void *arg)
 {
     struct foreign_call *call = arg;
     struct rte_mbuf *out = (void *)(uintptr_t)1;
     call->error = ker_skb_to_mbuf_chain_software_checksum(call->skb, 2, &out);
     CHECK(out == (void *)(uintptr_t)1);
+    return NULL;
+}
+static void *foreign_tx_enqueue(void *arg)
+{
+    struct foreign_tx_call *call = arg;
+    struct sk_buff *skb = call->skb;
+    call->error = ker_tx_export_enqueue(call->tx, &skb);
+    CHECK(skb == call->skb);
     return NULL;
 }
 
@@ -145,6 +159,139 @@ static void verify_ipv4_transport_checksum(const struct rte_mbuf *chain, bool tc
     uint16_t expected = oracle_checksum(full, sizeof(pseudo) + l4len, 0);
     if (!tcp && !expected) expected = UINT16_MAX;
     CHECK(l4[field] == (uint8_t)(expected >> 8) && l4[field + 1] == (uint8_t)expected);
+}
+
+static int tx_sink(struct rte_mbuf *chain, void *arg)
+{
+    CHECK(arg == &tx_export && chain && chain->nb_segs > 1);
+    if (tx_discard_none_copy) {
+        for (struct rte_mbuf *segment = chain; segment; segment = segment->next)
+            CHECK(segment->ol_flags == 0);
+        tx_discard_none_copy = false;
+        ker_packet_free(chain);
+        return 0;
+    }
+    verify_ipv4_transport_checksum(chain, expected_protocol == KER_TRANSPORT_TCP);
+    if (tx_reject_once) { tx_reject_once = false; return -EAGAIN; }
+    if (tx_sink_error) return tx_sink_error;
+    CHECK(!pending_chain);
+    pending_chain = chain;
+    return 0;
+}
+
+static void tx_chain_checksum_retry(void)
+{
+    static const uint8_t payload[] = {0x10, 0x23, 0x45, 0x67, 0x89};
+    memcpy(expected_payload, payload, sizeof(payload));
+    expected_payload_length = sizeof(payload);
+    expected_protocol = KER_TRANSPORT_UDP;
+    struct sk_buff *skb = make_partial(false, payload, sizeof(payload));
+    uint8_t original[128]; CHECK(skb->len <= sizeof(original));
+    memcpy(original, skb->data, skb->len);
+    CHECK(ker_tx_export_init_chain_software_checksum(&tx_export, &context,
+        2, SIZE_MAX, 2, tx_sink, &tx_export) == 0);
+    struct sk_buff *unsupported = make_partial(false, payload, sizeof(payload));
+    unsupported->ip_summed = 2U; /* Native CHECKSUM_COMPLETE enum value. */
+    CHECK(ker_tx_export_enqueue(&tx_export, &unsupported) == -ENOTSUP && unsupported);
+    CHECK(ker_skb_free(unsupported) == 0);
+    struct sk_buff *none = NULL; uint8_t *none_data = NULL;
+    CHECK(ker_skb_alloc(&context, 32, 64, &none) == 0);
+    CHECK(ker_skb_put(none, 32, &none_data) == 0);
+    memset(none_data, 0x5a, 32);
+    tx_discard_none_copy = true;
+    CHECK(ker_tx_export_enqueue(&tx_export, &none) == 0 && !none);
+    struct sk_buff *held_skb = skb;
+    CHECK(ker_tx_export_enqueue(&tx_export, &skb) == 0 && !skb);
+    CHECK(held_skb && context.live == 2 && !memcmp(held_skb->data, original, held_skb->len));
+
+    CHECK(ker_tx_export_poll(&tx_export, 1) == 1 && !tx_export.pending &&
+        tx_export.packets == 1 && context.live == 1 && !pending_chain);
+    struct rte_mbuf *held[POOL_COUNT]; unsigned int held_count = 0;
+    const unsigned int available_prefixes[] = {0, 5, 11};
+    for (unsigned int trial = 0; trial < 3; ++trial) {
+        while (held_count < POOL_COUNT &&
+            (held[held_count] = ker_packet_alloc(&pool)) != NULL) held_count++;
+        CHECK(held_count > 12 && rte_mempool_avail_count(pool.mbufs) == 0);
+        unsigned int give = available_prefixes[trial];
+        while (give--) ker_packet_free(held[--held_count]);
+        CHECK(ker_tx_export_poll(&tx_export, 1) == -ENOMEM);
+        CHECK(tx_export.pending == held_skb && tx_export.packets == 1 &&
+            tx_export.bytes == held_skb->truesize &&
+            !memcmp(held_skb->data, original, held_skb->len));
+        while (held_count) ker_packet_free(held[--held_count]);
+    }
+
+    tx_reject_once = true;
+    CHECK(ker_tx_export_poll(&tx_export, 1) == -EAGAIN);
+    CHECK(tx_export.pending == held_skb && context.live == 1 && !pending_chain);
+    CHECK(!memcmp(held_skb->data, original, held_skb->len));
+    CHECK(ker_tx_export_poll(&tx_export, 1) == 1);
+    CHECK(!tx_export.pending && !tx_export.packets && !tx_export.bytes &&
+        context.live == 0 && pending_chain);
+    struct ker_worker_result progress = {0};
+    unsigned int before = received;
+    CHECK(ker_worker_poll(&worker, worker.timers.now_ns, &progress) == 0);
+    CHECK(progress.rx == 1 && received == before + 1 && !pending_chain && context.live == 0);
+    CHECK(ker_tx_export_cleanup(&tx_export) == 0);
+}
+
+static void tx_chain_tcp_checksum_cancel(void)
+{
+    static const uint8_t payload[] = {0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6, 0x17};
+    memcpy(expected_payload, payload, sizeof(payload));
+    expected_payload_length = sizeof(payload);
+    expected_protocol = KER_TRANSPORT_TCP;
+    struct sk_buff *skb = make_partial(true, payload, sizeof(payload));
+    uint8_t original[128]; CHECK(skb->len <= sizeof(original));
+    memcpy(original, skb->data, skb->len);
+    CHECK(ker_tx_export_init_chain_software_checksum(&tx_export, &context,
+        1, SIZE_MAX, 1, tx_sink, &tx_export) == 0);
+
+    uint16_t saved_start = skb->csum_start;
+    unsigned int users = refcount_read(&skb->users);
+    CHECK(ker_skb_get(skb) == 0);
+    struct sk_buff *same = skb;
+    CHECK(ker_tx_export_enqueue(&tx_export, &same) == -ENOTSUP && same == skb);
+    CHECK(refcount_read(&skb->users) == users + 1 && ker_skb_free(skb) == 0);
+    struct foreign_tx_call foreign_tx = {.tx = &tx_export, .skb = skb};
+    pthread_t tx_thread;
+    CHECK(pthread_create(&tx_thread, NULL, foreign_tx_enqueue, &foreign_tx) == 0);
+    CHECK(pthread_join(tx_thread, NULL) == 0 && foreign_tx.error == -EXDEV);
+    skb->csum_start = 0;
+    same = skb;
+    CHECK(ker_tx_export_enqueue(&tx_export, &same) == -EINVAL && same == skb);
+    skb->csum_start = saved_start;
+    skb_shinfo(skb)->gso_size = 1;
+    CHECK(ker_tx_export_enqueue(&tx_export, &same) == -ENOTSUP && same == skb);
+    skb_shinfo(skb)->gso_size = 0;
+    skb->nohdr = 1;
+    CHECK(ker_tx_export_enqueue(&tx_export, &same) == -ENOTSUP && same == skb);
+    skb->nohdr = 0;
+#if defined(CONFIG_IP_SCTP) || defined(CONFIG_IP_SCTP_MODULE)
+    skb->csum_not_inet = 1;
+    CHECK(ker_tx_export_enqueue(&tx_export, &same) == -ENOTSUP && same == skb);
+    skb->csum_not_inet = 0;
+#endif
+    CHECK(ker_tx_export_enqueue(&tx_export, &same) == 0 && !same);
+    struct sk_buff *returned = (void *)(uintptr_t)1;
+    CHECK(ker_tx_export_cancel(&tx_export, &returned) == 1 && returned == skb);
+    CHECK(!tx_export.packets && !tx_export.bytes && !tx_export.pending &&
+        !memcmp(skb->data, original, skb->len));
+    same = skb;
+    CHECK(ker_tx_export_enqueue(&tx_export, &same) == 0 && !same);
+    tx_sink_error = 1;
+    CHECK(ker_tx_export_poll(&tx_export, 1) == -EPROTO && tx_export.pending == skb);
+    CHECK(tx_export.last_error == -EPROTO && context.live == 1);
+    CHECK(!memcmp(skb->data, original, skb->len) && context.live == 1);
+    tx_sink_error = 0;
+    CHECK(!memcmp(skb->data, original, skb->len));
+    CHECK(ker_tx_export_poll(&tx_export, 1) == 1 && !tx_export.pending && pending_chain);
+    CHECK(context.live == 0);
+    struct ker_worker_result progress = {0};
+    unsigned int before = received;
+    CHECK(ker_worker_poll(&worker, worker.timers.now_ns, &progress) == 0);
+    CHECK(progress.rx == 1 && received == before + 1 && !pending_chain && context.live == 0);
+    CHECK(ker_tx_export_cleanup(&tx_export) == 0);
 }
 
 static void actual_udp_tcp_roundtrip(void)
@@ -300,6 +447,8 @@ int main(void)
     CHECK(ker_worker_init(&worker, &pool, &config, &ops) == 0);
     rollback_and_synthetic();
     actual_udp_tcp_roundtrip();
+    tx_chain_checksum_retry();
+    tx_chain_tcp_checksum_cancel();
     CHECK(ker_worker_cleanup(&worker) == 0);
     CHECK(ker_transport_receiver_unregister(&receiver) == 0);
     CHECK(ker_receive_runtime_cleanup(&runtime) == 0);

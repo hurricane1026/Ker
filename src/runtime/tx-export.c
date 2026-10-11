@@ -13,16 +13,19 @@ static int valid(struct ker_tx_export *tx)
 
 static int init(struct ker_tx_export *tx, struct ker_skb_context *ctx,
     unsigned int packets, size_t bytes, unsigned int segment_limit,
-    bool chain_mode, ker_tx_export_sink_fn sink, void *arg)
+    enum ker_tx_export_mode mode, ker_tx_export_sink_fn sink, void *arg)
 {
     if (!tx || !ctx || !sink || !packets || !bytes) return -EINVAL;
+    if (mode < KER_TX_EXPORT_SINGLE || mode > KER_TX_EXPORT_CHAIN_SOFTWARE_CHECKSUM)
+        return -EINVAL;
+    bool chain_mode = mode != KER_TX_EXPORT_SINGLE;
     if (chain_mode && !segment_limit) return -EINVAL;
     if (chain_mode && segment_limit > UINT16_MAX) return -EOVERFLOW;
     if (tx->queue.context || tx->pending || tx->sink) return -EALREADY;
     int rc = ker_skb_queue_init(&tx->queue, ctx, packets, bytes);
     if (rc) return rc;
     tx->packet_limit = packets; tx->byte_limit = bytes;
-    tx->chain_mode = chain_mode;
+    tx->mode = mode;
     tx->segment_payload_limit = chain_mode ? segment_limit : 0;
     tx->sink = sink; tx->sink_arg = arg;
     return 0;
@@ -31,19 +34,28 @@ static int init(struct ker_tx_export *tx, struct ker_skb_context *ctx,
 int ker_tx_export_init(struct ker_tx_export *tx, struct ker_skb_context *ctx,
     unsigned int packets, size_t bytes, ker_tx_export_sink_fn sink, void *arg)
 {
-    return init(tx, ctx, packets, bytes, 0, false, sink, arg);
+    return init(tx, ctx, packets, bytes, 0, KER_TX_EXPORT_SINGLE, sink, arg);
 }
 
 int ker_tx_export_init_chain(struct ker_tx_export *tx, struct ker_skb_context *ctx,
     unsigned int packets, size_t bytes, unsigned int segment_limit,
     ker_tx_export_sink_fn sink, void *arg)
 {
-    return init(tx, ctx, packets, bytes, segment_limit, true, sink, arg);
+    return init(tx, ctx, packets, bytes, segment_limit, KER_TX_EXPORT_CHAIN_NONE, sink, arg);
+}
+
+int ker_tx_export_init_chain_software_checksum(struct ker_tx_export *tx,
+    struct ker_skb_context *ctx, unsigned int packets, size_t bytes,
+    unsigned int segment_limit, ker_tx_export_sink_fn sink, void *arg)
+{
+    return init(tx, ctx, packets, bytes, segment_limit,
+        KER_TX_EXPORT_CHAIN_SOFTWARE_CHECKSUM, sink, arg);
 }
 
 static int exportable(struct sk_buff *skb, struct ker_skb_context *ctx,
-    bool chain_mode, unsigned int segment_limit)
+    enum ker_tx_export_mode mode, unsigned int segment_limit)
 {
+    bool chain_mode = mode != KER_TX_EXPORT_SINGLE;
     int rc = ker_skb_validate(skb, ctx);
     if (rc) return rc;
     struct skb_shared_info *info = skb_shinfo(skb);
@@ -52,7 +64,8 @@ static int exportable(struct sk_buff *skb, struct ker_skb_context *ctx,
         skb->head_frag || skb->pp_recycle || skb->fclone || skb_shared(skb) ||
         skb_cloned(skb) || skb->nohdr)
         return -ENOTSUP;
-    if (chain_mode && skb->ip_summed != CHECKSUM_NONE) return -ENOTSUP;
+    if (mode == KER_TX_EXPORT_CHAIN_NONE && skb->ip_summed != CHECKSUM_NONE)
+        return -ENOTSUP;
     if (skb->ip_summed == CHECKSUM_PARTIAL) {
 #if defined(CONFIG_IP_SCTP) || defined(CONFIG_IP_SCTP_MODULE)
         if (skb->csum_not_inet) return -ENOTSUP;
@@ -89,7 +102,7 @@ int ker_tx_export_enqueue(struct ker_tx_export *tx, struct sk_buff **packet)
     if (rc) return rc;
     if (!packet || !*packet) return -EINVAL;
     struct sk_buff *skb = *packet;
-    rc = exportable(skb, tx->queue.context, tx->chain_mode, tx->segment_payload_limit);
+    rc = exportable(skb, tx->queue.context, tx->mode, tx->segment_payload_limit);
     if (rc) return rc;
     if (!skb->truesize || tx->bytes > tx->byte_limit || tx->packets >= tx->packet_limit ||
         skb->truesize > tx->byte_limit - tx->bytes) return -ENOSPC;
@@ -101,7 +114,11 @@ int ker_tx_export_enqueue(struct ker_tx_export *tx, struct sk_buff **packet)
 
 static int make_copy(struct ker_tx_export *tx, struct sk_buff *skb, struct rte_mbuf **out)
 {
-    if (tx->chain_mode)
+    if (tx->mode == KER_TX_EXPORT_CHAIN_SOFTWARE_CHECKSUM &&
+        skb->ip_summed == CHECKSUM_PARTIAL)
+        return ker_skb_to_mbuf_chain_software_checksum(skb,
+            tx->segment_payload_limit, out);
+    if (tx->mode != KER_TX_EXPORT_SINGLE)
         return ker_skb_to_mbuf_chain_copy(skb, tx->segment_payload_limit, out);
     if (skb->ip_summed == CHECKSUM_PARTIAL)
         return ker_skb_to_mbuf_software_checksum(skb, out);
