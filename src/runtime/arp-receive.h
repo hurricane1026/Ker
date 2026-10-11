@@ -11,6 +11,7 @@ struct ker_arp_message {
     unsigned int operation;
     bool target_local;
 };
+struct ker_neighbor_monitor;
 /* Message is borrowed for the call; callback owns no skb. May construct a
  * reply with ker_arp_create and retain it in its own bounded TX queue. Return
  * NET_RX_SUCCESS or NET_RX_DROP. Packet is released on every callback result. */
@@ -26,4 +27,8 @@ struct ker_arp_receiver {
 int ker_arp_receiver_register(struct ker_arp_receiver *, struct ker_receive_runtime *,
     struct ker_ipv4_address *, ker_arp_message_fn, void *);
 int ker_arp_receiver_unregister(struct ker_arp_receiver *);
+/* Apply native neighbor feedback only for this receiver's live decoded reply
+ * callback and a matching monitored entry. No authenticity or routing claim. */
+int ker_arp_neighbor_feedback(struct ker_arp_receiver *, struct ker_neighbor_monitor *,
+    const struct ker_arp_message *, u32 flags);
 #endif

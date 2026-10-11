@@ -53,6 +53,8 @@ protocol/length/opcode 及四组地址；验证 clone 设备寿命、导出内�
 以及 worker TX 与软件回环。导入测试验证原始代码/来源、稳定输出、输入变更
 拒绝、CONFIG/MODULE 失败和 glibc flags 共存。
 
-当前没有 arp_xmit/NF_HOOK、arp_rcv、arp_process、自动 ARP 应答、邻居更新或
-真正 IP 收发。下一步接入地址/邻居和发送调度，再移植真实 ARP 接收与 IPv4/ICMP
+当前没有 arp_xmit、netfilter hooks、完整 arp_process、自动 ARP 应答或真正 IP
+收发。原始 arp_rcv gate、私有解码和受限的既有监视邻居反馈由独立适配提供；
+它们不提供一般学习、新邻居创建或 NIC TX。下一步接入发送调度，再移植依赖
+完整 ARP 处理的 IPv4/ICMP
 入口。公共能力仍仅声明 checksum，协议服务与网卡性能仍需后续验证。

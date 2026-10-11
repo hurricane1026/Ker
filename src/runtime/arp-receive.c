@@ -6,6 +6,22 @@
  * cannot replace the scope. Event callbacks never receive skb ownership. */
 _Static_assert(sizeof(struct neighbour_cb) <= sizeof(((struct sk_buff *)0)->cb), "neighbor scratch fits skb");
 static _Thread_local struct ker_arp_receiver *active;
+static _Thread_local const struct ker_arp_message *active_message;
+static _Thread_local struct ker_arp_message active_message_copy;
+static _Thread_local unsigned int active_packet_type;
+int ker_arp_rx_feedback_scope(struct ker_arp_receiver *receiver, const struct ker_arp_message *message)
+{
+    if (!receiver || !message) return -EINVAL;
+    if (receiver->handler.runtime && rte_lcore_id() != receiver->handler.runtime->lcore) return -EXDEV;
+    if (active != receiver || active_message != message) return -EPERM;
+    if (!receiver->handler.runtime) return -EPERM;
+    if (active_packet_type != PACKET_HOST) return -ENOTSUP;
+    if (message->sender_ip != active_message_copy.sender_ip || message->target_ip != active_message_copy.target_ip ||
+        message->operation != active_message_copy.operation || message->target_local != active_message_copy.target_local ||
+        memcmp(message->sender_mac, active_message_copy.sender_mac, ETH_ALEN) ||
+        memcmp(message->target_mac, active_message_copy.target_mac, ETH_ALEN)) return -ESTALE;
+    return 0;
+}
 struct sk_buff *ker_arp_rx_clone(struct sk_buff *skb, gfp_t flags)
 {
     BUG_ON(!active || flags != GFP_ATOMIC);
@@ -54,7 +70,9 @@ int ker_arp_rx_process(struct sk_buff *skb, struct net_device *dev)
     message.target_local = local;
     /* Native neighbour scratch was reset by original arp_rcv. This private
      * decoder does not execute arp_process, routing or a netfilter hook. */
+    active_message = &message; active_message_copy = message; active_packet_type = skb->pkt_type;
     status = active->receive(&message, active->arg);
+    active_message = NULL; active_message_copy = (struct ker_arp_message){0}; active_packet_type = 0;
 done:
     ker_arp_rx_free(skb);
     return status;
