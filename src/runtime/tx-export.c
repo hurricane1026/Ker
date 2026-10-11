@@ -11,19 +11,38 @@ static int valid(struct ker_tx_export *tx)
     return tx->polling ? -EBUSY : 0;
 }
 
-int ker_tx_export_init(struct ker_tx_export *tx, struct ker_skb_context *ctx,
-    unsigned int packets, size_t bytes, ker_tx_export_sink_fn sink, void *arg)
+static int init(struct ker_tx_export *tx, struct ker_skb_context *ctx,
+    unsigned int packets, size_t bytes, unsigned int segment_limit,
+    bool chain_mode, ker_tx_export_sink_fn sink, void *arg)
 {
     if (!tx || !ctx || !sink || !packets || !bytes) return -EINVAL;
+    if (chain_mode && !segment_limit) return -EINVAL;
+    if (chain_mode && segment_limit > UINT16_MAX) return -EOVERFLOW;
     if (tx->queue.context || tx->pending || tx->sink) return -EALREADY;
     int rc = ker_skb_queue_init(&tx->queue, ctx, packets, bytes);
     if (rc) return rc;
     tx->packet_limit = packets; tx->byte_limit = bytes;
+    tx->chain_mode = chain_mode;
+    tx->segment_payload_limit = chain_mode ? segment_limit : 0;
     tx->sink = sink; tx->sink_arg = arg;
     return 0;
 }
 
-static int exportable(struct sk_buff *skb, struct ker_skb_context *ctx)
+int ker_tx_export_init(struct ker_tx_export *tx, struct ker_skb_context *ctx,
+    unsigned int packets, size_t bytes, ker_tx_export_sink_fn sink, void *arg)
+{
+    return init(tx, ctx, packets, bytes, 0, false, sink, arg);
+}
+
+int ker_tx_export_init_chain(struct ker_tx_export *tx, struct ker_skb_context *ctx,
+    unsigned int packets, size_t bytes, unsigned int segment_limit,
+    ker_tx_export_sink_fn sink, void *arg)
+{
+    return init(tx, ctx, packets, bytes, segment_limit, true, sink, arg);
+}
+
+static int exportable(struct sk_buff *skb, struct ker_skb_context *ctx,
+    bool chain_mode, unsigned int segment_limit)
 {
     int rc = ker_skb_validate(skb, ctx);
     if (rc) return rc;
@@ -33,6 +52,7 @@ static int exportable(struct sk_buff *skb, struct ker_skb_context *ctx)
         skb->head_frag || skb->pp_recycle || skb->fclone || skb_shared(skb) ||
         skb_cloned(skb) || skb->nohdr)
         return -ENOTSUP;
+    if (chain_mode && skb->ip_summed != CHECKSUM_NONE) return -ENOTSUP;
     if (skb->ip_summed == CHECKSUM_PARTIAL) {
 #if defined(CONFIG_IP_SCTP) || defined(CONFIG_IP_SCTP_MODULE)
         if (skb->csum_not_inet) return -ENOTSUP;
@@ -44,7 +64,22 @@ static int exportable(struct sk_buff *skb, struct ker_skb_context *ctx)
     } else if (skb->ip_summed != CHECKSUM_NONE) return -ENOTSUP;
     uint64_t geometry = (uint64_t)skb_headroom(skb) + skb->len;
     if (geometry > UINT_MAX) return -EOVERFLOW;
-    if (geometry > rte_pktmbuf_data_room_size(ctx->packets->mbufs)) return -ENOSPC;
+    if (chain_mode) {
+        uint64_t room = rte_pktmbuf_data_room_size(ctx->packets->mbufs);
+        uint64_t first_head = skb_headroom(skb);
+        uint64_t later_head = RTE_MIN((uint64_t)RTE_PKTMBUF_HEADROOM, room);
+        if (first_head > room) return -ENOSPC;
+        uint64_t first_capacity = RTE_MIN((uint64_t)segment_limit, room - first_head);
+        if (skb->len && !first_capacity) return -ENOSPC;
+        uint64_t remaining = skb->len > first_capacity ? skb->len - first_capacity : 0;
+        uint64_t segments = 1;
+        if (remaining) {
+            uint64_t later_capacity = RTE_MIN((uint64_t)segment_limit, room - later_head);
+            if (!later_capacity) return -ENOSPC;
+            segments += (remaining + later_capacity - 1) / later_capacity;
+        }
+        if (segments > UINT16_MAX) return -EOVERFLOW;
+    } else if (geometry > rte_pktmbuf_data_room_size(ctx->packets->mbufs)) return -ENOSPC;
     return 0;
 }
 
@@ -54,7 +89,7 @@ int ker_tx_export_enqueue(struct ker_tx_export *tx, struct sk_buff **packet)
     if (rc) return rc;
     if (!packet || !*packet) return -EINVAL;
     struct sk_buff *skb = *packet;
-    rc = exportable(skb, tx->queue.context);
+    rc = exportable(skb, tx->queue.context, tx->chain_mode, tx->segment_payload_limit);
     if (rc) return rc;
     if (!skb->truesize || tx->bytes > tx->byte_limit || tx->packets >= tx->packet_limit ||
         skb->truesize > tx->byte_limit - tx->bytes) return -ENOSPC;
@@ -64,8 +99,10 @@ int ker_tx_export_enqueue(struct ker_tx_export *tx, struct sk_buff **packet)
     return 0;
 }
 
-static int make_copy(struct sk_buff *skb, struct rte_mbuf **out)
+static int make_copy(struct ker_tx_export *tx, struct sk_buff *skb, struct rte_mbuf **out)
 {
+    if (tx->chain_mode)
+        return ker_skb_to_mbuf_chain_copy(skb, tx->segment_payload_limit, out);
     if (skb->ip_summed == CHECKSUM_PARTIAL)
         return ker_skb_to_mbuf_software_checksum(skb, out);
     return ker_skb_to_mbuf(skb, out);
@@ -89,7 +126,7 @@ int ker_tx_export_poll(void *arg, unsigned int budget)
             tx->pending = skb; tx->pending_charge = skb->truesize;
         }
         struct rte_mbuf *copy = NULL;
-        rc = make_copy(tx->pending, &copy);
+        rc = make_copy(tx, tx->pending, &copy);
         if (rc) { tx->last_error = rc; break; }
         rc = tx->sink(copy, tx->sink_arg);
         if (rc != 0) {
