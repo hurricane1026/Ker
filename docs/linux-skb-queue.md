@@ -57,5 +57,6 @@ TX 测试在真实 mbuf 池耗尽后保留已出队引用，并在资源回收�
 既有 neighbor-import 验证新增原始 helper 片段、稳定输出和配置拒绝。
 
 下一步把该队列接入真实邻居 entry 的 unresolved 生命周期、probe/retry 与
-失败回收，再移植相关原始 __neigh_event_send/arp_process 分支。当前队列
+失败回收，再移植 `__neigh_event_send` 的 INCOMPLETE/队列分支和 `arp_process`。
+当前队列
 独立于永久邻居表，不将永久条目伪装成动态 NUD。公共 capability 仍为 checksum。

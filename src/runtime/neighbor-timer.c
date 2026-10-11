@@ -1,9 +1,12 @@
 #include "runtime/neighbor-timer.h"
 #include "compat/neighbor-timer-port.h"
+#include "compat/neighbor-event-send-port.h"
 #include "ker/linux_neighbor_update.h"
 #include <rte_lcore.h>
 #include <errno.h>
 static _Thread_local struct ker_neighbor_monitor *active;
+static _Thread_local unsigned long bh_saved_flags;
+static _Thread_local bool bh_active;
 static int horizon(struct ker_runtime *, unsigned long);
 static unsigned long interval(struct neigh_parms *p)
 {
@@ -21,6 +24,25 @@ static struct ker_neighbor_monitor *scope(struct neighbour *entry)
 }
 void ker_neigh_write_lock(rwlock_t *lock) { BUG_ON(pthread_rwlock_wrlock(&lock->native)); }
 void ker_neigh_write_unlock(rwlock_t *lock) { BUG_ON(pthread_rwlock_unlock(&lock->native)); }
+void ker_neigh_event_write_lock_bh(rwlock_t *lock)
+{
+    BUG_ON(!active || bh_active || ker_local_irq_disabled());
+    bh_saved_flags=ker_local_irq_save(); bh_active=true;
+    ker_neigh_write_lock(lock);
+}
+void ker_neigh_event_write_unlock(rwlock_t *lock)
+{ BUG_ON(!active || !bh_active || !ker_local_irq_disabled()); ker_neigh_write_unlock(lock); }
+void ker_neigh_event_local_bh_enable(void)
+{
+    BUG_ON(!active || !bh_active || !ker_local_irq_disabled());
+    bh_active=false; ker_local_irq_restore(bh_saved_flags); bh_saved_flags=0;
+}
+void ker_neigh_event_write_unlock_bh(rwlock_t *lock)
+{ ker_neigh_event_write_unlock(lock); ker_neigh_event_local_bh_enable(); }
+void ker_neigh_event_trace_done(struct neighbour *entry,int result)
+{ struct ker_neighbor_monitor *m=scope(entry); m->event_send_events++; m->event_send_result=result; }
+void ker_neigh_event_trace_dead(struct neighbour *entry,int result)
+{ struct ker_neighbor_monitor *m=scope(entry); m->event_send_dead_events++; m->event_send_result=result; }
 void ker_neigh_timer_release(struct neighbour *entry)
 {
     scope(entry); BUG_ON(refcount_read(&entry->refcnt) <= 2);
@@ -162,12 +184,39 @@ int ker_neighbor_monitor_probe(struct ker_neighbor_monitor *m)
     int error=valid(m); if(error)return error;
     if (m->error) return m->error;
     if(m->entry->nud_state != NUD_STALE)return -EALREADY;
-    if (m->timer.runtime->polling) return -EBUSY;
-    error = horizon(m->timer.runtime, interval(m->entry->parms));
-    if (error) return error;
-    unsigned long now; BUG_ON(ker_timer_list_now(&m->timer,&now));
-    m->entry->nud_state=NUD_DELAY; m->entry->updated=now; m->entry->used=now;
-    return call(m,start);
+    return ker_neighbor_monitor_event_send(m);
+}
+static int event_send_native(void *arg)
+{
+    struct ker_neighbor_monitor *m=arg;
+    return ker_linux_neigh_event_send(m->entry,NULL,false);
+}
+int ker_neighbor_monitor_event_send(struct ker_neighbor_monitor *m)
+{
+    int error=valid(m); if(error)return error;
+    if(m->error)return m->error;
+    if(m->timer.runtime->polling || ker_local_irq_disabled())return -EBUSY;
+    struct neighbour *entry=m->entry;
+    unsigned int state=entry->nud_state;
+    if(state!=NUD_REACHABLE && state!=NUD_STALE && state!=NUD_DELAY && state!=NUD_PROBE)
+        return -ENOTSUP;
+    if(!entry->dev || !m->table->address || !m->table->address->device ||
+       !m->table->address->device->native || entry->dev->type!=ARPHRD_ETHER ||
+       entry->dev->addr_len!=ETH_ALEN || m->table->address->device->native!=entry->dev ||
+       NEIGH_VAR(entry->parms,APP_PROBES)!=0 || entry->arp_queue.qlen ||
+       entry->arp_queue_len_bytes || entry->hh.hh_len ||
+       (entry->dev->header_ops && entry->dev->header_ops->cache_update))return -ENOTSUP;
+    bool pending=timer_pending(&entry->timer);
+    if(pending != (state!=NUD_STALE))return -ENOTSUP;
+    unsigned int refs=2U+(unsigned int)pending;
+    if((unsigned int)refcount_read(&entry->refcnt)!=refs)return -EBUSY;
+    if(state==NUD_STALE) {
+        error=horizon(m->timer.runtime,(unsigned long)NEIGH_VAR(entry->parms,DELAY_PROBE_TIME));
+        if(error)return error;
+    }
+    int result=call_arg(m,event_send_native,m);
+    BUG_ON(bh_active || ker_local_irq_disabled());
+    return result;
 }
 int ker_neighbor_monitor_confirm(struct ker_neighbor_monitor *m)
 {

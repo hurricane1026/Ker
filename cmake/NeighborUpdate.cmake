@@ -21,6 +21,8 @@ target_link_libraries(ker_neighbor_update_headers INTERFACE ker_neighbor_timer_h
 target_include_directories(ker_neighbor_timer_port PRIVATE "${KER_NEIGH_UPDATE_IMPORT}")
 target_link_libraries(ker_neighbor_timer_port PRIVATE ker_neighbor_update_headers)
 add_library(ker_neighbor_update_port OBJECT "${KER_NEIGH_UPDATE_IMPORT}/linux_neighbor_update.c" src/runtime/neighbor-update.c)
+set_source_files_properties("${KER_NEIGH_UPDATE_IMPORT}/linux_neighbor_update.c"
+    PROPERTIES COMPILE_OPTIONS -Wno-unused-parameter)
 target_link_libraries(ker_neighbor_update_port PRIVATE ker_neighbor_update_headers)
 target_compile_features(ker_neighbor_update_port PRIVATE c_std_11)
 set_target_properties(ker_neighbor_update_port PROPERTIES POSITION_INDEPENDENT_CODE ON C_VISIBILITY_PRESET hidden)

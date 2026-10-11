@@ -1,0 +1,28 @@
+set(KER_NEIGH_EVENT_SEND_IMPORT "${PROJECT_BINARY_DIR}/linux-neighbor-event-send")
+set(KER_NEIGH_EVENT_SEND_MANIFEST "${PROJECT_SOURCE_DIR}/src/compat/linux-neighbor-event-send-manifest.json")
+execute_process(COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tools/import-linux-neighbor-event-send.py"
+    --linux "${KER_LINUX_DIR}" --manifest "${KER_NEIGH_EVENT_SEND_MANIFEST}" --out "${KER_NEIGH_EVENT_SEND_IMPORT}"
+    RESULT_VARIABLE ker_neighbor_event_send_result ERROR_VARIABLE ker_neighbor_event_send_error)
+if(NOT ker_neighbor_event_send_result EQUAL 0)
+    message(FATAL_ERROR "Linux neighbor event-send import failed: ${ker_neighbor_event_send_error}")
+endif()
+file(READ "${KER_NEIGH_EVENT_SEND_MANIFEST}" ker_neighbor_event_send_manifest_json)
+string(JSON ker_neighbor_event_send_files LENGTH "${ker_neighbor_event_send_manifest_json}" files)
+math(EXPR ker_neighbor_event_send_last "${ker_neighbor_event_send_files} - 1")
+foreach(ker_neighbor_event_send_index RANGE ${ker_neighbor_event_send_last})
+    string(JSON ker_neighbor_event_send_file MEMBER "${ker_neighbor_event_send_manifest_json}" files ${ker_neighbor_event_send_index})
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${KER_LINUX_DIR}/${ker_neighbor_event_send_file}")
+endforeach()
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${KER_NEIGH_EVENT_SEND_MANIFEST}"
+    "${PROJECT_SOURCE_DIR}/tools/import-linux-neighbor-event-send.py" "${PROJECT_SOURCE_DIR}/tools/import-linux-skb.py")
+add_library(ker_neighbor_event_send_headers INTERFACE)
+target_include_directories(ker_neighbor_event_send_headers SYSTEM INTERFACE "${KER_NEIGH_EVENT_SEND_IMPORT}")
+target_link_libraries(ker_neighbor_event_send_headers INTERFACE ker_neighbor_timer_headers)
+target_include_directories(ker_neighbor_timer_port PRIVATE "${KER_NEIGH_EVENT_SEND_IMPORT}")
+target_link_libraries(ker_neighbor_timer_port PRIVATE ker_neighbor_event_send_headers)
+add_library(ker_neighbor_event_send_port OBJECT "${KER_NEIGH_EVENT_SEND_IMPORT}/linux_neighbor_event_send.c")
+set_source_files_properties("${KER_NEIGH_EVENT_SEND_IMPORT}/linux_neighbor_event_send.c"
+    PROPERTIES COMPILE_OPTIONS -Wno-sign-compare)
+target_link_libraries(ker_neighbor_event_send_port PRIVATE ker_neighbor_event_send_headers)
+target_compile_features(ker_neighbor_event_send_port PRIVATE c_std_11)
+set_target_properties(ker_neighbor_event_send_port PROPERTIES POSITION_INDEPENDENT_CODE ON C_VISIBILITY_PRESET hidden)

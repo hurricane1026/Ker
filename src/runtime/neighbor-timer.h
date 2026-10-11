@@ -20,6 +20,8 @@ struct ker_neighbor_monitor {
     void *arg;
     struct neigh_statistics stats;
     unsigned long debug_events, timer_events;
+    unsigned long event_send_events, event_send_dead_events;
+    int event_send_result;
     bool busy, notification, probe_callback;
     const struct ker_neighbor_event *probe_event;
     int error; /* stopped adapter clock error; no synthetic NUD transition */
@@ -29,9 +31,12 @@ struct ker_neighbor_monitor {
  * Timing parameters must already be configured; no ARP learning or queues. */
 int ker_neighbor_monitor_init(struct ker_neighbor_monitor *, struct ker_neighbor_table *,
     struct ker_runtime *, __be32 ip, ker_neighbor_event_fn probe, ker_neighbor_event_fn notify, void *);
-/* Explicitly request delayed probing of a STALE entry; deadline/state are set
- * at this adapter boundary, then original Linux timer transitions take over. */
+/* Explicitly request delayed probing of a STALE entry through native
+ * __neigh_event_send; only its documented monitor profile is admitted. */
 int ker_neighbor_monitor_probe(struct ker_neighbor_monitor *);
+/* Native __neigh_event_send on an existing empty-queue monitored entry.
+ * Only REACHABLE/STALE/DELAY/PROBE and a NULL skb are supported. */
+int ker_neighbor_monitor_event_send(struct ker_neighbor_monitor *);
 /* Positive feedback only; invokes original neigh_confirm in the timer scope.
  * It does not revive FAILED neighbors or learn/change their MAC. */
 int ker_neighbor_monitor_confirm(struct ker_neighbor_monitor *);
