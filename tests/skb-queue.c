@@ -3,6 +3,7 @@
 #include "runtime/skb-queue.h"
 #include "runtime/ipv4-packet-view.h"
 #include "runtime/udp-packet-view.h"
+#include "runtime/tcp-packet-view.h"
 #include "runtime/memory.h"
 #include "runtime/worker.h"
 #include <pthread.h>
@@ -46,6 +47,15 @@ static void blocked(struct sk_buff *alias)
     CHECK(udp.header == (const unsigned char *)(uintptr_t)1 && udp.payload == (const unsigned char *)(uintptr_t)2 &&
         udp.source_port == 0x1234 && udp.destination_port == 0x5678 && udp.checksum == 0x9abc &&
         udp.udp_length == 0x1234 && udp.payload_length == 0x5678);
+    struct ker_tcp_packet_view tcp = {
+        (const unsigned char *)(uintptr_t)1, (const unsigned char *)(uintptr_t)2,
+        0x1234, 0x5678, 0x9abc, 21, 22, 23
+    };
+    CHECK(ker_tcp_packet_view_init(&context, alias, &tcp) == -EBUSY);
+    CHECK(tcp.header == (const unsigned char *)(uintptr_t)1 &&
+        tcp.payload == (const unsigned char *)(uintptr_t)2 && tcp.source_port == 0x1234 &&
+        tcp.destination_port == 0x5678 && tcp.checksum == 0x9abc &&
+        tcp.tcp_header_length == 21 && tcp.segment_length == 22 && tcp.payload_length == 23);
 }
 static void *wrong_worker(void *arg)
 {
