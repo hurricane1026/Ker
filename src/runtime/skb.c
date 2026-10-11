@@ -347,8 +347,8 @@ int ker_skb_to_mbuf(struct sk_buff *skb, struct rte_mbuf **result)
 {
     return skb_to_mbuf_copy(skb, result, false);
 }
-int ker_skb_to_mbuf_chain_copy(struct sk_buff *skb,
-    unsigned int segment_payload_limit, struct rte_mbuf **result)
+static int skb_to_mbuf_chain_copy(struct sk_buff *skb,
+    unsigned int segment_payload_limit, struct rte_mbuf **result, bool allow_partial)
 {
     if (!result || !segment_payload_limit)
         return -EINVAL;
@@ -357,7 +357,8 @@ int ker_skb_to_mbuf_chain_copy(struct sk_buff *skb,
     int error = ker_skb_validate(skb, skb ? envelope(skb)->owner : NULL);
     if (error)
         return error;
-    if (skb->ip_summed == CHECKSUM_PARTIAL || skb_shinfo(skb)->gso_size ||
+    if ((allow_partial ? skb->ip_summed != CHECKSUM_PARTIAL :
+        skb->ip_summed == CHECKSUM_PARTIAL) || skb_shinfo(skb)->gso_size ||
         skb_shinfo(skb)->gso_type)
         return -ENOTSUP;
 
@@ -421,6 +422,82 @@ int ker_skb_to_mbuf_chain_copy(struct sk_buff *skb,
             chain->nb_segs++;
             chain->pkt_len += segment->data_len;
         }
+    }
+    *result = chain;
+    return 0;
+}
+int ker_skb_to_mbuf_chain_copy(struct sk_buff *skb,
+    unsigned int segment_payload_limit, struct rte_mbuf **result)
+{
+    return skb_to_mbuf_chain_copy(skb, segment_payload_limit, result, false);
+}
+
+static int chain_write(struct rte_mbuf *chain, uint32_t offset,
+    const uint8_t *bytes, size_t length)
+{
+    struct rte_mbuf *segment = chain;
+    uint16_t count = chain->nb_segs;
+    for (uint16_t i = 0; i < count && segment; ++i, segment = segment->next) {
+        if (offset >= segment->data_len) {
+            offset -= segment->data_len;
+            continue;
+        }
+        size_t available = segment->data_len - offset;
+        size_t copy = length < available ? length : available;
+        memcpy((uint8_t *)rte_pktmbuf_mtod(segment, void *) + offset, bytes, copy);
+        bytes += copy;
+        length -= copy;
+        offset = 0;
+        if (!length)
+            return 0;
+    }
+    return -EINVAL;
+}
+
+int ker_skb_to_mbuf_chain_software_checksum(struct sk_buff *skb,
+    unsigned int segment_payload_limit, struct rte_mbuf **result)
+{
+    if (!result || !segment_payload_limit)
+        return -EINVAL;
+    if (segment_payload_limit > UINT16_MAX)
+        return -EOVERFLOW;
+    int error = supported(skb);
+    if (error)
+        return error;
+    error = ker_skb_validate(skb, envelope(skb)->owner);
+    if (error)
+        return error;
+    if (skb->ip_summed != CHECKSUM_PARTIAL)
+        return -EINVAL;
+    if (skb_shared(skb) || skb_cloned(skb) || skb->nohdr ||
+#if defined(CONFIG_IP_SCTP) || defined(CONFIG_IP_SCTP_MODULE)
+        skb->csum_not_inet ||
+#endif
+        skb_shinfo(skb)->gso_size || skb_shinfo(skb)->gso_type)
+        return -ENOTSUP;
+
+    /* Keep start/field checks identical to the single-mbuf completion path. */
+    int start = (int)skb->csum_start - (int)skb_headroom(skb);
+    if (start < 0 || (unsigned int)start >= skb->len)
+        return -EINVAL;
+    uint64_t field = (uint64_t)(unsigned int)start + skb->csum_offset;
+    if (field > skb->len || skb->len - (unsigned int)field < sizeof(__sum16))
+        return -EINVAL;
+    if (skb->len - (unsigned int)start > INT_MAX)
+        return -EOVERFLOW;
+
+    __sum16 checksum = csum_fold(csum_partial(skb->data + start,
+        (int)(skb->len - (unsigned int)start), 0));
+    if (!checksum)
+        checksum = CSUM_MANGLED_0;
+    struct rte_mbuf *chain = NULL;
+    error = skb_to_mbuf_chain_copy(skb, segment_payload_limit, &chain, true);
+    if (error)
+        return error;
+    error = chain_write(chain, (uint32_t)field, (const uint8_t *)&checksum, sizeof(checksum));
+    if (error) {
+        ker_packet_free(chain);
+        return error;
     }
     *result = chain;
     return 0;
