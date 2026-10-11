@@ -392,6 +392,159 @@ static void test_rx_metadata_boundary(void)
     CHECK(ker_skb_free(skb) == 0);
     check_pool(31);
 }
+static struct rte_mbuf *make_chain_pair(struct rte_mbuf **tail_out)
+{
+    struct rte_mbuf *head = ker_packet_alloc(&pool), *tail = ker_packet_alloc(&pool);
+    CHECK(head && tail);
+    CHECK(rte_pktmbuf_append(head, 3) && rte_pktmbuf_append(tail, 2));
+    memcpy(rte_pktmbuf_mtod(head, void *), "abc", 3);
+    memcpy(rte_pktmbuf_mtod(tail, void *), "de", 2);
+    CHECK(rte_pktmbuf_chain(head, tail) == 0);
+    *tail_out = tail;
+    return head;
+}
+static void expect_chain_copy_error(struct rte_mbuf *head, struct rte_mbuf *tail, int expected)
+{
+    uint16_t head_segs = head->nb_segs, head_data_off = head->data_off, head_data_len = head->data_len;
+    uint32_t head_len = head->pkt_len;
+    uint64_t head_flags = head->ol_flags, tail_flags = tail->ol_flags;
+    struct rte_mbuf *head_next = head->next, *tail_next = tail->next;
+    uint16_t tail_segs = tail->nb_segs, tail_data_off = tail->data_off, tail_data_len = tail->data_len;
+    uint32_t tail_len = tail->pkt_len;
+    void *head_buf = head->buf_addr, *tail_buf = tail->buf_addr;
+    uint16_t head_refs = rte_mbuf_refcnt_read(head), tail_refs = rte_mbuf_refcnt_read(tail);
+    unsigned int live = ctx.live, available = rte_mempool_avail_count(pool.mbufs);
+    struct sk_buff *result = (struct sk_buff *)(uintptr_t)1;
+    CHECK(ker_skb_copy_from_mbuf_chain(&ctx, head, 64, &result) == expected);
+    CHECK(result == (struct sk_buff *)(uintptr_t)1 && ctx.live == live);
+    CHECK(rte_mempool_avail_count(pool.mbufs) == available);
+    CHECK(head->nb_segs == head_segs && head->pkt_len == head_len && head->data_off == head_data_off);
+    CHECK(head->data_len == head_data_len && head->next == head_next && head->buf_addr == head_buf);
+    CHECK(head->ol_flags == head_flags && tail->ol_flags == tail_flags);
+    CHECK(tail->nb_segs == tail_segs && tail->pkt_len == tail_len && tail->data_off == tail_data_off);
+    CHECK(tail->data_len == tail_data_len && tail->next == tail_next && tail->buf_addr == tail_buf);
+    CHECK(rte_mbuf_refcnt_read(head) == head_refs && rte_mbuf_refcnt_read(tail) == tail_refs);
+    CHECK(memcmp((uint8_t *)head_buf + head_data_off, "abc", 3) == 0);
+    CHECK(memcmp((uint8_t *)tail_buf + RTE_PKTMBUF_HEADROOM, "de", 2) == 0);
+}
+struct foreign_chain_copy {
+    struct rte_mbuf *chain;
+    int error;
+    bool output_unchanged;
+};
+static void *foreign_chain_copy_worker(void *opaque)
+{
+    struct foreign_chain_copy *request = opaque;
+    struct sk_buff *result = (struct sk_buff *)(uintptr_t)1;
+    request->error = ker_skb_copy_from_mbuf_chain(&ctx, request->chain, 64, &result);
+    request->output_unchanged = result == (struct sk_buff *)(uintptr_t)1;
+    return NULL;
+}
+static void test_mbuf_chain_copy(void)
+{
+    struct rte_mbuf *tail;
+    struct rte_mbuf *head = make_chain_pair(&tail);
+    struct foreign_chain_copy request = {.chain = head};
+    pthread_t thread;
+    CHECK(pthread_create(&thread, NULL, foreign_chain_copy_worker, &request) == 0);
+    CHECK(pthread_join(thread, NULL) == 0);
+    CHECK(request.error == -EXDEV && request.output_unchanged);
+    head->nb_segs = 3;
+    expect_chain_copy_error(head, tail, -EINVAL);
+    head->nb_segs = 2;
+    ++head->pkt_len;
+    expect_chain_copy_error(head, tail, -EINVAL);
+    --head->pkt_len;
+    head->next = NULL;
+    expect_chain_copy_error(head, tail, -EINVAL);
+    head->next = tail;
+    tail->next = head;
+    expect_chain_copy_error(head, tail, -EINVAL);
+    tail->next = NULL;
+    tail->data_off = tail->buf_len;
+    expect_chain_copy_error(head, tail, -EINVAL);
+    tail->data_off = RTE_PKTMBUF_HEADROOM;
+    head->ol_flags = RTE_MBUF_F_RX_VLAN_STRIPPED;
+    expect_chain_copy_error(head, tail, -ENOTSUP);
+    head->ol_flags = 0;
+    rte_mbuf_refcnt_update(tail, 1);
+    expect_chain_copy_error(head, tail, -EBUSY);
+    rte_mbuf_refcnt_update(tail, -1);
+    struct sk_buff *result = (struct sk_buff *)(uintptr_t)1;
+    CHECK(ker_skb_copy_from_mbuf_chain(&ctx, head, UINT_MAX, &result) == -EOVERFLOW);
+    CHECK(result == (struct sk_buff *)(uintptr_t)1);
+    CHECK(ker_skb_copy_from_mbuf_chain(&ctx, head, 2000, &result) == -ENOSPC);
+    CHECK(result == (struct sk_buff *)(uintptr_t)1 && head->next == tail && head->pkt_len == 5);
+    CHECK(ker_skb_copy_from_mbuf_chain(&ctx, head, 64, NULL) == -EINVAL);
+    CHECK(ker_skb_copy_from_mbuf_chain(&ctx, NULL, 64, &result) == -EINVAL);
+    void *saved_tail_buffer = tail->buf_addr;
+    tail->buf_addr = NULL;
+    CHECK(ker_skb_copy_from_mbuf_chain(&ctx, head, 64, &result) == -ENOTSUP);
+    CHECK(result == (struct sk_buff *)(uintptr_t)1 && head->next == tail && ctx.live == 0);
+    tail->buf_addr = saved_tail_buffer;
+    ker_packet_free(head);
+    check_pool(31);
+
+    head = make_chain_pair(&tail);
+    tail->ol_flags = RTE_MBUF_F_RX_VLAN_STRIPPED | RTE_MBUF_F_RX_IP_CKSUM_NONE;
+    result = NULL;
+    CHECK(ker_skb_copy_from_mbuf_chain(&ctx, head, 64, &result) == 0);
+    CHECK(result && result->len == 5 && memcmp(result->data, "abcde", 5) == 0);
+    CHECK(tail->ol_flags == (RTE_MBUF_F_RX_VLAN_STRIPPED | RTE_MBUF_F_RX_IP_CKSUM_NONE));
+    CHECK(ker_skb_free(result) == 0);
+    ker_packet_free(head);
+    check_pool(31);
+
+    /* Source-pool exhaustion fails atomically and can be retried in-place. */
+    head = make_chain_pair(&tail);
+    struct rte_mbuf *held[29];
+    for (unsigned int i = 0; i < 29; ++i) { held[i] = ker_packet_alloc(&pool); CHECK(held[i]); }
+    result = (struct sk_buff *)(uintptr_t)1;
+    CHECK(ker_skb_copy_from_mbuf_chain(&ctx, head, 64, &result) == -ENOMEM);
+    CHECK(result == (struct sk_buff *)(uintptr_t)1 && ctx.live == 0);
+    CHECK(head->next == tail && head->nb_segs == 2 && head->pkt_len == 5);
+    CHECK(rte_mbuf_refcnt_read(head) == 1 && rte_mbuf_refcnt_read(tail) == 1);
+    ker_packet_free(held[0]);
+    CHECK(ker_skb_copy_from_mbuf_chain(&ctx, head, 64, &result) == 0);
+    CHECK(result->len == 5 && skb_headroom(result) == 64 && memcmp(result->data, "abcde", 5) == 0);
+    for (unsigned int i = 1; i < 29; ++i) ker_packet_free(held[i]);
+    ker_packet_free(head);
+    CHECK(memcmp(result->data, "abcde", 5) == 0);
+    CHECK(ker_skb_free(result) == 0);
+    check_pool(31);
+
+    struct rte_mbuf *backing = ker_packet_alloc(&pool), *indirect = NULL;
+    head = ker_packet_alloc(&pool);
+    CHECK(backing && head && rte_pktmbuf_append(backing, 2) && rte_pktmbuf_append(head, 3));
+    memcpy(rte_pktmbuf_mtod(backing, void *), "de", 2);
+    memcpy(rte_pktmbuf_mtod(head, void *), "abc", 3);
+    indirect = rte_pktmbuf_clone(backing, pool.mbufs);
+    CHECK(indirect && !RTE_MBUF_DIRECT(indirect));
+    CHECK(rte_pktmbuf_chain(head, indirect) == 0);
+    result = (struct sk_buff *)(uintptr_t)1;
+    CHECK(ker_skb_copy_from_mbuf_chain(&ctx, head, 64, &result) == -ENOTSUP);
+    CHECK(result == (struct sk_buff *)(uintptr_t)1 && head->next == indirect && head->pkt_len == 5);
+    CHECK(rte_mbuf_refcnt_read(backing) == 2 && rte_mbuf_refcnt_read(indirect) == 1);
+    ker_packet_free(head);
+    CHECK(rte_mbuf_refcnt_read(backing) == 1);
+    ker_packet_free(backing);
+    check_pool(31);
+
+    head = ker_packet_alloc(&pool);
+    CHECK(head && rte_pktmbuf_append(head, 3));
+    memcpy(rte_pktmbuf_mtod(head, void *), "abc", 3);
+    void *external_buffer = NULL;
+    struct rte_mbuf *external = external_packet(&external_buffer);
+    CHECK(rte_pktmbuf_chain(head, external) == 0);
+    unsigned int frees_before = extbuf_frees;
+    result = (struct sk_buff *)(uintptr_t)1;
+    CHECK(ker_skb_copy_from_mbuf_chain(&ctx, head, 64, &result) == -ENOTSUP);
+    CHECK(result == (struct sk_buff *)(uintptr_t)1 && head->next == external && head->pkt_len == 7);
+    CHECK(RTE_MBUF_HAS_EXTBUF(external) && memcmp(rte_pktmbuf_mtod(external, const void *), "ext!", 4) == 0);
+    ker_packet_free(head);
+    CHECK(extbuf_frees == frees_before + 1);
+    check_pool(31);
+}
 int main(void)
 {
     ker_test_eal_init();
@@ -406,6 +559,7 @@ int main(void)
     test_rx_and_rejection();
     test_external_backing_rejection();
     test_rx_metadata_boundary();
+    test_mbuf_chain_copy();
     test_foreign_backing();
     CHECK(ctx.live == 0);
     CHECK(ker_packet_pool_cleanup(&pool) == 0);

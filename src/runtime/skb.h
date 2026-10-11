@@ -24,6 +24,12 @@ int ker_skb_alloc(struct ker_skb_context *ctx, unsigned int payload_capacity,
 /* Adopts a unique direct single-segment mbuf only on success. Its tail must
  * leave room for skb_shared_info; failure retains caller's mbuf ownership. */
 int ker_skb_from_mbuf(struct ker_skb_context *ctx, struct rte_mbuf *packet, struct sk_buff **result);
+/* Copy a validated direct, uniquely owned multi-segment mbuf chain into a
+ * linear skb. The source chain remains caller-owned and unchanged on every
+ * return. Indirect/shared/extbuf chains are not supported. RX metadata is
+ * interpreted on the head mbuf only, as defined by DPDK. */
+int ker_skb_copy_from_mbuf_chain(struct ker_skb_context *ctx,
+    const struct rte_mbuf *chain, unsigned int headroom, struct sk_buff **result);
 /* Validate a bridge skb and its owning context without taking a reference. */
 int ker_skb_validate(struct sk_buff *skb, struct ker_skb_context *ctx);
 /* Queued descriptors reject validate/get/free/clone/export and mutation with

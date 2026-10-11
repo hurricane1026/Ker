@@ -70,6 +70,11 @@
       "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
       "source_case": "test_ff_dpdk_if_send_basic",
       "adaptation": "Export a payload with explicit headroom, verify mbuf data_off and bytes, then free the skb and validate copy lifetime. No ethdev transmission claim."
+    },
+    "multiseg-copy": {
+      "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
+      "source_case": "test_ff_dpdk_if_send_multiseg",
+      "adaptation": "Use a real three-segment DPDK chain with uneven and zero-length segments as input to Ker's explicit chain-to-linear-skb copy adapter; verify source links/refcounts remain caller-owned and the copy survives source-chain release. This does not implement upstream's segmented TX path or Linux nonlinear skb support."
     }
   }
 }
