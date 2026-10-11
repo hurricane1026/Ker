@@ -1,6 +1,7 @@
 #include "check.h"
 #include "eal.h"
 #include "runtime/skb-queue.h"
+#include "runtime/ipv4-packet-view.h"
 #include "runtime/memory.h"
 #include "runtime/worker.h"
 #include <pthread.h>
@@ -32,6 +33,10 @@ static void blocked(struct sk_buff *alias)
     CHECK(ker_skb_pull(alias, 1) == -EBUSY && ker_skb_trim(alias, 1) == -EBUSY);
     struct sk_buff *duplicate = alias;
     CHECK(ker_skb_queue_push(&other, &duplicate) == -EBUSY && duplicate == alias);
+    struct ker_ipv4_packet_view view = {(const unsigned char *)(uintptr_t)1, 11, 12, 13, 14};
+    CHECK(ker_ipv4_packet_view_init(&context, alias, &view) == -EBUSY);
+    CHECK(view.header == (const unsigned char *)(uintptr_t)1 && view.header_length == 11 &&
+        view.packet_length == 12 && view.payload_length == 13 && view.frag_off == 14);
 }
 static void *wrong_worker(void *arg)
 {
