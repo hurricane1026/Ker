@@ -47,10 +47,12 @@ add/remove/lookup/release/snapshot 只能由同一个初始化 worker 调用。n
 
 ## 边界和验证
 
-ARP parms 提供对象/设备关联、引用基础及显式离线 timing/probe 参数配置。probe timers、GC/managed work、pending skb/proxy queues、
-header cache、output callbacks 和 neighbor learning 不活跃；没有 neigh_update、
-neigh_event_send、ARP 收包解析、自动应答或 PMD 发送。上层可取得稳定的永久
-MAC 用于现有原始 ARP 构造测试，但这不代表解析流程已实现。
+ARP parms 提供对象/设备关联、引用基础及显式离线 timing/probe 参数配置。
+受监视条目运行原始 probe/retry timer，并可在 probe callback 内通过
+[native ARP probe adapter](linux-arp-probes.md) 取得构造出的 skb。GC/managed
+work、pending skb/proxy queues、header cache、neighbor learning、neigh_update、
+neigh_event_send、ARP 收包解析、自动应答或 PMD 发送仍未接入。普通永久表项
+保持静态，不会自动解析地址。
 
 真实 EAL 测试覆盖分阶段分配与实际 pool-name 冲突回滚、非法 key/MAC、错误
 worker、duplicate key、表上限与底层池耗尽的区别、容量回收和同名重建，
@@ -58,15 +60,15 @@ worker、duplicate key、表上限与底层池耗尽的区别、容量回收和�
 原始 MAC snapshot 的输出与 addr_len 拒绝，以及用 snapshot 构造真实 ARP
 应答字节。导入测试检查逐字代码、稳定输出、配置与 MODULE 拒绝和源码变更。
 
-下一步接动态邻居更新、probe/重试定时器及发送调度，再接真正的 ARP 接收与
-IPv4/ICMP 入口。公共 capability 仍仅为 checksum，当前无法提供网络服务。
+下一步接邻居动态更新、发送调度，再接真正的 ARP 接收与 IPv4/ICMP 入口。
+公共 capability 仍仅为 checksum，当前无法提供网络服务。
 
 ## 离线邻居参数适配
 
 `ker_neighbor_configure` 在空表且无额外 parms 引用、活 skb、NAPI 或协议注册时，
 配置明确的 retrans、base reachable、delay tick 数以及 unicast、multicast、
 multicast reprobe 次数。timer_list profile 的 tick 为 1ms；没有隐式默认值。
-当前永久邻居表仍不发 probe，也不因此启用动态解析。
+普通永久邻居表仍不发 probe；probe 仅由显式监视器的原生 timer callback 驱动。
 
 原始 `neigh_var_set`、NEIGH_VAR 系列宏、`neigh_set_reach_time` 和
 `neigh_rand_reach_time` 均逐字导入并保留来源。原始 set helper 更新真实

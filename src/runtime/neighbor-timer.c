@@ -60,7 +60,11 @@ void ker_neigh_timer_trace(struct neighbour *entry) { scope(entry)->timer_events
 static void solicit(struct neighbour *entry, struct sk_buff *skb)
 {
     struct ker_neighbor_monitor *m = scope(entry); BUG_ON(skb);
-    struct ker_neighbor_event e; event(m, &e); m->probe(&e, m->arg);
+    struct ker_neighbor_event e; event(m, &e);
+    BUG_ON(m->probe_callback || m->probe_event);
+    m->probe_callback = true; m->probe_event = &e;
+    m->probe(&e, m->arg);
+    m->probe_event = NULL; m->probe_callback = false;
 }
 static int unsupported_output(struct neighbour *entry, struct sk_buff *skb)
 { (void)entry; (void)skb; return -ENOTSUP; }
@@ -165,6 +169,17 @@ int ker_neighbor_monitor_snapshot(struct ker_neighbor_monitor *m,struct ker_neig
     int error=valid(m); if(error)return error;
     if(!out)return -EINVAL;
     event(m,out); return 0;
+}
+int ker_neighbor_monitor_probe_scope(struct ker_neighbor_monitor *m, const struct ker_neighbor_event *e)
+{
+    if (!m || !e) return -EINVAL;
+    if (!m->table || !m->entry) return -EINVAL;
+    if (rte_lcore_id() != m->table->lcore) return -EXDEV;
+    if (active != m || !m->busy || !m->probe_callback || m->probe_event != e) return -EPERM;
+    struct ker_neighbor_event current; event(m, &current);
+    if (current.ip != e->ip || current.state != e->state || current.probes != e->probes ||
+        current.error != e->error || memcmp(current.mac, e->mac, sizeof(e->mac))) return -ESTALE;
+    return 0;
 }
 int ker_neighbor_monitor_cleanup(struct ker_neighbor_monitor *m)
 {

@@ -17,7 +17,8 @@ struct ker_neighbor_monitor {
     void *arg;
     struct neigh_statistics stats;
     unsigned long debug_events, timer_events;
-    bool busy, notification;
+    bool busy, notification, probe_callback;
+    const struct ker_neighbor_event *probe_event;
     int error; /* stopped adapter clock error; no synthetic NUD transition */
 };
 /* Pin a previously permanent entry and its table/clock. Explicit initialization
@@ -32,6 +33,8 @@ int ker_neighbor_monitor_probe(struct ker_neighbor_monitor *);
  * It does not revive FAILED neighbors or learn/change their MAC. */
 int ker_neighbor_monitor_confirm(struct ker_neighbor_monitor *);
 int ker_neighbor_monitor_snapshot(struct ker_neighbor_monitor *, struct ker_neighbor_event *);
+/* Internal callback binding used by the native ARP probe adapter. */
+int ker_neighbor_monitor_probe_scope(struct ker_neighbor_monitor *, const struct ker_neighbor_event *);
 /* Cancel its timer/reference, restore the original permanent mapping, unpin.
  * Fails while native callbacks run or other lookup references remain. */
 int ker_neighbor_monitor_cleanup(struct ker_neighbor_monitor *);

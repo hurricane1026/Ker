@@ -1,7 +1,9 @@
 #include "check.h"
 #include "eal.h"
 #include "runtime/neighbor-timer.h"
+#include "runtime/arp.h"
 #include "runtime/memory.h"
+#include "runtime/arp-probe-port.h"
 #include <errno.h>
 #include <pthread.h>
 #include <limits.h>
@@ -13,11 +15,15 @@ static struct ker_neighbor_table table;
 static struct ker_runtime runtime_clock;
 static struct ker_neighbor_monitor monitor;
 static unsigned int probes, notifications, last_state;
-static const unsigned char mac[6] = {2,1,2,3,4,5};
+static bool build_probes;
+static struct ker_neighbor_event saved_event;
+static const struct ker_neighbor_event *saved_event_pointer;
+static unsigned int built_probes;
+static const unsigned char mac[6] = {2,1,2,3,4,5}, peer[6] = {2,6,7,8,9,10};
 static __be32 ip(unsigned int n) { return rte_cpu_to_be_32(0xc0000200U+n); }
 static void guarded(const struct ker_neighbor_event *e)
 {
-    CHECK(e->ip == ip(2) && memcmp(e->mac,mac,6)==0);
+    CHECK(e->ip == ip(2) && memcmp(e->mac,peer,6)==0);
     CHECK(ker_neighbor_monitor_cleanup(&monitor)==-EBUSY);
     CHECK(ker_neighbor_monitor_probe(&monitor)==-EBUSY);
     CHECK(ker_neighbor_monitor_confirm(&monitor)==-EBUSY);
@@ -29,11 +35,71 @@ static void probe(const struct ker_neighbor_event *e,void *arg)
 {
     CHECK(arg==&monitor); guarded(e);
     CHECK(e->state==NUD_PROBE && e->probes==probes);
+    if (build_probes) {
+        saved_event = *e; saved_event_pointer = &saved_event;
+        struct ker_neighbor_event copy = *e;
+        struct sk_buff *skb = (void *)(uintptr_t)1;
+        CHECK(ker_arp_probe_create(NULL, e, &skb) == -EINVAL && skb == (void *)(uintptr_t)1);
+        CHECK(ker_arp_probe_create(&monitor, NULL, &skb) == -EINVAL && skb == (void *)(uintptr_t)1);
+        CHECK(ker_arp_probe_create(&monitor, e, NULL) == -EINVAL && skb == (void *)(uintptr_t)1);
+        CHECK(ker_arp_probe_create(&monitor, &copy, &skb) == -EPERM && skb == (void *)(uintptr_t)1);
+        if (!built_probes) {
+            address.native->cnf.data[IPV4_DEVCONF_ARP_ANNOUNCE - 1] = 1;
+            CHECK(ker_arp_probe_create(&monitor, e, &skb) == -ENOTSUP && skb == (void *)(uintptr_t)1);
+            address.native->cnf.data[IPV4_DEVCONF_ARP_ANNOUNCE - 1] = 0;
+            address.native->cnf.data[IPV4_DEVCONF_ROUTE_LOCALNET - 1] = 1;
+            CHECK(ker_arp_probe_create(&monitor, e, &skb) == -ENOTSUP && skb == (void *)(uintptr_t)1);
+            address.native->cnf.data[IPV4_DEVCONF_ROUTE_LOCALNET - 1] = 0;
+            NEIGH_VAR_SET(monitor.entry->parms, APP_PROBES, 1);
+            CHECK(ker_arp_probe_create(&monitor, e, &skb) == -ENOTSUP && skb == (void *)(uintptr_t)1);
+            NEIGH_VAR_SET(monitor.entry->parms, APP_PROBES, 0);
+            unsigned int saved_flags = address.native->ifa_list->ifa_flags;
+            address.native->ifa_list->ifa_flags |= IFA_F_SECONDARY;
+            CHECK(ker_arp_probe_create(&monitor, e, &skb) == -ENOTSUP && skb == (void *)(uintptr_t)1);
+            address.native->ifa_list->ifa_flags = saved_flags;
+            struct in_ifaddr *saved_ifa = address.native->ifa_list;
+            address.native->ifa_list = NULL;
+            CHECK(ker_arp_probe_create(&monitor, e, &skb) == -ENOTSUP && skb == (void *)(uintptr_t)1);
+            address.native->ifa_list = saved_ifa;
+            const struct header_ops *saved_ops = device.native->header_ops;
+            device.native->header_ops = NULL;
+            CHECK(ker_arp_probe_create(&monitor, e, &skb) == -ENOTSUP && skb == (void *)(uintptr_t)1);
+            device.native->header_ops = saved_ops;
+            ker_memory_fail_after(0);
+            CHECK(ker_arp_probe_create(&monitor, e, &skb) == -ENOMEM && skb == (void *)(uintptr_t)1);
+            ker_memory_fail_after(-1);
+            struct rte_mbuf *held[31];
+            for (unsigned int i=0; i<31; ++i) CHECK((held[i]=ker_packet_alloc(&pool)) != NULL);
+            CHECK(ker_arp_probe_create(&monitor, e, &skb) == -ENOMEM && skb == (void *)(uintptr_t)1);
+            for (unsigned int i=0; i<31; ++i) ker_packet_free(held[i]);
+        }
+        __be32 saved_mask = address.native->ifa_list->ifa_mask;
+        if (!built_probes) address.native->ifa_list->ifa_mask = inet_make_mask(32);
+        CHECK(ker_arp_probe_create(&monitor, e, &skb) == 0);
+        address.native->ifa_list->ifa_mask = saved_mask;
+        CHECK(skb->len == 42 && skb->mac_len == ETH_HLEN && skb->mac_header == skb_headroom(skb));
+        CHECK(skb->network_header == skb->mac_header + ETH_HLEN);
+        unsigned char expected[42] = {0};
+        if (e->probes < 2) memcpy(expected, peer, 6); else memset(expected, 0xff, 6);
+        memcpy(expected + 6, mac, 6); expected[12] = 8; expected[13] = 6;
+        expected[15] = 1; expected[16] = 8; expected[18] = 6; expected[19] = 4;
+        expected[21] = ARPOP_REQUEST; memcpy(expected + 22, mac, 6);
+        memcpy(expected + 28, &( __be32 ){ip(1)}, 4); memcpy(expected + 38, &e->ip, 4);
+        CHECK(memcmp(skb->data, expected, sizeof(expected)) == 0);
+        struct rte_mbuf *exported = NULL;
+        CHECK(ker_skb_to_mbuf(skb, &exported) == 0 && exported->pkt_len == sizeof(expected));
+        CHECK(memcmp(rte_pktmbuf_mtod(exported, const unsigned char *), expected, sizeof(expected)) == 0);
+        CHECK(ker_skb_free(skb) == 0); ker_packet_free(exported); ++built_probes;
+    }
     ++probes;
 }
 static void notify(const struct ker_neighbor_event *e,void *arg)
 {
     CHECK(arg==&monitor); guarded(e); ++notifications; last_state=e->state;
+    if (build_probes) {
+        struct sk_buff *skb = (void *)(uintptr_t)1;
+        CHECK(ker_arp_probe_create(&monitor, e, &skb) == -EPERM && skb == (void *)(uintptr_t)1);
+    }
 }
 static unsigned int state(void)
 {
@@ -75,17 +141,24 @@ static void *foreign(void *arg)
     CHECK(ker_neighbor_monitor_snapshot(&monitor,&out)==-EXDEV && out.state==99);
     return NULL;
 }
+static void *foreign_probe(void *arg)
+{
+    (void)arg; struct sk_buff *skb = (void *)(uintptr_t)1;
+    CHECK(ker_arp_probe_create(&monitor, saved_event_pointer, &skb) == -EXDEV);
+    CHECK(skb == (void *)(uintptr_t)1); return NULL;
+}
 int main(void)
 {
     ker_test_eal_init(); CHECK(ker_memory_init(SOCKET_ID_ANY,7)==0);
     CHECK(ker_packet_pool_init(&pool,"timer_packets",31,0,2048,SOCKET_ID_ANY)==0);
     CHECK(ker_skb_context_init(&context,&pool,"timer_skbs")==0);
     CHECK(ker_eth_device_init(&device,&context,"eth0",1,mac)==0);
+    CHECK(ker_arp_device_setup(&device)==0);
     CHECK(ker_ipv4_address_init(&address,&device,ip(1),24)==0);
     CHECK(ker_neighbor_table_init(&table,&address,"timer_neighbors",3,1)==0);
     struct ker_neighbor_config config={.retrans_ticks=20,.reachable_ticks=100,.delay_ticks=30,.ucast_probes=2,.mcast_reprobes=1};
     CHECK(ker_neighbor_configure(&table,&config)==0);
-    CHECK(ker_neighbor_add(&table,ip(2),mac)==0);
+    CHECK(ker_neighbor_add(&table,ip(2),peer)==0);
     ker_runtime_init(&runtime_clock);
     CHECK(ker_neighbor_monitor_init(&monitor,&table,&runtime_clock,ip(3),probe,notify,&monitor)==-ENOENT);
     runtime_clock.now_ns=INT64_MAX;
@@ -118,13 +191,22 @@ int main(void)
     CHECK(ker_neighbor_monitor_probe(&monitor)==-EOVERFLOW && state()==NUD_STALE);
     CHECK(!timer_pending(&monitor.entry->timer)); runtime_clock.now_ns=saved_now;
     CHECK(ker_neighbor_monitor_probe(&monitor)==0 && state()==NUD_DELAY);
+    build_probes=true; built_probes=0;
     next(); CHECK(state()==NUD_PROBE && probes==1 && last_state==NUD_PROBE);
-    next(); next(); CHECK(probes==3 && state()==NUD_PROBE);
-    next(); CHECK(state()==NUD_FAILED && last_state==NUD_FAILED);
+    next(); next(); CHECK(probes==3 && state()==NUD_PROBE && built_probes==3);
+    build_probes=false;
+    struct sk_buff *outside = (void *)(uintptr_t)1;
+    CHECK(ker_arp_probe_create(&monitor,saved_event_pointer,&outside)==-EPERM && outside==(void *)(uintptr_t)1);
+    CHECK(pthread_create(&thread,NULL,foreign_probe,NULL)==0 && pthread_join(thread,NULL)==0);
+    build_probes=true; next(); build_probes=false;
+    CHECK(state()==NUD_FAILED && last_state==NUD_FAILED);
     CHECK(monitor.stats.res_failed==1 && notifications==3);
     CHECK(refcount_read(&monitor.entry->refcnt)==2 && !timer_pending(&monitor.entry->timer));
     CHECK(ker_neighbor_monitor_confirm(&monitor)==-ENOTSUP);
     CHECK(ker_neighbor_monitor_cleanup(&monitor)==0);
+    struct sk_buff *clean_output = (void *)(uintptr_t)1;
+    CHECK(ker_arp_probe_create(&monitor, &saved_event, &clean_output) == -EINVAL &&
+          clean_output == (void *)(uintptr_t)1);
     /* First deadline fits, but its native equality rearm would overflow.
      * The adapter stops with an explicit error and releases the expired hold. */
     ker_runtime_init(&runtime_clock);
@@ -154,7 +236,7 @@ int main(void)
     CHECK(ker_neighbor_remove(&table,ip(2))==0);
     config.ucast_probes=config.mcast_reprobes=0;
     CHECK(ker_neighbor_configure(&table,&config)==0);
-    CHECK(ker_neighbor_add(&table,ip(2),mac)==0); ker_runtime_init(&runtime_clock);
+    CHECK(ker_neighbor_add(&table,ip(2),peer)==0); ker_runtime_init(&runtime_clock);
     init(); stale(); CHECK(ker_neighbor_monitor_probe(&monitor)==0); next();
     CHECK(state()==NUD_FAILED && probes==0 && monitor.stats.res_failed==1);
     CHECK(ker_neighbor_monitor_cleanup(&monitor)==0);
