@@ -73,4 +73,4 @@ native probe callback, the bounded [ARP probe adapter](docs/linux-arp-probes.md)
 can return Linux's constructed packet as a caller-owned skb. NIC transmission,
 ARP learning and unresolved packet queues remain unsupported.
 
-F-Stack 外部测试场景的适配范围与追溯见 [测试迁移](docs/fstack-tests.md)，当前已有 11 个真实 DPDK 回归场景。
+F-Stack 外部测试场景的适配范围与追溯见 [测试迁移](docs/fstack-tests.md)，当前已有 12 个真实 DPDK 回归场景。

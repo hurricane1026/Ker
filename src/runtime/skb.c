@@ -73,6 +73,40 @@ static int packet_geometry(const struct rte_mbuf *packet, unsigned int *size)
         return -ENOSPC;
     return 0;
 }
+static int mbuf_chain_geometry(const struct rte_mbuf *head, uint32_t *length)
+{
+    if (!head || !length)
+        return -EINVAL;
+    uint16_t count = head->nb_segs;
+    if (!count)
+        return -EINVAL;
+    if (count == 1)
+        return head->next ? -EINVAL : -ENOTSUP;
+    const struct rte_mbuf *segment = head;
+    uint64_t total = 0;
+    for (uint16_t i = 0; i < count; ++i) {
+        if (!segment)
+            return -EINVAL;
+        if (i == 0 && segment->nb_segs != count)
+            return -EINVAL;
+        if (!segment->buf_addr || RTE_MBUF_HAS_EXTBUF(segment) || !RTE_MBUF_DIRECT(segment))
+            return -ENOTSUP;
+        if (rte_mbuf_refcnt_read(segment) != 1)
+            return -EBUSY;
+        if ((uint64_t)segment->data_off + segment->data_len > segment->buf_len)
+            return -EINVAL;
+        if (rx_metadata_supported(segment))
+            return -ENOTSUP;
+        total += segment->data_len;
+        if (total > UINT32_MAX)
+            return -EOVERFLOW;
+        segment = segment->next;
+    }
+    if (segment || total != head->pkt_len)
+        return -EINVAL;
+    *length = (uint32_t)total;
+    return 0;
+}
 static void finalize(struct skb_envelope *desc, struct rte_mbuf *packet, unsigned int size)
 {
     /* Reset the entire reserved region on pool reuse, including fragment slots
@@ -125,6 +159,39 @@ int ker_skb_from_mbuf(struct ker_skb_context *ctx, struct rte_mbuf *packet, stru
     skb_put(&desc->skb, packet->data_len);
     ++ctx->live;
     *result = &desc->skb;
+    return 0;
+}
+int ker_skb_copy_from_mbuf_chain(struct ker_skb_context *ctx,
+    const struct rte_mbuf *chain, unsigned int headroom, struct sk_buff **result)
+{
+    uint32_t length;
+    if (!result)
+        return -EINVAL;
+    if (!owner_active(ctx))
+        return -EXDEV;
+    int error = mbuf_chain_geometry(chain, &length);
+    if (error)
+        return error;
+    if ((uint64_t)headroom + length > UINT_MAX)
+        return -EOVERFLOW;
+    struct sk_buff *skb = NULL;
+    error = ker_skb_alloc(ctx, length, headroom, &skb);
+    if (error)
+        return error;
+    uint8_t *destination;
+    error = ker_skb_put(skb, length, &destination);
+    if (error) {
+        ker_skb_free(skb);
+        return error;
+    }
+    const struct rte_mbuf *segment = chain;
+    for (uint16_t i = 0; i < chain->nb_segs; ++i) {
+        if (segment->data_len)
+            memcpy(destination, rte_pktmbuf_mtod(segment, const void *), segment->data_len);
+        destination += segment->data_len;
+        segment = segment->next;
+    }
+    *result = skb;
     return 0;
 }
 int ker_skb_alloc(struct ker_skb_context *ctx, unsigned int payload_capacity,
