@@ -151,6 +151,11 @@
       "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
       "source_case": "test_ff_dpdk_if_send_tcp_csum",
       "adaptation": "Ker-specific extension of the pinned TCP TX checksum case: derives the source IPv4/MAC from one configured address/device and the destination MAC from an existing NUD_PERMANENT neighbor, releases the lookup reference before allocation, then validates software checksums through TX retry and segmented worker RX. The upstream case does not test neighbor selection or ARP resolution. No unresolved queue, FIB, routing, source fallback, TCP state, socket or NIC transmission is claimed."
+    },
+    "fstack-chain-export": {
+      "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
+      "source_case": "test_ff_dpdk_if_send_multiseg",
+      "adaptation": "Ker-specific positive linear-skb-to-DPDK-chain copy extension motivated by the pinned multisegment TX case. Ker copies an existing supported linear UDP/TCP packet into independently owned direct mbufs, then validates the chain through its copy/classify worker RX path after releasing the source skb. The upstream case exercises F-Stack TX; this does not claim F-Stack/NIC transmission, Linux nonlinear skb support, or offload."
     }
   }
 }
