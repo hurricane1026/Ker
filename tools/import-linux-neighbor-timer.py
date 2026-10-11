@@ -34,13 +34,13 @@ def main():
         header+=line(nh,'#define '+name)
     header+=line(u,'#define NTF_EXT_EXT_VALIDATED')+line(nh,'#define NTF_EXT_SHIFT')+line(nh,'#define NTF_EXT_VALIDATED')
     header+=definition(nh,'static inline void neigh_confirm(')
-    header+='void ker_linux_neigh_timeout(struct timer_list *);\nvoid ker_linux_neigh_start(struct neighbour *, unsigned long);\n#endif\n'
+    header+='void ker_linux_neigh_timeout(struct timer_list *);\nvoid ker_linux_neigh_start(struct neighbour *, unsigned long);\nint ker_linux_neigh_cancel(struct neighbour *);\n#endif\n'
     body='''/* SPDX-License-Identifier: GPL-2.0 */
 #include "compat/neighbor-timer-port.h"
 '''
     body+=emit(nc,0,texts[nc].index('#include'))
     body+=line(nh,'#define neigh_hold(n)')
-    for anchor in ('static void neigh_add_timer(', 'static void neigh_suspect(', 'static void neigh_connect(',
+    for anchor in ('static void neigh_add_timer(', 'static int neigh_del_timer(', 'static void neigh_suspect(', 'static void neigh_connect(',
                    'static __inline__ int neigh_max_probes(', 'static void neigh_invalidate(', 'static void neigh_probe(',
                    'static void neigh_timer_handler('):
         if anchor.endswith('neigh_timer_handler('):
@@ -49,6 +49,7 @@ def main():
         else:body+=definition(nc,anchor)
     body+='''\nvoid ker_linux_neigh_timeout(struct timer_list *t) { neigh_timer_handler(t); }
 void ker_linux_neigh_start(struct neighbour *n, unsigned long when) { neigh_add_timer(n, when); }
+int ker_linux_neigh_cancel(struct neighbour *n) { return neigh_del_timer(n); }
 '''
     (a.out/'ker').mkdir(parents=True,exist_ok=True)
     for path,data in ((a.out/'ker/linux_neighbor_timer.h',header),(a.out/'linux_neighbor_timer.c',body),(a.out/'provenance.json',json.dumps(provenance,indent=2)+'\n')):
