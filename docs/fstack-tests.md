@@ -30,6 +30,7 @@ FreeBSD 栈、cmocka mock/stub 或覆盖率脚本。没有通过宿主机 socket
 | fstack-ipv4-ingress-validation | test_ff_dpdk_if_send_multiseg / test_ff_dpdk_if_send_ip_csum | Ker-specific ingress extension：真实 EAL segmented Ethernet/IPv4 frame 经 copy/classify 后，以原始 `ip_fast_csum` 检查 IPv4 base/options header，验证长度、padding、fragment 字段和失败所有权。Pinned F-Stack 两个用例都是 TX 路径，没有 IPv4 ingress/header-validation case；本测试不模拟 `ip_rcv`、路由、reassembly、transport/socket 或 NIC delivery |
 | fstack-udp-ingress-validation | test_ff_dpdk_if_send_udp_csum | Ker-specific ingress extension：真实 EAL segmented UDP/IPv4 datagram 经已有 IPv4 view 后，用原始 Linux pseudoheader checksum helpers验证偶数/奇数payload、checksum零值语义和长度/fragment/协议失败。Pinned F-Stack case仅设置TX UDP checksum offload并调用 send；不覆盖UDP ingress，也不代表socket、路由、reassembly、ICMP、NIC或TX offload |
 | fstack-udp-minimal-boundaries | test_ff_dpdk_if_send_udp_csum | Additional Ker-specific real-EAL regression：minimum 8-byte UDP headers with zero/nonzero checksum, both ports zero, even payload and Ethernet padding exclusion; independent checksum oracle plus source/copy lifetime checks. Upstream case remains TX-only |
+| fstack-tcp-ingress-validation | test_ff_dpdk_if_send_tcp_csum | Ker-specific ingress extension：真实 EAL segmented IPv4/TCP，经原始 IPv4 view 后校验完整 TCP pseudoheader checksum、20–60 byte header/data offset和opaque options。Pinned F-Stack case只覆盖TCP TX checksum offload。本测试不解释 TCP options、不实现连接状态、routing、reassembly、socket或NIC delivery |
 
 逐例上游路径、case 名、固定版本和原始文件 SHA256 记录于
 [provenance](../tests/fstack-provenance.json)。源链接固定到具体 commit；这是
@@ -54,6 +55,7 @@ EAL 测试初始化，显式检查全部 descriptor、queue 和 pool 回收。DP
 - `ker_skb_to_mbuf_software_checksum` 仅为线性 Internet-checksum CHECKSUM_PARTIAL skb 提供软件 completion 副本；当导入的 skb layout 暴露 `csum_not_inet` 时会拒绝 CRC32C，且始终拒绝 GSO。它与 F-Stack 原用例的 NIC offload path 不同，也不改普通 `ker_skb_to_mbuf` 的 fail-closed 约束。
 - `ker_ipv4_packet_view_init` 只验证owned/classified linear IPv4 skb的完整header/options、total length和原始checksum，并借出只读view；不改变 skb 长度，padding留在原位置，fragment字段只是原始wire-order值。此项是Ker-specific extension，非上游IPv4 ingress场景，无fragment reassembly、FIB、netfilter、L4或socket处理。
 - `ker_udp_packet_view_init` 进一步验证 unfragmented IPv4 UDP 的完整固定头、精确匹配的UDP/IP长度及伪首部checksum；合法IPv4 UDP零checksum按协议作为checksum omitted接受。UDP头/负载以只读borrowed pointers返回，保留wire-order字段，不修剪padding、不送socket，也不信任RX checksum元数据跳过软件校验。该场景由TX-only F-Stack UDP checksum用例启发，属于Ker-specific ingress扩展。
+- `ker_tcp_packet_view_init` 进一步验证unfragmented IPv4 TCP segment、完整 TCP pseudoheader checksum、最小/最大data offset及完整segment bounds；TCP checksum字段值零不作为省略标志，只按同一校验算法验证。Header options保持opaque，不做解释；不修改skb、不做routing、reassembly、TCP状态机或socket处理。此 ingress view 是受 F-Stack TX checksum案例启发的Ker-specific extension。
 - 有 RSS、跨 worker 转发、设备管理能力后，适配 flow-map、drain/reload 场景；
   当前 FIFO 测试不代表这些并发/多进程能力。
 - 有 Ker socket/epoll API 后，再引入 TCP/UDP 应用互通、连接回收、超时等黑盒
