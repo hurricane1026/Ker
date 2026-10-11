@@ -118,7 +118,7 @@ def main():
     start = netmem.index("typedef unsigned long __bitwise netmem_ref;")
     header += emit("include/net/netmem.h", start, netmem.index(";", start) + 1)
     header += "#define MAX_SKB_FRAGS CONFIG_MAX_SKB_FRAGS\n"
-    for name in ("CHECKSUM_NONE", "CHECKSUM_PARTIAL", "SKB_DATA_ALIGN", "SKB_TRUESIZE",
+    for name in ("CHECKSUM_NONE", "CHECKSUM_UNNECESSARY", "CHECKSUM_PARTIAL", "SKB_DATA_ALIGN", "SKB_TRUESIZE",
                  "SKB_DATAREF_SHIFT", "SKB_DATAREF_MASK"):
         header += macro(skb, name)
     for anchor in ("typedef struct skb_frag {", "struct skb_shared_hwtstamps {",
