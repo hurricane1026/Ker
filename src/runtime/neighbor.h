@@ -37,6 +37,8 @@ int ker_neighbor_remove(struct ker_neighbor_table *table, __be32 ip);
 int ker_neighbor_lookup(struct ker_neighbor_table *table, __be32 ip, struct neighbour **result);
 /* Release lookup references in any monitored state as well as PERMANENT. */
 int ker_neighbor_release(struct ker_neighbor_table *table, struct neighbour *entry);
+/* Internal teardown restoration for monitor-owned updates. */
+void ker_neighbor_update_restore_mac(struct neighbour *, const unsigned char[ETH_ALEN]);
 /* Permanent mappings only; monitored entries require a stateful snapshot. */
 int ker_neighbor_mac(struct ker_neighbor_table *table, struct neighbour *entry, unsigned char mac[6]);
 #endif

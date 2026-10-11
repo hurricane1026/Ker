@@ -1,5 +1,6 @@
 #include "runtime/neighbor-timer.h"
 #include "compat/neighbor-timer-port.h"
+#include "ker/linux_neighbor_update.h"
 #include <rte_lcore.h>
 #include <errno.h>
 static _Thread_local struct ker_neighbor_monitor *active;
@@ -107,11 +108,19 @@ static int start(void *arg)
     return 0;
 }
 static int confirm(void *arg) { neigh_confirm(((struct ker_neighbor_monitor *)arg)->entry); return 0; }
-static int call(struct ker_neighbor_monitor *m, ker_timer_list_fn fn)
+static int call_arg(struct ker_neighbor_monitor *m, ker_timer_list_fn fn, void *arg)
 {
     struct ker_neighbor_monitor *previous = active; active = m; m->busy = true;
-    int result = ker_timer_list_call(&m->timer, fn, m);
-    m->busy = false; active = previous; return result;
+    bool previous_polling=m->timer.runtime->polling; m->timer.runtime->polling=true;
+    int result = ker_timer_list_call(&m->timer, fn, arg);
+    m->timer.runtime->polling=previous_polling; m->busy = false; active = previous; return result;
+}
+static int call(struct ker_neighbor_monitor *m, ker_timer_list_fn fn) { return call_arg(m, fn, m); }
+struct update_args { struct neighbour *entry; const unsigned char *mac; u32 flags; };
+static int update_native(void *arg)
+{
+    struct update_args *update = arg;
+    return ker_linux_neigh_update(update->entry, update->mac, NUD_REACHABLE, update->flags);
 }
 static int horizon(struct ker_runtime *clock, unsigned long ticks)
 {
@@ -137,6 +146,9 @@ int ker_neighbor_monitor_init(struct ker_neighbor_monitor *m, struct ker_neighbo
         BUG_ON(refcount_dec_and_test(&entry->refcnt)); return -EBUSY;
     }
     *m = (struct ker_neighbor_monitor){.table=table,.entry=entry,.probe=probe,.notify=notify,.arg=arg};
+    neigh_ha_snapshot((char *)m->original_mac, entry, entry->dev);
+    m->original_confirmed=entry->confirmed; m->original_used=entry->used;
+    m->original_updated=entry->updated; m->original_probes=(unsigned int)atomic_read(&entry->probes);
     error = ker_timer_list_init(&m->timer, clock, &entry->timer, timeout);
     if (error) { BUG_ON(ker_neighbor_release(table, entry)); *m=(struct ker_neighbor_monitor){0}; return error; }
     m->ops = (struct neigh_ops){.solicit=solicit,.output=unsupported_output,.connected_output=unsupported_output,.error_report=unsupported_error};
@@ -164,6 +176,30 @@ int ker_neighbor_monitor_confirm(struct ker_neighbor_monitor *m)
     if(!(m->entry->nud_state & (NUD_REACHABLE|NUD_DELAY|NUD_PROBE|NUD_STALE)))return -ENOTSUP;
     return call(m,confirm);
 }
+int ker_neighbor_monitor_update(struct ker_neighbor_monitor *m, const unsigned char mac[ETH_ALEN], u32 flags)
+{
+    int error=valid(m); if(error)return error;
+    if(m->error)return m->error;
+    if(!mac)return -EINVAL;
+    if(flags != 0 && flags != NEIGH_UPDATE_F_OVERRIDE)return -ENOTSUP;
+    if(m->notification || m->probe_callback)return -EBUSY;
+    struct net_device *dev=m->entry->dev;
+    if(!m->table->address || !m->table->address->device ||
+       dev!=m->table->address->device->native || dev->type!=ARPHRD_ETHER || dev->addr_len!=ETH_ALEN)
+        return -ENOTSUP;
+    if(m->timer.runtime->polling)return -EBUSY;
+    if(m->entry->nud_state != NUD_PROBE && m->entry->nud_state != NUD_DELAY)return -ENOTSUP;
+    if(!timer_pending(&m->entry->timer) || m->entry->arp_queue.qlen || m->entry->arp_queue_len_bytes ||
+       m->entry->hh.hh_len || (m->entry->dev->header_ops && m->entry->dev->header_ops->cache_update))return -ENOTSUP;
+    unsigned int refs=2U+!!timer_pending(&m->entry->timer);
+    if((unsigned int)refcount_read(&m->entry->refcnt)!=refs)return -EBUSY;
+    bool nonzero=false; for(unsigned int i=0;i<ETH_ALEN;++i)nonzero|=mac[i]!=0;
+    if(!nonzero || (mac[0]&1))return -EINVAL;
+    error=horizon(m->timer.runtime,(unsigned long)m->entry->parms->reachable_time);
+    if(error)return error;
+    struct update_args args={m->entry,mac,flags};
+    return call_arg(m,update_native,&args);
+}
 int ker_neighbor_monitor_snapshot(struct ker_neighbor_monitor *m,struct ker_neighbor_event *out)
 {
     int error=valid(m); if(error)return error;
@@ -189,6 +225,9 @@ int ker_neighbor_monitor_cleanup(struct ker_neighbor_monitor *m)
     int pending=ker_timer_list_shutdown(&m->timer); if(pending<0)return pending;
     if(pending)BUG_ON(refcount_dec_and_test(&m->entry->refcnt));
     BUG_ON(ker_timer_list_cleanup(&m->timer));
+    ker_neighbor_update_restore_mac(m->entry,m->original_mac);
+    m->entry->confirmed=m->original_confirmed; m->entry->used=m->original_used;
+    m->entry->updated=m->original_updated; atomic_set(&m->entry->probes,(int)m->original_probes);
     m->entry->nud_state=NUD_PERMANENT; m->entry->ops=NULL; m->entry->output=NULL;
     BUG_ON(ker_neighbor_release(m->table,m->entry)); *m=(struct ker_neighbor_monitor){0};return 0;
 }

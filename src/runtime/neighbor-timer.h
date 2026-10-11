@@ -13,6 +13,9 @@ struct ker_neighbor_monitor {
     struct neighbour *entry;
     struct ker_timer_list timer;
     struct neigh_ops ops;
+    unsigned char original_mac[ETH_ALEN];
+    unsigned long original_confirmed, original_used, original_updated;
+    unsigned int original_probes;
     ker_neighbor_event_fn probe, notify;
     void *arg;
     struct neigh_statistics stats;
@@ -32,6 +35,10 @@ int ker_neighbor_monitor_probe(struct ker_neighbor_monitor *);
 /* Positive feedback only; invokes original neigh_confirm in the timer scope.
  * It does not revive FAILED neighbors or learn/change their MAC. */
 int ker_neighbor_monitor_confirm(struct ker_neighbor_monitor *);
+/* Apply native neigh_update semantics to an existing PROBE/DELAY entry.
+ * flags accepts only zero or NEIGH_UPDATE_F_OVERRIDE. Updates are worker-owned,
+ * monitor-scoped, and notify through the copied monitor event callback. */
+int ker_neighbor_monitor_update(struct ker_neighbor_monitor *, const unsigned char mac[ETH_ALEN], u32 flags);
 int ker_neighbor_monitor_snapshot(struct ker_neighbor_monitor *, struct ker_neighbor_event *);
 /* Internal callback binding used by the native ARP probe adapter. */
 int ker_neighbor_monitor_probe_scope(struct ker_neighbor_monitor *, const struct ker_neighbor_event *);

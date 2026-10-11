@@ -50,9 +50,10 @@ add/remove/lookup/release/snapshot 只能由同一个初始化 worker 调用。n
 ARP parms 提供对象/设备关联、引用基础及显式离线 timing/probe 参数配置。
 受监视条目运行原始 probe/retry timer，并可在 probe callback 内通过
 [native ARP probe adapter](linux-arp-probes.md) 取得构造出的 skb。GC/managed
-work、pending skb/proxy queues、header cache、neighbor learning、neigh_update、
-neigh_event_send、ARP 收包解析、自动应答或 PMD 发送仍未接入。普通永久表项
-保持静态，不会自动解析地址。
+work、pending skb/proxy queues、header cache、ARP learning、neigh_event_send、
+ARP 收包解析、自动应答或 PMD 发送仍未接入。`neigh_update` 只通过
+[受限的监视条目适配](linux-neighbor-timer.md#restricted-native-neighbor-update) 开放
+DELAY/PROBE→REACHABLE；普通永久表项仍保持静态，不会自动解析地址。
 
 真实 EAL 测试覆盖分阶段分配与实际 pool-name 冲突回滚、非法 key/MAC、错误
 worker、duplicate key、表上限与底层池耗尽的区别、容量回收和同名重建，

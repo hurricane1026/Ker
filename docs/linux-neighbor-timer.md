@@ -24,9 +24,9 @@ lock is released. These callbacks are adapter events, not kernel netlink
 notifications. Trace/debug events and resolution failures have monitor counters.
 
 `ker_neighbor_monitor_confirm` invokes native positive-feedback timestamping.
-It accepts REACHABLE, STALE, DELAY and PROBE, but cannot revive FAILED entries,
-learn a new MAC, or substitute for `neigh_update`. A confirmation updates only
-`confirmed`; the original timer handler decides whether to change state.
+It accepts REACHABLE, STALE, DELAY and PROBE, but cannot revive FAILED entries
+or change their MAC. A confirmation updates only `confirmed`; the original
+timer handler decides whether to change state.
 
 At exactly `confirmed + reachable_time`, Linux still considers the entry
 reachable. Its original `HZ/100` minimum rearm interval advances the next timeout
@@ -70,3 +70,25 @@ transitions, exact-deadline clamping, retries and zero-probe exhaustion, positiv
 feedback, wraparound, references, callback guards, worker ownership and cleanup.
 `neighbor-timer-import` checks exact source blocks, deterministic output,
 unsupported configuration rejection and changed-source rejection.
+
+## Restricted native neighbor update
+
+`ker_neighbor_monitor_update` imports pinned Linux `neigh_update` and its
+native state, timer, output, timestamp, and link-address logic. It accepts only
+an existing monitored entry in DELAY or PROBE, an unicast Ethernet MAC, and
+flags 0 or `NEIGH_UPDATE_F_OVERRIDE`; the requested state is REACHABLE. The
+entry must have its native timer reference pending, no extra lookup references,
+empty skb queue, empty header cache, and no header-cache update callback.
+Update runs on the owning worker through the timer-list scope and rejects a
+deadline that cannot be represented before entering Linux.
+
+Without OVERRIDE, Linux can return success after updating `confirmed` while
+leaving a different existing MAC and state unchanged. OVERRIDE allows the
+native MAC/state transition. Native notification points become a copied monitor
+event after the entry lock is released, as in the timer adapter; this event
+boundary does not provide netlink or generic kernel notifier services. Cleanup
+restores the administrator-installed permanent MAC and saved timestamps.
+Administrative, router, managed/external-validation flags, invalid states,
+unmonitored table updates, packet queues, GC/managed-list changes, and header
+cache updates remain unsupported and fail closed. The
+`neighbor-update-import` test validates imported function and flag provenance.
