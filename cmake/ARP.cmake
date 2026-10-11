@@ -39,4 +39,4 @@ foreach(ker_arp_probe_index RANGE ${ker_arp_probe_last})
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${KER_LINUX_DIR}/${ker_arp_probe_file}")
 endforeach()
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${KER_ARP_PROBE_MANIFEST}"
-    "${PROJECT_SOURCE_DIR}/tools/import-linux-arp-probe.py")
+    "${PROJECT_SOURCE_DIR}/tools/import-linux-arp-probe.py" "${PROJECT_SOURCE_DIR}/tools/import-linux-skb.py")
