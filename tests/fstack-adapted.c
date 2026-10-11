@@ -60,6 +60,58 @@ static void packet_export(void)
     for (unsigned int i = 0; i < 64; ++i) CHECK(bytes[i] == (unsigned char)(i * 17 + 3));
     ker_packet_free(copy);
 }
+static void headroom_export(void)
+{
+    struct sk_buff *skb = NULL;
+    CHECK(ker_skb_alloc(&context, 96, 128, &skb) == 0);
+    uint8_t *bytes;
+    CHECK(ker_skb_put(skb, 96, &bytes) == 0);
+    for (unsigned int i = 0; i < 96; ++i) bytes[i] = (uint8_t)(255 - i);
+    struct rte_mbuf *copy = NULL;
+    CHECK(ker_skb_to_mbuf(skb, &copy) == 0 && copy);
+    CHECK(copy->data_off == 128 && copy->data_len == 96 && copy->pkt_len == 96);
+    CHECK(!memcmp(rte_pktmbuf_mtod(copy, const void *), skb->data, 96));
+    CHECK(refcount_read(&skb->users) == 1 && context.live == 1);
+    CHECK(ker_skb_free(skb) == 0);
+    const uint8_t *exported = rte_pktmbuf_mtod(copy, const uint8_t *);
+    for (unsigned int i = 0; i < 96; ++i) CHECK(exported[i] == (uint8_t)(255 - i));
+    ker_packet_free(copy);
+}
+static void export_exhaustion_retry(void)
+{
+    struct sk_buff *skb = packet(64);
+    struct rte_mbuf *held[30];
+    for (unsigned int i = 0; i < 30; ++i) { held[i] = ker_packet_alloc(&pool); CHECK(held[i]); }
+    struct rte_mbuf *output = (void *)(uintptr_t)1;
+    CHECK(ker_skb_to_mbuf(skb, &output) == -ENOMEM && output == (void *)(uintptr_t)1);
+    CHECK(context.live == 1 && refcount_read(&skb->users) == 1 && skb->len == 64);
+    for (unsigned int i = 0; i < 64; ++i) CHECK(skb->data[i] == (unsigned char)(i * 17 + 3));
+    ker_packet_free(held[0]);
+    CHECK(ker_skb_to_mbuf(skb, &output) == 0 && output && output->pkt_len == 64);
+    CHECK(!memcmp(rte_pktmbuf_mtod(output, const void *), skb->data, 64));
+    for (unsigned int i = 1; i < 30; ++i) ker_packet_free(held[i]);
+    CHECK(ker_skb_free(skb) == 0);
+    /* The remaining allocated copy is released by the caller. */
+    CHECK(rte_mempool_avail_count(pool.mbufs) == 30);
+    ker_packet_free(output);
+    CHECK(rte_mempool_avail_count(pool.mbufs) == 31);
+}
+static void offload_metadata_rejection(void)
+{
+    struct sk_buff *skb = packet(64);
+    struct rte_mbuf *output = (void *)(uintptr_t)1;
+    skb->ip_summed = CHECKSUM_PARTIAL;
+    CHECK(ker_skb_to_mbuf(skb, &output) == -ENOTSUP && output == (void *)(uintptr_t)1);
+    CHECK(context.live == 1 && refcount_read(&skb->users) == 1 && skb->len == 64);
+    skb->ip_summed = CHECKSUM_NONE;
+    skb_shinfo(skb)->gso_size = 1448;
+    CHECK(ker_skb_to_mbuf(skb, &output) == -ENOTSUP && output == (void *)(uintptr_t)1);
+    CHECK(context.live == 1 && refcount_read(&skb->users) == 1 && skb->len == 64);
+    skb_shinfo(skb)->gso_size = 0;
+    CHECK(ker_skb_to_mbuf(skb, &output) == 0 && output && output->pkt_len == 64);
+    ker_packet_free(output);
+    CHECK(ker_skb_free(skb) == 0 && rte_mempool_avail_count(pool.mbufs) == 31);
+}
 static void multiseg_boundary(void)
 {
     struct rte_mbuf *a = ker_packet_alloc(&pool), *b = ker_packet_alloc(&pool); CHECK(a && b);
@@ -98,7 +150,10 @@ int main(int argc, char **argv)
         {"mbuf-release", mbuf_release}, {"clock-monotonic", clock_monotonic},
         {"empty-export", empty_export}, {"null-context", null_context},
         {"packet-export", packet_export}, {"multiseg-boundary", multiseg_boundary},
-        {"queue-isolation", queue_isolation}, {"queue-full-ownership", queue_full_ownership}
+        {"queue-isolation", queue_isolation}, {"queue-full-ownership", queue_full_ownership},
+        {"headroom-export", headroom_export},
+        {"export-exhaustion-retry", export_exhaustion_retry},
+        {"offload-metadata-rejection", offload_metadata_rejection}
     };
     CHECK(argc == 2); void (*run)(void) = NULL;
     for (unsigned int i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i)
