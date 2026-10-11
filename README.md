@@ -70,3 +70,5 @@ The private [neighbor timer monitor](docs/linux-neighbor-timer.md) runs the
 original Linux reachability and retry handler for configured IPv4/MAC mappings,
 with copied probe/notification callbacks and explicit lifecycle pins. Automatic
 ARP resolution, unresolved packet queues and NIC transmission remain unsupported.
+
+F-Stack 外部测试场景的适配范围与追溯见 [测试迁移](docs/fstack-tests.md)，当前已有 8 个真实 DPDK 回归场景。

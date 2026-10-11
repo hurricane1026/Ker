@@ -1,0 +1,57 @@
+{
+  "repository": "https://github.com/F-Stack/f-stack",
+  "revision": "646a641cfff77f4815e1e29829a09e1ed15a2999",
+  "mode": "scenario-adaptation; no upstream implementation or harness copied",
+  "files": {
+    "tests/unit/test_ff_dpdk_if.c": {
+      "sha256": "785ca7c734b1ec783a3b31b3e7b4d01cebf2f78393d2e09c20e958dbf0bbedfe",
+      "url": "https://github.com/F-Stack/f-stack/blob/646a641cfff77f4815e1e29829a09e1ed15a2999/tests/unit/test_ff_dpdk_if.c"
+    },
+    "tests/integration/test_ff_dpdk_if_integration.c": {
+      "sha256": "bf7829fb2c08bc8005969f55885f46b802aeb007d0667eca93ba694f4f17899a",
+      "url": "https://github.com/F-Stack/f-stack/blob/646a641cfff77f4815e1e29829a09e1ed15a2999/tests/integration/test_ff_dpdk_if_integration.c"
+    }
+  },
+  "cases": {
+    "mbuf-release": {
+      "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
+      "source_case": "test_ff_dpdk_pktmbuf_free_basic",
+      "adaptation": "Use Ker pool; require restored availability instead of skip."
+    },
+    "clock-monotonic": {
+      "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
+      "source_case": "test_ff_get_tsc_ns_monotonic",
+      "adaptation": "Use Ker monotonic nanosecond clock; no ff TSC implementation."
+    },
+    "empty-export": {
+      "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
+      "source_case": "test_ff_dpdk_if_send_zero_total",
+      "adaptation": "Verify zero-length copy export and ownership, not NIC transmission."
+    },
+    "null-context": {
+      "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
+      "source_case": "test_ff_dpdk_if_send_null_ctx_no_crash",
+      "adaptation": "Ker allocation rejects null context; no upstream ff consumption rule."
+    },
+    "packet-export": {
+      "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
+      "source_case": "test_ff_dpdk_if_send_basic",
+      "adaptation": "Verify copied bytes and lifetime; no ethdev send claim."
+    },
+    "multiseg-boundary": {
+      "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
+      "source_case": "test_ff_dpdk_if_send_multiseg",
+      "adaptation": "Ker currently rejects multi-segment adoption, preserving caller ownership; positive support deferred."
+    },
+    "queue-isolation": {
+      "source_file": "tests/unit/test_ff_dpdk_if.c",
+      "source_case": "test_ut_nr_19_drain_ring_sp_sc",
+      "adaptation": "Two owner-worker Linux skb FIFOs; no reload generations or SP/SC DPDK ring claim."
+    },
+    "queue-full-ownership": {
+      "source_file": "tests/unit/test_ff_dpdk_if.c",
+      "source_case": "test_ut_nr_19_drain_ring_sp_sc",
+      "adaptation": "Full FIFO preserves caller reference and pool availability; no drain-ring statistics claim."
+    }
+  }
+}
