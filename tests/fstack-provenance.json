@@ -66,6 +66,11 @@
       ],
       "adaptation": "Ker explicitly rejects checksum-partial and GSO metadata it cannot export, preserves the skb and output slot, then succeeds after metadata is cleared. No offload execution claim."
     },
+    "software-checksum-completion": {
+      "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
+      "source_case": "test_ff_dpdk_if_send_ip_csum",
+      "adaptation": "Ker-specific software completion extension motivated by this upstream checksum-offload case: copy a linear Internet-checksum CHECKSUM_PARTIAL skb and complete its seeded transport checksum using Linux checksum primitives before export. CRC32C is rejected when the imported skb layout exposes csum_not_inet; GSO and the existing ordinary CHECKSUM_PARTIAL export remain rejected, and the copy carries no DPDK TX offload flags. This does not claim F-Stack's NIC/hardware offload behavior."
+    },
     "headroom-export": {
       "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
       "source_case": "test_ff_dpdk_if_send_basic",

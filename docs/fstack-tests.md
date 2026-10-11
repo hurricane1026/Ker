@@ -5,7 +5,7 @@ unit 使用多种 stub/wrap，部分 integration 启动实际 EAL，但也用 st
 FreeBSD mbuf/veth。这不是可直接搬入 Ker 的 Linux TCP/IP 一致性套件。
 当前迁移固定到 F-Stack dev commit 646a641cfff77f4815e1e29829a09e1ed15a2999。
 
-按原始场景意图适配 Ker 真实实现的 F-Stack 场景当前共 14 个独立 CTest 用例。测试
+按原始场景意图适配 Ker 真实实现的 F-Stack 场景当前共 15 个独立 CTest 用例。测试
 实现重新编写，使用 Ker CHECK harness 和真实 EAL/mempool，不复制 ff_* glue、
 FreeBSD 栈、cmocka mock/stub 或覆盖率脚本。没有通过宿主机 socket 的结果
 冒充 Ker 网络栈通过，也不因 EAL 初始化失败跳过用例。
@@ -22,6 +22,7 @@ FreeBSD 栈、cmocka mock/stub 或覆盖率脚本。没有通过宿主机 socket
 | fstack-queue-full-ownership | 同上 | 满队列不消费调用方引用，可用 pool 对象数不变 |
 | fstack-export-exhaustion-retry | test_ff_dpdk_if_send_copydata_fail | 真实 pool 耗尽时输出槽和 skb 所有权不变；释放一个 mbuf 后重试成功，不模拟 copydata 错误 |
 | fstack-offload-metadata-rejection | test_ff_dpdk_if_send_ip_csum / test_ff_dpdk_if_send_tso | Ker 当前明确拒绝无法执行的 checksum/GSO 元数据，验证对象不变并在清除标记后成功导出；不宣称正向 offload |
+| fstack-software-checksum-completion | test_ff_dpdk_if_send_ip_csum | Ker-specific software completion extension：复制线性 CHECKSUM_PARTIAL skb，并以 Linux Internet-checksum primitives 在副本上完成 UDP/TCP pseudo-header-seeded checksum；CRC32C（当导入 skb layout 暴露该标志时）、GSO 与普通 export 仍 fail-closed，输出无 TX offload flag，不代表 F-Stack 网卡 offload |
 | fstack-headroom-export | test_ff_dpdk_if_send_basic | 显式 headroom 转为 mbuf data_off，检查字节和 skb 释放后的副本生命周期 |
 | fstack-multiseg-copy | test_ff_dpdk_if_send_multiseg | 真实多段 DPDK 输入复制并合并到线性 Linux skb，检查零长度段、源链所有权和释放源链后的数据；不代表上游分段 TX 或 Linux nonlinear skb 支持 |
 | fstack-multiseg-ethernet-ingress | test_ff_dpdk_if_send_multiseg | 将目的/源 MAC 和 EtherType 拆分到真实 DPDK 段中，经 Ker copy adapter 线性化后调用原始 Linux Ethernet 分类器，并经现有协议 runtime 分发；方向改为 ingress，不宣称 F-Stack TX、NIC/offload 或 Linux nonlinear skb |
@@ -47,6 +48,7 @@ EAL 测试初始化，显式检查全部 descriptor、queue 和 pool 回收。DP
 - 新增的 `ker_skb_copy_from_mbuf_chain` 仅将经校验的独占 direct DPDK 输入链复制成线性 skb；`ker_skb_from_mbuf` 仍拒绝多段 adopt，且此适配不保留 DPDK 分段边界。下一步若实现 Linux skb 非线性片段语义及相应 DPDK 引用生命周期，再测试原生分段 skb 导出；当前用例不宣称上游多段 TX 正向支持。
 - 新增的 `ker_eth_receive_copy_chain` 在 copy-in 后调用未修改的 `eth_type_trans`，并允许既有协议 runtime 处理分类后的 skb；源 mbuf 链仍由调用者持有。后续正向 TX/网卡与 offload 场景需独立实现这些能力后再接入。
 - 在真实 ethdev TX 与 offload capability/metadata 协商接入后，再新增 checksum、TSO、UDP checksum 的正向发送场景；当前 fstack-offload-metadata-rejection 仅锁定 fail-closed 边界和重试，不代表功能追平。
+- `ker_skb_to_mbuf_software_checksum` 仅为线性 Internet-checksum CHECKSUM_PARTIAL skb 提供软件 completion 副本；当导入的 skb layout 暴露 `csum_not_inet` 时会拒绝 CRC32C，且始终拒绝 GSO。它与 F-Stack 原用例的 NIC offload path 不同，也不改普通 `ker_skb_to_mbuf` 的 fail-closed 约束。
 - 有 RSS、跨 worker 转发、设备管理能力后，适配 flow-map、drain/reload 场景；
   当前 FIFO 测试不代表这些并发/多进程能力。
 - 有 Ker socket/epoll API 后，再引入 TCP/UDP 应用互通、连接回收、超时等黑盒
