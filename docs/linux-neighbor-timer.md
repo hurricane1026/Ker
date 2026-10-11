@@ -14,10 +14,13 @@ Initialization marks the configured mapping REACHABLE and arms its native timer.
 Only one monitor and no outstanding lookup references are allowed at binding.
 
 Linux decides subsequent REACHABLE, STALE, DELAY, PROBE and FAILED transitions.
-`ker_neighbor_monitor_probe` explicitly puts a STALE entry into DELAY and arms
-its timer; this adapter operation does not claim to implement
-`__neigh_event_send`. Linux handles the delayed transition, retry spacing and
-probe limit. A mandatory probe callback receives a copied IP/MAC/state/count
+`ker_neighbor_monitor_probe` delegates the STALE transition to imported
+`__neigh_event_send`; `ker_neighbor_monitor_event_send` exposes the supported
+existing-entry boundary for REACHABLE, STALE, DELAY and PROBE. Both pass a NULL
+skb, so they do not queue or transmit packets. On STALE, Linux changes the state
+to DELAY, updates `updated`, and arms the native timer; unlike the former
+hand-adapted transition, this native path does not directly set `used`. Linux
+handles retry spacing and probe limits. A mandatory probe callback receives a copied IP/MAC/state/count
 snapshot; its count precedes Linux's increment for that solicitation. An
 optional notification callback receives copied state updates after the entry
 lock is released. These callbacks are adapter events, not kernel netlink
@@ -69,7 +72,10 @@ The `neighbor-timer` regression runs against real DPDK pools and verifies native
 transitions, exact-deadline clamping, retries and zero-probe exhaustion, positive
 feedback, wraparound, references, callback guards, worker ownership and cleanup.
 `neighbor-timer-import` checks exact source blocks, deterministic output,
-unsupported configuration rejection and changed-source rejection.
+unsupported configuration rejection and changed-source rejection. The event-send
+adapter also preserves Linux's done-trace calls for supported early-return and
+STALE-transition cases. Its IRQ-dispatch mask remains active between native
+write unlock and `local_bh_enable`, matching the imported lock boundary.
 
 ## Restricted native neighbor update
 
@@ -92,3 +98,20 @@ Administrative, router, managed/external-validation flags, invalid states,
 unmonitored table updates, packet queues, GC/managed-list changes, and header
 cache updates remain unsupported and fail closed. The
 `neighbor-update-import` test validates imported function and flag provenance.
+
+## Restricted native neighbor event send
+
+The importer extracts pinned Linux `__neigh_event_send` verbatim. The monitor
+adapter admits only a live worker-owned Ethernet entry in REACHABLE, STALE,
+DELAY or PROBE, exact timer/reference geometry, zero APP_PROBES, empty skb and
+header queues, and a representable timer horizon. The API accepts no skb and
+passes NULL with `immediate_ok=false`. Connected entries and DELAY/PROBE take
+the original Linux early return; STALE uses Linux's native timer cancellation,
+DELAY transition and timer rearm. Unsupported states (including FAILED and
+INCOMPLETE), dead entries, queues, packet transmission and immediate probing
+are rejected before imported code runs. The adapter implements a balanced BH
+scope with Ker's thread IRQ-dispatch mask and records the native done trace for
+admitted calls. A dead trace counter is retained, but the dead path is rejected
+before Linux code runs and cannot be reached through this API. No NIC
+transmission or packet-resolution service is provided. `neighbor-event-send-import` verifies source provenance,
+deterministic generation and changed-source rejection.

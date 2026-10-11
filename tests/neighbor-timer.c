@@ -5,6 +5,7 @@
 #include "runtime/arp.h"
 #include "runtime/memory.h"
 #include "runtime/arp-probe-port.h"
+#include <linux/irqflags.h>
 #include <errno.h>
 #include <pthread.h>
 #include <limits.h>
@@ -33,6 +34,7 @@ static void guarded(const struct ker_neighbor_event *e)
     CHECK(ker_neighbor_monitor_cleanup(&monitor)==-EBUSY);
     CHECK(ker_neighbor_monitor_probe(&monitor)==-EBUSY);
     CHECK(ker_neighbor_monitor_confirm(&monitor)==-EBUSY);
+    CHECK(ker_neighbor_monitor_event_send(&monitor)==-EBUSY);
     struct ker_neighbor_event out = {.state=99};
     CHECK(ker_neighbor_monitor_snapshot(&monitor,&out)==-EBUSY && out.state==99);
     CHECK(ker_runtime_poll(&runtime_clock,runtime_clock.now_ns,1)==-EBUSY);
@@ -115,6 +117,25 @@ static unsigned int state(void)
     CHECK(ker_neighbor_monitor_snapshot(&monitor,&e)==0);
     return e.state;
 }
+static void event_send_early(unsigned int expected_state)
+{
+    CHECK(state()==expected_state && timer_pending(&monitor.entry->timer));
+    unsigned long confirmed=monitor.entry->confirmed,used=monitor.entry->used,updated=monitor.entry->updated;
+    unsigned long trace=monitor.event_send_events;
+    unsigned int refs=(unsigned int)refcount_read(&monitor.entry->refcnt);
+    unsigned int probes=(unsigned int)atomic_read(&monitor.entry->probes);
+    unsigned int notices=notifications;
+    int64_t deadline,after;
+    CHECK(ker_runtime_next_deadline(&runtime_clock,&deadline)==1);
+    CHECK(ker_neighbor_monitor_event_send(&monitor)==0);
+    CHECK(state()==expected_state && monitor.event_send_events==trace+1 &&
+        monitor.event_send_result==0 && monitor.entry->confirmed==confirmed &&
+        monitor.entry->used==used && monitor.entry->updated==updated &&
+        atomic_read(&monitor.entry->probes)==(int)probes &&
+        (unsigned int)refcount_read(&monitor.entry->refcnt)==refs && timer_pending(&monitor.entry->timer) &&
+        notifications==notices);
+    CHECK(ker_runtime_next_deadline(&runtime_clock,&after)==1 && after==deadline);
+}
 static void next(void)
 {
     int64_t when;
@@ -158,6 +179,10 @@ static void *foreign_probe(void *arg)
 static void *foreign_update(void *arg)
 {
     (void)arg; CHECK(ker_neighbor_monitor_update(&monitor, changed_peer, NEIGH_UPDATE_F_OVERRIDE)==-EXDEV); return NULL;
+}
+static void *foreign_event_send(void *arg)
+{
+    (void)arg; CHECK(ker_neighbor_monitor_event_send(&monitor)==-EXDEV); return NULL;
 }
 static void *seqlock_writer(void *arg)
 {
@@ -224,6 +249,23 @@ int main(void)
     CHECK(ker_runtime_next_deadline(&runtime_clock,&equality)==1);
     CHECK(ker_runtime_poll(&runtime_clock,equality,8)==1);
     CHECK(state()==NUD_REACHABLE);
+    unsigned long event_used=monitor.entry->used;
+    unsigned long event_trace=monitor.event_send_events;
+    int64_t event_deadline;
+    CHECK(ker_runtime_next_deadline(&runtime_clock,&event_deadline)==1);
+    CHECK(ker_neighbor_monitor_event_send(&monitor)==0);
+    CHECK(state()==NUD_REACHABLE && monitor.event_send_events==event_trace+1 &&
+          monitor.event_send_result==0 && monitor.entry->used==event_used &&
+          refcount_read(&monitor.entry->refcnt)==3 && timer_pending(&monitor.entry->timer));
+    int64_t event_deadline_after;
+    CHECK(ker_runtime_next_deadline(&runtime_clock,&event_deadline_after)==1 && event_deadline_after==event_deadline);
+    unsigned long irq_flags=ker_local_irq_save();
+    CHECK(ker_neighbor_monitor_event_send(&monitor)==-EBUSY && ker_local_irq_disabled());
+    ker_local_irq_restore(irq_flags);
+    unsigned long event_trace_before=monitor.event_send_events;
+    NEIGH_VAR_SET(monitor.entry->parms,APP_PROBES,1);
+    CHECK(ker_neighbor_monitor_event_send(&monitor)==-ENOTSUP && monitor.event_send_events==event_trace_before);
+    NEIGH_VAR_SET(monitor.entry->parms,APP_PROBES,0);
     int64_t clamped;
     CHECK(ker_runtime_next_deadline(&runtime_clock,&clamped)==1);
     CHECK(clamped==equality+INT64_C(10000000));
@@ -231,18 +273,33 @@ int main(void)
     CHECK(pthread_create(&thread,NULL,foreign,NULL)==0 && pthread_join(thread,NULL)==0);
     struct neighbour *held=NULL;
     CHECK(ker_neighbor_lookup(&table,ip(2),&held)==0);
+    CHECK(ker_neighbor_monitor_event_send(&monitor)==-EBUSY);
     unsigned char snapshot[6]={99};
     CHECK(ker_neighbor_mac(&table,held,snapshot)==-ENOTSUP && snapshot[0]==99);
     CHECK(ker_neighbor_monitor_cleanup(&monitor)==-EBUSY);
+    CHECK(ker_neighbor_monitor_event_send(&monitor)==-EBUSY);
     CHECK(ker_neighbor_release(&table,held)==0);
+    CHECK(pthread_create(&thread,NULL,foreign_event_send,NULL)==0 && pthread_join(thread,NULL)==0);
     stale(); CHECK(last_state==NUD_STALE);
     int64_t saved_now=runtime_clock.now_ns;
     runtime_clock.now_ns=INT64_MAX;
-    CHECK(ker_neighbor_monitor_probe(&monitor)==-EOVERFLOW && state()==NUD_STALE);
-    CHECK(!timer_pending(&monitor.entry->timer)); runtime_clock.now_ns=saved_now;
-    CHECK(ker_neighbor_monitor_probe(&monitor)==0 && state()==NUD_DELAY);
+    unsigned long stale_updated=monitor.entry->updated, stale_used=monitor.entry->used;
+    unsigned long stale_trace=monitor.event_send_events;
+    CHECK(ker_neighbor_monitor_event_send(&monitor)==-EOVERFLOW && state()==NUD_STALE);
+    CHECK(!timer_pending(&monitor.entry->timer) && refcount_read(&monitor.entry->refcnt)==2 &&
+          monitor.entry->updated==stale_updated && monitor.entry->used==stale_used &&
+          monitor.event_send_events==stale_trace);
+    runtime_clock.now_ns=saved_now;
+    CHECK(ker_neighbor_monitor_event_send(&monitor)==0 && state()==NUD_DELAY);
+    CHECK(monitor.event_send_events==stale_trace+1 && monitor.event_send_result==0 &&
+          monitor.entry->used==stale_used && monitor.entry->updated>=stale_updated &&
+          timer_pending(&monitor.entry->timer) && refcount_read(&monitor.entry->refcnt)==3);
+    event_send_early(NUD_DELAY);
+    CHECK(ker_neighbor_monitor_probe(&monitor)==-EALREADY);
+    CHECK(ker_neighbor_monitor_event_send(&monitor)==0 && state()==NUD_DELAY);
     build_probes=true; built_probes=0;
     next(); CHECK(state()==NUD_PROBE && probes==1 && last_state==NUD_PROBE);
+    event_send_early(NUD_PROBE);
     next(); next(); CHECK(probes==3 && state()==NUD_PROBE && built_probes==3);
     build_probes=false;
     struct sk_buff *outside = (void *)(uintptr_t)1;
@@ -250,6 +307,8 @@ int main(void)
     CHECK(pthread_create(&thread,NULL,foreign_probe,NULL)==0 && pthread_join(thread,NULL)==0);
     build_probes=true; next(); build_probes=false;
     CHECK(state()==NUD_FAILED && last_state==NUD_FAILED);
+    stale_trace=monitor.event_send_events;
+    CHECK(ker_neighbor_monitor_event_send(&monitor)==-ENOTSUP && monitor.event_send_events==stale_trace);
     CHECK(monitor.stats.res_failed==1 && notifications==3);
     CHECK(refcount_read(&monitor.entry->refcnt)==2 && !timer_pending(&monitor.entry->timer));
     CHECK(ker_neighbor_monitor_confirm(&monitor)==-ENOTSUP);

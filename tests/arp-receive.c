@@ -135,7 +135,7 @@ static void worker_feedback(struct sk_buff *skb,unsigned int mode,int expected)
         CHECK(ker_neighbor_monitor_snapshot(&monitor,&after)==0);
         CHECK(after.state==before.state && after.probes==before.probes && after.ip==before.ip &&
             !memcmp(after.mac,before.mac,ETH_ALEN) && monitor.entry->confirmed==confirmed &&
-            monitor.entry->updated==updated && refcount_read(&monitor.entry->refcnt)==(int)refs &&
+            monitor.entry->updated==updated && (unsigned int)refcount_read(&monitor.entry->refcnt)==refs &&
             timer_pending(&monitor.entry->timer)==pending && feedback_notifications==notifications);
         if(pending) { int64_t after_deadline; CHECK(ker_runtime_next_deadline(&worker.timers,&after_deadline)==1 && after_deadline==deadline); }
     }
