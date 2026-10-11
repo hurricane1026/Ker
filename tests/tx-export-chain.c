@@ -170,16 +170,18 @@ int main(void)
 
     struct ker_tx_export invalid = {0};
     CHECK(ker_tx_export_init_chain(&invalid, &context, 1, 4096, 0, sink, &invalid) == -EINVAL);
-    CHECK(!invalid.queue.context && !context.queue_live && !invalid.chain_mode);
+    CHECK(!invalid.queue.context && !context.queue_live && invalid.mode == KER_TX_EXPORT_SINGLE);
     CHECK(ker_tx_export_init_chain(&invalid, &context, 1, 4096, UINT16_MAX + 1U, sink, &invalid) == -EOVERFLOW);
     CHECK(!invalid.queue.context && !context.queue_live && !invalid.segment_payload_limit);
     CHECK(ker_tx_export_init_chain(&invalid, &context, 1, 0, 13, sink, &invalid) == -EINVAL);
     CHECK(!invalid.queue.context && !context.queue_live && !invalid.segment_payload_limit);
     CHECK(ker_tx_export_init_chain(&invalid, &context, 1, 4096, 13, sink, &invalid) == 0);
     CHECK(context.queue_live == 1 && ker_tx_export_cleanup(&invalid) == 0 && !context.queue_live);
+    CHECK(ker_tx_export_init_chain_software_checksum(&invalid, &context, 1, 4096, 13, sink, &invalid) == 0);
+    CHECK(context.queue_live == 1 && ker_tx_export_cleanup(&invalid) == 0 && !context.queue_live);
 
     CHECK(ker_tx_export_init_chain(&tx, &context, 2, SIZE_MAX, 80, sink, &tx) == 0);
-    CHECK(tx.chain_mode && tx.segment_payload_limit == 80 && context.queue_live == 1);
+    CHECK(tx.mode == KER_TX_EXPORT_CHAIN_NONE && tx.segment_payload_limit == 80 && context.queue_live == 1);
     CHECK(ker_eth_device_init(&device, &context, "chain_tx0", 9, source_mac) == 0);
     CHECK(ker_receive_runtime_init(&runtime, &context) == 0);
     CHECK(ker_transport_receiver_register(&receiver, &runtime, &device, receive_packet, &receiver) == 0);

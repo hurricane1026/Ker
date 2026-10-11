@@ -95,7 +95,8 @@ if(KER_WITH_DPDK)
     target_link_libraries(ker-fstack-chain-checksum-test PRIVATE ker_skb_headers ker_eth_headers
         ker_receive_headers ker_neighbor_headers ker_linux_port ker_dpdk_port ker_skb_port ker_eth_port
         ker_receive_port ker_address_port ker_ipv4_view_port ker_udp_view_port ker_tcp_view_port
-        ker_transport_receive_port ker_udp_create_port ker_tcp_create_port ker_neighbor_port Threads::Threads)
+        ker_transport_receive_port ker_udp_create_port ker_tcp_create_port ker_neighbor_port
+        ker_tx_export_port Threads::Threads)
     add_test(NAME fstack-chain-checksum COMMAND ker-fstack-chain-checksum-test)
     set_tests_properties(fstack-chain-checksum PROPERTIES TIMEOUT 30)
     add_executable(ker-tcp-options-test tcp-options.c)
