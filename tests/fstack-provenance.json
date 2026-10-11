@@ -113,6 +113,11 @@
       "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
       "source_case": "test_ff_dpdk_if_send_tcp_csum",
       "adaptation": "Ker-specific ingress extension motivated by the pinned TCP checksum TX case. The upstream case enables TCP TX checksum offload and calls ff_dpdk_if_send; it is not a TCP receive test. Ker validates an unfragmented IPv4 TCP segment and its complete pseudoheader checksum, preserving options as opaque bytes. This does not claim TCP option interpretation, connection state, routing, reassembly, socket delivery, NIC or TX offload support."
+    },
+    "transport-receive": {
+      "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
+      "source_case": ["test_ff_dpdk_if_send_udp_csum", "test_ff_dpdk_if_send_tcp_csum"],
+      "adaptation": "Ker-specific worker RX integration extension motivated by upstream UDP/TCP TX checksum-offload cases; neither upstream case tests ingress. A registered ETH_P_IP handler validates and synchronously exposes existing immutable UDP/TCP packet views, consumes its skb reference on every path, and fails closed when protocol fanout shares the skb descriptor reference. This is not socket delivery, routing, fragment reassembly, TCP state or NIC receive support."
     }
   }
 }
