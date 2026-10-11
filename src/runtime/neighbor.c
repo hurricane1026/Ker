@@ -101,7 +101,7 @@ static int reference(struct ker_neighbor_table *table, struct neighbour *entry)
     int error = valid(table);
     if (error) return error;
     if (!entry || entry->tbl != table->native || entry->dev != table->address->device->native ||
-        entry->nud_state != NUD_PERMANENT || refcount_read(&entry->refcnt) < 2) return -EINVAL;
+        refcount_read(&entry->refcnt) < 2) return -EINVAL;
     return 0;
 }
 int ker_neighbor_release(struct ker_neighbor_table *table, struct neighbour *entry)
@@ -116,6 +116,7 @@ int ker_neighbor_mac(struct ker_neighbor_table *table, struct neighbour *entry, 
     int error = reference(table, entry);
     if (error) return error;
     if (!mac) return -EINVAL;
+    if (entry->nud_state != NUD_PERMANENT) return -ENOTSUP;
     neigh_ha_snapshot((char *)mac, entry, entry->dev);
     return 0;
 }
