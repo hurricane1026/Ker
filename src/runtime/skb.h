@@ -50,6 +50,14 @@ int ker_skb_to_mbuf(struct sk_buff *skb, struct rte_mbuf **result);
  * no offload flags are set and this does not implement Linux nonlinear skb. */
 int ker_skb_to_mbuf_chain_copy(struct sk_buff *skb,
     unsigned int segment_payload_limit, struct rte_mbuf **result);
+/* Complete an Internet CHECKSUM_PARTIAL linear skb with the same seeded
+ * csum_partial/fold semantics as ker_skb_to_mbuf_software_checksum, then
+ * copy into independently owned direct mbuf segments. The checksum field may
+ * cross a segment boundary. Source bytes/metadata remain unchanged and output
+ * is assigned only on success. GSO, nonlinear/queued/shared/CRC32C layouts
+ * remain rejected; no TX offload flags or nonlinear Linux skb are implied. */
+int ker_skb_to_mbuf_chain_software_checksum(struct sk_buff *skb,
+    unsigned int segment_payload_limit, struct rte_mbuf **result);
 /* Complete a linear CHECKSUM_PARTIAL skb in a private copied mbuf using Linux
  * Internet-checksum semantics. Source bytes/metadata remain unchanged; no TX
  * offload metadata is set. CRC32C, GSO and unsupported skb layouts are rejected. */
