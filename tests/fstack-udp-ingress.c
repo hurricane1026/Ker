@@ -4,6 +4,7 @@
 #include "runtime/udp-packet-view.h"
 #include "runtime/memory.h"
 #include <errno.h>
+#include <string.h>
 
 static struct ker_packet_pool pool;
 static struct ker_skb_context context;
@@ -49,6 +50,17 @@ static void repair_ip_checksum(unsigned char *ip, unsigned int ihl)
     ip[10] = 0; ip[11] = 0;
     uint16_t checksum = reference_checksum(ip, ihl * 4);
     ip[10] = (unsigned char)(checksum >> 8); ip[11] = (unsigned char)checksum;
+}
+
+static uint16_t set_udp_checksum(unsigned char *ip, unsigned int ihl, unsigned int udp_length)
+{
+    unsigned char *udp = ip + ihl * 4;
+    udp[6] = 0;
+    udp[7] = 0;
+    uint16_t checksum = reference_udp_checksum(ip, udp, udp_length);
+    udp[6] = (unsigned char)(checksum >> 8);
+    udp[7] = (unsigned char)checksum;
+    return checksum;
 }
 
 static void build_frame(unsigned char frame[60], unsigned int udp_length,
@@ -244,15 +256,89 @@ static void checksum_omission_mangled_zero_and_failures(void)
     (void)scratch;
 }
 
-int main(void)
+static void minimal_even_zero_ports_and_padding(void)
+{
+    unsigned char frame[60], expected[60], scratch[60];
+    const unsigned int ip_offset = ETH_HLEN;
+    const unsigned int udp_offset = ETH_HLEN + 24;
+    struct ker_udp_packet_view view = {0};
+
+    /* Minimum UDP datagram, including a real nonzero checksum with both ports zero. */
+    build_frame(frame, 8, 0, false);
+    frame[udp_offset] = 0;
+    frame[udp_offset + 1] = 0;
+    uint16_t checksum = set_udp_checksum(frame + ip_offset, 6, 8);
+    CHECK(checksum != 0 && checksum != UINT16_MAX);
+    repair_ip_checksum(frame + ip_offset, 6);
+    memcpy(expected, frame, sizeof(expected));
+    struct rte_mbuf *chain = make_chain(frame);
+    struct sk_buff *skb = classify_copy(chain);
+    CHECK(ker_udp_packet_view_init(&context, skb, &view) == 0);
+    CHECK(view.source_port == 0 && view.destination_port == 0);
+    CHECK(view.udp_length == 8 && view.payload_length == 0);
+    CHECK(view.checksum == rte_cpu_to_be_16(checksum));
+    CHECK(skb->len > 24 + view.udp_length); /* Ethernet padding is outside IPv4/UDP lengths. */
+    ker_packet_free(chain);
+    CHECK(!memcmp(view.header, expected + udp_offset, 8));
+    CHECK(ker_skb_free(skb) == 0 && context.live == 0);
+
+    /* An omitted checksum is valid even for the same minimum header-only datagram. */
+    build_frame(frame, 8, 0, true);
+    frame[udp_offset] = 0;
+    frame[udp_offset + 1] = 0;
+    memcpy(expected, frame, sizeof(expected));
+    chain = make_chain(frame);
+    skb = classify_copy(chain);
+    view = (struct ker_udp_packet_view){0};
+    CHECK(ker_udp_packet_view_init(&context, skb, &view) == 0);
+    CHECK(view.source_port == 0 && view.destination_port == 0);
+    CHECK(view.udp_length == 8 && view.payload_length == 0 && view.checksum == 0);
+    CHECK(ker_skb_free(skb) == 0);
+    CHECK(rte_pktmbuf_read(chain, 0, sizeof(scratch), scratch) == scratch);
+    CHECK(!memcmp(scratch, expected, sizeof(expected)) && rte_mbuf_refcnt_read(chain) == 1);
+    ker_packet_free(chain);
+
+    /* Even-length payload, nonzero checksum oracle, and output outliving its source chain. */
+    build_frame(frame, 10, 0, true);
+    frame[udp_offset] = 0;
+    frame[udp_offset + 1] = 0;
+    checksum = set_udp_checksum(frame + ip_offset, 6, 10);
+    CHECK(checksum != 0 && checksum != UINT16_MAX);
+    repair_ip_checksum(frame + ip_offset, 6);
+    memcpy(expected, frame, sizeof(expected));
+    chain = make_chain(frame);
+    skb = classify_copy(chain);
+    view = (struct ker_udp_packet_view){0};
+    CHECK(ker_udp_packet_view_init(&context, skb, &view) == 0);
+    CHECK(view.source_port == 0 && view.destination_port == 0);
+    CHECK(view.udp_length == 10 && view.payload_length == 2 && view.checksum == rte_cpu_to_be_16(checksum));
+    CHECK(view.payload[0] == expected[udp_offset + 8] && view.payload[1] == expected[udp_offset + 9]);
+    memcpy(scratch, expected + udp_offset, 10);
+    scratch[6] = 0;
+    scratch[7] = 0;
+    CHECK(reference_udp_checksum(expected + ip_offset, scratch, 10) == checksum);
+    ker_packet_free(chain);
+    CHECK(!memcmp(view.header, expected + udp_offset, 10));
+    CHECK(ker_skb_free(skb) == 0 && context.live == 0);
+    CHECK(rte_mempool_avail_count(pool.mbufs) == 31);
+}
+
+int main(int argc, char **argv)
 {
     ker_test_eal_init();
     CHECK(ker_memory_init(SOCKET_ID_ANY, 7) == 0);
     CHECK(ker_packet_pool_init(&pool, "ker_udp_ingress", 31, 0, 2048, SOCKET_ID_ANY) == 0);
     CHECK(ker_skb_context_init(&context, &pool, "ker_udp_ingress_desc") == 0);
     CHECK(ker_eth_device_init(&device, &context, "eth0", 1, host_mac) == 0);
-    valid_odd_checksum_and_lifetimes();
-    checksum_omission_mangled_zero_and_failures();
+    if (argc == 1) {
+        valid_odd_checksum_and_lifetimes();
+        checksum_omission_mangled_zero_and_failures();
+        minimal_even_zero_ports_and_padding();
+    } else if (argc == 2 && !strcmp(argv[1], "minimal-boundaries")) {
+        minimal_even_zero_ports_and_padding();
+    } else {
+        CHECK(false);
+    }
     CHECK(context.live == 0 && rte_mempool_avail_count(pool.mbufs) == 31);
     CHECK(ker_eth_device_cleanup(&device) == 0);
     CHECK(ker_skb_context_cleanup(&context) == 0);
