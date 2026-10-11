@@ -162,6 +162,11 @@
       "source_case": "test_ff_dpdk_if_send_multiseg",
       "adaptation": "Ker-specific worker TX copy extension motivated by the pinned multisegment TX case. Opt-in chain mode exports a supported linear skb into a direct DPDK chain and gives the whole chain to an application sink only on acceptance; a rejected copy is freed while the original FIFO skb remains pending for retry. This is not native F-Stack/NIC TX, Linux nonlinear skb support, or hardware offload. Chain mode accepts CHECKSUM_NONE only; the existing legacy exporter retains its separate software CHECKSUM_PARTIAL path."
     },
+    "tx-ring-drain": {
+      "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
+      "source_case": "test_ff_dpdk_if_send_multiseg",
+      "adaptation": "Ker-specific application-ring transport extension motivated by the pinned multisegment TX case. The worker exporter submits whole copied chains to an exact-capacity DPDK ring configured for one producer and one consumer; a ring-full result preserves the original skb for retry, while the consumer validates and drains accepted chains through Ker's existing Ethernet copy/classify and worker transport receive path. The upstream test exercises F-Stack TX. This does not claim an ethdev, NIC/RSS, multi-process ring, or F-Stack TX integration."
+    },
     "fstack-chain-software-checksum": {
       "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
       "source_case": ["test_ff_dpdk_if_send_udp_csum", "test_ff_dpdk_if_send_tcp_csum"],
