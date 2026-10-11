@@ -98,6 +98,16 @@
         "test_ff_dpdk_if_send_ip_csum"
       ],
       "adaptation": "Ker-specific ingress/header-validation extension. At pinned F-Stack revision 646a641cfff77f4815e1e29829a09e1ed15a2999 both named cases exercise ff_dpdk_if_send, not IPv4 ingress. Ker uses real segmented DPDK input and its copy/classify path, then validates IPv4 header/options, length, padding and native ip_fast_csum. No ip_rcv, routing, fragment reassembly, transport/socket or NIC delivery claim."
+    },
+    "udp-ingress-validation": {
+      "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
+      "source_case": "test_ff_dpdk_if_send_udp_csum",
+      "adaptation": "Ker-specific ingress extension motivated by the pinned UDP checksum TX case. The F-Stack source only sets UDP TX offload metadata and calls ff_dpdk_if_send; it does not test UDP ingress. Ker validates an unfragmented IPv4 UDP datagram using the original Linux pseudoheader checksum primitives. This does not claim socket delivery, routing, reassembly, ICMP, NIC or TX offload support."
+    },
+    "udp-minimal-boundaries": {
+      "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
+      "source_case": "test_ff_dpdk_if_send_udp_csum",
+      "adaptation": "Additional Ker-specific UDP ingress regression for the minimum eight-byte header with zero and valid nonzero checksums, zero-valued ports, even payload length and Ethernet padding exclusion. The upstream case is still TX-only and does not cover these receive semantics."
     }
   }
 }

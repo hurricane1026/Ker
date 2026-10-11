@@ -40,6 +40,15 @@ if(KER_WITH_DPDK)
         ker_linux_port ker_dpdk_port ker_skb_port PkgConfig::DPDK Threads::Threads)
     add_test(NAME fstack-ipv4-ingress-validation COMMAND ker-fstack-ipv4-ingress-test)
     set_tests_properties(fstack-ipv4-ingress-validation PROPERTIES TIMEOUT 30)
+    add_executable(ker-fstack-udp-ingress-test fstack-udp-ingress.c)
+    target_include_directories(ker-fstack-udp-ingress-test PRIVATE "${PROJECT_SOURCE_DIR}/src")
+    target_compile_definitions(ker-fstack-udp-ingress-test PRIVATE _GNU_SOURCE)
+    target_link_libraries(ker-fstack-udp-ingress-test PRIVATE ker_udp_view_port ker_ipv4_view_port ker_eth_headers ker_eth_port
+        ker_linux_port ker_dpdk_port ker_skb_port PkgConfig::DPDK Threads::Threads)
+    add_test(NAME fstack-udp-ingress-validation COMMAND ker-fstack-udp-ingress-test)
+    set_tests_properties(fstack-udp-ingress-validation PROPERTIES TIMEOUT 30)
+    add_test(NAME fstack-udp-minimal-boundaries COMMAND ker-fstack-udp-ingress-test minimal-boundaries)
+    set_tests_properties(fstack-udp-minimal-boundaries PROPERTIES TIMEOUT 30)
     add_test(NAME ethernet-import COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/ethernet-import.py" "${PROJECT_SOURCE_DIR}"
         "${CMAKE_C_COMPILER}" "${KER_LINUX_INCLUDE}" "${KER_SKB_IMPORT}" ${DPDK_INCLUDE_DIRS})
@@ -151,7 +160,7 @@ if(KER_WITH_DPDK)
     add_executable(ker-skb-queue-test skb-queue.c)
     target_include_directories(ker-skb-queue-test PRIVATE "${PROJECT_SOURCE_DIR}/src")
     target_compile_definitions(ker-skb-queue-test PRIVATE _GNU_SOURCE)
-    target_link_libraries(ker-skb-queue-test PRIVATE ker_ipv4_view_port ker_neighbor_headers ker_neighbor_port
+    target_link_libraries(ker-skb-queue-test PRIVATE ker_udp_view_port ker_ipv4_view_port ker_neighbor_headers ker_neighbor_port
         ker_address_port ker_napi_port ker_eth_port ker_linux_port ker_dpdk_port ker_skb_port Threads::Threads)
     add_test(NAME skb-queue COMMAND ker-skb-queue-test)
     set_tests_properties(skb-queue PROPERTIES TIMEOUT 30)
@@ -174,6 +183,6 @@ if(KER_WITH_DPDK)
     set_tests_properties(skb PROPERTIES TIMEOUT 30)
     set_tests_properties(dpdk-memory PROPERTIES TIMEOUT 30)
     list(JOIN DPDK_LIBRARY_DIRS ":" ker_dpdk_library_path)
-    set_tests_properties(checksum timer refcount dpdk-memory skb worker ethernet fstack-ipv4-ingress-validation napi receive arp ipv4-address neighbor-timer neighbor arp-receive fstack-arp-chain-feedback skb-queue timer-list arp-probe-import neighbor-update-import ${ker_fstack_tests} PROPERTIES
+    set_tests_properties(checksum timer refcount dpdk-memory skb worker ethernet fstack-ipv4-ingress-validation fstack-udp-ingress-validation fstack-udp-minimal-boundaries napi receive arp ipv4-address neighbor-timer neighbor arp-receive fstack-arp-chain-feedback skb-queue timer-list arp-probe-import neighbor-update-import ${ker_fstack_tests} PROPERTIES
         ENVIRONMENT "LD_LIBRARY_PATH=${ker_dpdk_library_path}:$ENV{LD_LIBRARY_PATH}")
 endif()
