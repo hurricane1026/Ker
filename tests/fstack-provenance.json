@@ -52,6 +52,24 @@
       "source_file": "tests/unit/test_ff_dpdk_if.c",
       "source_case": "test_ut_nr_19_drain_ring_sp_sc",
       "adaptation": "Full FIFO preserves caller reference and pool availability; no drain-ring statistics claim."
+    },
+    "export-exhaustion-retry": {
+      "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
+      "source_case": "test_ff_dpdk_if_send_copydata_fail",
+      "adaptation": "Exhaust the real Ker packet pool, assert failed copy-out preserves the caller's output slot and skb ownership, then release one mbuf and require a successful retry. No mocked copydata or NIC send claim."
+    },
+    "offload-metadata-rejection": {
+      "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
+      "source_case": [
+        "test_ff_dpdk_if_send_ip_csum",
+        "test_ff_dpdk_if_send_tso"
+      ],
+      "adaptation": "Ker explicitly rejects checksum-partial and GSO metadata it cannot export, preserves the skb and output slot, then succeeds after metadata is cleared. No offload execution claim."
+    },
+    "headroom-export": {
+      "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
+      "source_case": "test_ff_dpdk_if_send_basic",
+      "adaptation": "Export a payload with explicit headroom, verify mbuf data_off and bytes, then free the skb and validate copy lifetime. No ethdev transmission claim."
     }
   }
 }
