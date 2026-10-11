@@ -65,3 +65,8 @@ callback delivery, shutdown, and lifetime guards.
 The private neighbor adapter also accepts explicit offline timing and probe
 parameters through verbatim Linux setters and reachable-time randomization;
 this does not enable dynamic neighbor resolution yet.
+
+The private [neighbor timer monitor](docs/linux-neighbor-timer.md) runs the
+original Linux reachability and retry handler for configured IPv4/MAC mappings,
+with copied probe/notification callbacks and explicit lifecycle pins. Automatic
+ARP resolution, unresolved packet queues and NIC transmission remain unsupported.

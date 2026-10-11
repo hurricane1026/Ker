@@ -73,6 +73,17 @@ if(KER_WITH_DPDK)
     add_test(NAME address-import COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/address-import.py" "${PROJECT_SOURCE_DIR}"
         "${CMAKE_C_COMPILER}" "${KER_LINUX_INCLUDE}" "${KER_SKB_IMPORT}" "${KER_ETH_IMPORT}" ${DPDK_INCLUDE_DIRS})
+    add_executable(ker-neighbor-timer-test neighbor-timer.c)
+    target_compile_definitions(ker-neighbor-timer-test PRIVATE _GNU_SOURCE)
+    target_link_libraries(ker-neighbor-timer-test PRIVATE ker_neighbor_timer_headers
+        ker_neighbor_timer_port ker_timer_list_port ker_neighbor_port
+        ker_address_port ker_arp_port ker_eth_port ker_linux_port ker_dpdk_port ker_skb_port Threads::Threads)
+    add_test(NAME neighbor-timer COMMAND ker-neighbor-timer-test)
+    set_tests_properties(neighbor-timer PROPERTIES TIMEOUT 30)
+    add_test(NAME neighbor-timer-import COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/neighbor-timer-import.py" "${PROJECT_SOURCE_DIR}"
+        "${CMAKE_C_COMPILER}" "${KER_LINUX_INCLUDE}" "${KER_SKB_IMPORT}" "${KER_ETH_IMPORT}"
+        "${KER_ADDR_IMPORT}" "${KER_NAPI_IMPORT}" "${KER_NEIGH_IMPORT}" "${KER_TIMER_LIST_IMPORT}" ${DPDK_INCLUDE_DIRS})
     add_executable(ker-neighbor-test neighbor.c)
     target_compile_definitions(ker-neighbor-test PRIVATE _GNU_SOURCE)
     target_link_libraries(ker-neighbor-test PRIVATE ker_neighbor_headers ker_neighbor_port ker_receive_headers
@@ -116,6 +127,6 @@ if(KER_WITH_DPDK)
     set_tests_properties(skb PROPERTIES TIMEOUT 30)
     set_tests_properties(dpdk-memory PROPERTIES TIMEOUT 30)
     list(JOIN DPDK_LIBRARY_DIRS ":" ker_dpdk_library_path)
-    set_tests_properties(checksum timer refcount dpdk-memory skb worker ethernet napi receive arp ipv4-address neighbor arp-receive skb-queue timer-list PROPERTIES
+    set_tests_properties(checksum timer refcount dpdk-memory skb worker ethernet napi receive arp ipv4-address neighbor-timer neighbor arp-receive skb-queue timer-list PROPERTIES
         ENVIRONMENT "LD_LIBRARY_PATH=${ker_dpdk_library_path}:$ENV{LD_LIBRARY_PATH}")
 endif()

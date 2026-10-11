@@ -4,8 +4,9 @@
 #include "runtime/ipv4-address.h"
 struct kmem_cache;
 /* One worker/device permanent IPv4 neighbor table. Stable zero-initialized
- * storage, a configured IPv4 address, fixed descriptor pool, no dynamic NUD,
- * probe timers, GC, unresolved packet queues, proxy or output service. */
+ * storage, a configured IPv4 address and fixed descriptor pool. Optional
+ * neighbor-timer monitors pin selected entries; no automatic resolution,
+ * GC, unresolved packet queues, proxy or output service. */
 struct ker_neighbor_table {
     struct neigh_table *native;
     struct ker_ipv4_address *address;
@@ -34,6 +35,8 @@ int ker_neighbor_remove(struct ker_neighbor_table *table, __be32 ip);
 /* Original lookup/clone grants one reference. Failure leaves output unchanged.
  * Every acquired reference must be released; removal refuses live references. */
 int ker_neighbor_lookup(struct ker_neighbor_table *table, __be32 ip, struct neighbour **result);
+/* Release lookup references in any monitored state as well as PERMANENT. */
 int ker_neighbor_release(struct ker_neighbor_table *table, struct neighbour *entry);
+/* Permanent mappings only; monitored entries require a stateful snapshot. */
 int ker_neighbor_mac(struct ker_neighbor_table *table, struct neighbour *entry, unsigned char mac[6]);
 #endif
