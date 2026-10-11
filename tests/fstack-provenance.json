@@ -156,6 +156,11 @@
       "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
       "source_case": "test_ff_dpdk_if_send_multiseg",
       "adaptation": "Ker-specific positive linear-skb-to-DPDK-chain copy extension motivated by the pinned multisegment TX case. Ker copies an existing supported linear UDP/TCP packet into independently owned direct mbufs, then validates the chain through its copy/classify worker RX path after releasing the source skb. The upstream case exercises F-Stack TX; this does not claim F-Stack/NIC transmission, Linux nonlinear skb support, or offload."
+    },
+    "tx-chain-export": {
+      "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
+      "source_case": "test_ff_dpdk_if_send_multiseg",
+      "adaptation": "Ker-specific worker TX copy extension motivated by the pinned multisegment TX case. Opt-in chain mode exports a supported linear skb into a direct DPDK chain and gives the whole chain to an application sink only on acceptance; a rejected copy is freed while the original FIFO skb remains pending for retry. This is not native F-Stack/NIC TX, Linux nonlinear skb support, or hardware offload. Chain mode accepts CHECKSUM_NONE only; the existing legacy exporter retains its separate software CHECKSUM_PARTIAL path."
     }
   }
 }

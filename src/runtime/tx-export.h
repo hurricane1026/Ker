@@ -14,9 +14,11 @@ struct ker_tx_export {
     size_t byte_limit;
     unsigned int packets;
     unsigned int packet_limit;
+    unsigned int segment_payload_limit;
     unsigned int last_completed;
     int last_error;
     bool polling;
+    bool chain_mode;
     ker_tx_export_sink_fn sink;
     void *sink_arg;
 };
@@ -25,6 +27,11 @@ struct ker_tx_export {
  * other return accepts nothing. */
 int ker_tx_export_init(struct ker_tx_export *, struct ker_skb_context *,
     unsigned int packet_limit, size_t byte_limit, ker_tx_export_sink_fn, void *);
+/* Opt into copied DPDK chains. Chain mode admits CHECKSUM_NONE only; the sink
+ * accepts/frees or retains the entire chain as one ownership unit. */
+int ker_tx_export_init_chain(struct ker_tx_export *, struct ker_skb_context *,
+    unsigned int packet_limit, size_t byte_limit, unsigned int segment_payload_limit,
+    ker_tx_export_sink_fn, void *);
 int ker_tx_export_enqueue(struct ker_tx_export *, struct sk_buff **);
 /* Worker TX callback. Accepted copies are irreversible; failures after a
  * successful prefix return that count and expose the error in last_error. */
