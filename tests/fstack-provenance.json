@@ -146,6 +146,11 @@
       "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
       "source_case": "test_ff_dpdk_if_send_tcp_csum",
       "adaptation": "Ker-specific extension of the pinned TCP TX checksum case: constructs fixed IPv4 headers with copied opaque TCP options and validates the software checksum through the worker receive path. The upstream case does not test option construction or interpretation. Options are not parsed, and this adds no TCP state, routing, socket, NIC or hardware offload support."
+    },
+    "tcp-neighbor-create": {
+      "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
+      "source_case": "test_ff_dpdk_if_send_tcp_csum",
+      "adaptation": "Ker-specific extension of the pinned TCP TX checksum case: derives the source IPv4/MAC from one configured address/device and the destination MAC from an existing NUD_PERMANENT neighbor, releases the lookup reference before allocation, then validates software checksums through TX retry and segmented worker RX. The upstream case does not test neighbor selection or ARP resolution. No unresolved queue, FIB, routing, source fallback, TCP state, socket or NIC transmission is claimed."
     }
   }
 }
