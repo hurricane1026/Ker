@@ -347,6 +347,84 @@ int ker_skb_to_mbuf(struct sk_buff *skb, struct rte_mbuf **result)
 {
     return skb_to_mbuf_copy(skb, result, false);
 }
+int ker_skb_to_mbuf_chain_copy(struct sk_buff *skb,
+    unsigned int segment_payload_limit, struct rte_mbuf **result)
+{
+    if (!result || !segment_payload_limit)
+        return -EINVAL;
+    if (segment_payload_limit > UINT16_MAX)
+        return -EOVERFLOW;
+    int error = ker_skb_validate(skb, skb ? envelope(skb)->owner : NULL);
+    if (error)
+        return error;
+    if (skb->ip_summed == CHECKSUM_PARTIAL || skb_shinfo(skb)->gso_size ||
+        skb_shinfo(skb)->gso_type)
+        return -ENOTSUP;
+
+    struct ker_packet_pool *pool = envelope(skb)->owner->packets;
+    uint32_t room = rte_pktmbuf_data_room_size(pool->mbufs);
+    uint32_t first_headroom = skb_headroom(skb);
+    uint32_t following_headroom = RTE_MIN((uint32_t)RTE_PKTMBUF_HEADROOM, room);
+    if (first_headroom > room || first_headroom > UINT16_MAX)
+        return -ENOSPC;
+    uint32_t first_capacity = RTE_MIN(segment_payload_limit, room - first_headroom);
+    uint32_t following_capacity = room - following_headroom;
+    following_capacity = RTE_MIN(segment_payload_limit, following_capacity);
+    if (skb->len && !first_capacity)
+        return -ENOSPC;
+    uint64_t segments = 1;
+    if (skb->len > first_capacity) {
+        if (!following_capacity)
+            return -ENOSPC;
+        uint32_t remainder = skb->len - first_capacity;
+        segments += ((uint64_t)remainder + following_capacity - 1) / following_capacity;
+    }
+    if (segments > UINT16_MAX)
+        return -EOVERFLOW;
+
+    struct rte_mbuf *chain = NULL;
+    struct rte_mbuf *tail = NULL;
+    const uint8_t *source = skb->data;
+    uint32_t remaining = skb->len;
+    for (uint64_t i = 0; i < segments; ++i) {
+        struct rte_mbuf *segment = ker_packet_alloc(pool);
+        if (!segment) {
+            ker_packet_free(chain);
+            return -ENOMEM;
+        }
+        if (!i)
+            segment->data_off = (uint16_t)first_headroom;
+        uint32_t capacity = i ? following_capacity : first_capacity;
+        uint16_t length = (uint16_t)RTE_MIN(remaining, capacity);
+        void *destination = rte_pktmbuf_append(segment, length);
+        if (!destination) {
+            ker_packet_free(segment);
+            ker_packet_free(chain);
+            return -ENOSPC;
+        }
+        if (length)
+            memcpy(destination, source, length);
+        source += length;
+        remaining -= length;
+        segment->ol_flags = 0;
+        if (!chain) {
+            chain = tail = segment;
+        } else {
+            if ((uint32_t)chain->nb_segs + 1U > UINT16_MAX ||
+                (uint64_t)chain->pkt_len + segment->data_len > UINT32_MAX) {
+                ker_packet_free(segment);
+                ker_packet_free(chain);
+                return -EOVERFLOW;
+            }
+            tail->next = segment;
+            tail = segment;
+            chain->nb_segs++;
+            chain->pkt_len += segment->data_len;
+        }
+    }
+    *result = chain;
+    return 0;
+}
 int ker_skb_to_mbuf_software_checksum(struct sk_buff *skb, struct rte_mbuf **result)
 {
     if (!result)
