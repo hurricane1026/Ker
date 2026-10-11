@@ -59,9 +59,11 @@ Unresolved packet queues, skb cloning in probing, error packet delivery, proxy
 neighbors, application probes, external validation flags, garbage collection,
 ARP learning and packet output are unsupported. Queues must remain empty;
 unsupported native paths fail closed. Native output callbacks return ENOTSUP
-without consuming a packet. Probe callbacks may build an independent ARP packet
-through the existing constructor, but this change does not add NIC transmission
-or a complete ARP resolution service. Public capability bits remain unchanged.
+without consuming a packet. Probe callbacks may use the bounded
+[native ARP probe adapter](linux-arp-probes.md), which captures the original
+Linux request constructor as a caller-owned skb. It does not add NIC
+transmission or a complete ARP resolution service. Public capability bits
+remain unchanged.
 
 The `neighbor-timer` regression runs against real DPDK pools and verifies native
 transitions, exact-deadline clamping, retries and zero-probe exhaustion, positive

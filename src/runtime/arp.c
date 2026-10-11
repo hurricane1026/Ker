@@ -64,3 +64,19 @@ int ker_arp_create(struct ker_eth_device *device, unsigned int operation,
     *result = skb;
     return 0;
 }
+int ker_arp_capture_begin(struct ker_eth_device *device)
+{
+    int error = valid(device);
+    if (error) return error;
+    if (device->native->header_ops != &headers) return -ENOTSUP;
+    if (allocation_context) return -EBUSY;
+    allocation_context = device->context; allocation_error = 0;
+    return 0;
+}
+int ker_arp_capture_end(void)
+{
+    if (!allocation_context) return -EPERM;
+    int error = allocation_error;
+    allocation_context = NULL; allocation_error = 0;
+    return error;
+}
