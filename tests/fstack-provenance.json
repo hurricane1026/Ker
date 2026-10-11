@@ -131,6 +131,11 @@
       "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
       "source_case": "test_ff_dpdk_if_send_udp_csum",
       "adaptation": "Ker-specific worker TX copy/retry extension motivated by the pinned UDP checksum TX case. A bounded owner-worker FIFO retains each original skb until a sink accepts its checksum-completed or ordinary private mbuf copy; failures retry the pending head and cancellation returns ownership. The sink is an application copy consumer, not an ethdev/NIC, and no hardware offload or F-Stack TX path is claimed."
+    },
+    "tcp-create": {
+      "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
+      "source_case": "test_ff_dpdk_if_send_tcp_csum",
+      "adaptation": "Ker-specific explicit-address TCP/IPv4 packet-construction and worker receive-roundtrip extension motivated by the pinned TCP TX checksum-offload case, which is not a constructor or receive test. Ker writes fixed Ethernet/IPv4/TCP headers and software checksums; an application sink accepts a copy, then a real segmented chain is classified and validated by the existing TCP packet-view receiver. No socket, TCP state machine, route, NIC or hardware offload is claimed."
     }
   }
 }
