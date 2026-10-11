@@ -41,6 +41,10 @@ int ker_skb_clone(struct sk_buff *skb, struct sk_buff **result);
 int ker_skb_make_writable(struct sk_buff *skb, unsigned int headroom, unsigned int tailroom);
 /* Always copies; caller owns returned mbuf. No native offload claims are set. */
 int ker_skb_to_mbuf(struct sk_buff *skb, struct rte_mbuf **result);
+/* Complete a linear CHECKSUM_PARTIAL skb in a private copied mbuf using Linux
+ * Internet-checksum semantics. Source bytes/metadata remain unchanged; no TX
+ * offload metadata is set. CRC32C, GSO and unsupported skb layouts are rejected. */
+int ker_skb_to_mbuf_software_checksum(struct sk_buff *skb, struct rte_mbuf **result);
 int ker_skb_put(struct sk_buff *skb, unsigned int length, uint8_t **data);
 int ker_skb_push(struct sk_buff *skb, unsigned int length, uint8_t **data);
 int ker_skb_pull(struct sk_buff *skb, unsigned int length);

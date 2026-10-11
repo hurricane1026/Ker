@@ -119,6 +119,128 @@ static void offload_metadata_rejection(void)
     ker_packet_free(output);
     CHECK(ker_skb_free(skb) == 0 && rte_mempool_avail_count(pool.mbufs) == 31);
 }
+static struct sk_buff *partial_checksum_packet(bool tcp, unsigned int headroom,
+    unsigned char original[43], unsigned int *length)
+{
+    static const unsigned char udp[] = {
+        0x12,0x34,0x56,0x78,0x00,0x0d,0x13,0xa3,0x61,0x62,0x63,0x64,0x65
+    };
+    static const unsigned char tcp_segment[] = {
+        0x12,0x34,0x56,0x78,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x00,
+        0x50,0x10,0x00,0x10,0x13,0xa4,0x00,0x00,0x78,0x79,0x7a
+    };
+    *length = tcp ? 43 : 33;
+    memset(original, 0, 43);
+    const unsigned char ip[] = {
+        0x45,0x00,0x00,0x00,0x00,0x01,0x00,0x00,0x40,0x00,0x8e,0x8d,
+        0xc0,0x00,0x02,0x01,0xc6,0x33,0x64,0x09
+    };
+    memcpy(original, ip, sizeof(ip));
+    original[2] = (unsigned char)(*length >> 8);
+    original[3] = (unsigned char)*length;
+    if (tcp) {
+        original[9] = 6;
+        original[10] = 0x8e; original[11] = 0x8e;
+        memcpy(original + 20, tcp_segment, sizeof(tcp_segment));
+    } else {
+        original[9] = 17;
+        memcpy(original + 20, udp, sizeof(udp));
+    }
+    struct sk_buff *skb = NULL;
+    CHECK(ker_skb_alloc(&context, *length, headroom, &skb) == 0);
+    unsigned char *data;
+    CHECK(ker_skb_put(skb, *length, &data) == 0);
+    memcpy(data, original, *length);
+    skb->ip_summed = CHECKSUM_PARTIAL;
+    skb->csum_start = (uint16_t)(skb_headroom(skb) + 20);
+    skb->csum_offset = tcp ? 16 : 6;
+    return skb;
+}
+static void partial_checksum_software_completion(void)
+{
+    unsigned char original[43], expected[43];
+    unsigned int length;
+    struct sk_buff *skb = partial_checksum_packet(false, 17, original, &length);
+    CHECK(length == 33 && skb->data == skb->head + 17 && ((uintptr_t)skb->data & 1));
+    memcpy(expected, original, length);
+    expected[26] = 0x59; expected[27] = 0xdc;
+    struct rte_mbuf *output = (void *)(uintptr_t)1;
+    CHECK(ker_skb_to_mbuf(skb, &output) == -ENOTSUP && output == (void *)(uintptr_t)1);
+    CHECK(ker_skb_to_mbuf_software_checksum(skb, &output) == 0);
+    CHECK(output && output->pkt_len == length && output->data_len == length && output->data_off == 17);
+    CHECK(output->ol_flags == 0 && !memcmp(rte_pktmbuf_mtod(output, const void *), expected, length));
+    CHECK(context.live == 1 && skb->ip_summed == CHECKSUM_PARTIAL &&
+        skb->csum_start == 37 && skb->csum_offset == 6 && !memcmp(skb->data, original, length));
+    CHECK(ker_skb_free(skb) == 0);
+    CHECK(!memcmp(rte_pktmbuf_mtod(output, const void *), expected, length));
+    ker_packet_free(output);
+
+    skb = partial_checksum_packet(false, 16, original, &length);
+    struct sk_buff *clone = NULL;
+    CHECK(ker_skb_clone(skb, &clone) == 0 && clone);
+    output = (void *)(uintptr_t)1;
+    CHECK(ker_skb_to_mbuf_software_checksum(skb, &output) == -ENOTSUP && output == (void *)(uintptr_t)1);
+    CHECK(context.live == 2 && skb->ip_summed == CHECKSUM_PARTIAL && !memcmp(skb->data, original, length));
+    CHECK(ker_skb_free(clone) == 0);
+    CHECK(ker_skb_to_mbuf_software_checksum(skb, &output) == 0 && output);
+    CHECK(!memcmp(rte_pktmbuf_mtod(output, const void *), expected, length));
+    ker_packet_free(output);
+    CHECK(ker_skb_free(skb) == 0);
+
+    skb = partial_checksum_packet(false, 18, original, &length);
+    unsigned int start = skb->csum_start, offset = skb->csum_offset;
+    output = (void *)(uintptr_t)1;
+    skb->csum_start = (uint16_t)(skb_headroom(skb) - 1);
+    CHECK(ker_skb_to_mbuf_software_checksum(skb, &output) == -EINVAL && output == (void *)(uintptr_t)1);
+    skb->csum_start = (uint16_t)(skb_headroom(skb) + skb->len);
+    CHECK(ker_skb_to_mbuf_software_checksum(skb, &output) == -EINVAL && output == (void *)(uintptr_t)1);
+    skb->csum_start = (uint16_t)start; skb->csum_offset = UINT16_MAX;
+    CHECK(ker_skb_to_mbuf_software_checksum(skb, &output) == -EINVAL && output == (void *)(uintptr_t)1);
+    skb->csum_offset = (uint16_t)offset; skb_shinfo(skb)->gso_size = 1448;
+    CHECK(ker_skb_to_mbuf_software_checksum(skb, &output) == -ENOTSUP && output == (void *)(uintptr_t)1);
+    skb_shinfo(skb)->gso_size = 0;
+#if defined(CONFIG_IP_SCTP) || defined(CONFIG_IP_SCTP_MODULE)
+    skb->csum_not_inet = 1;
+    CHECK(ker_skb_to_mbuf_software_checksum(skb, &output) == -ENOTSUP && output == (void *)(uintptr_t)1);
+    skb->csum_not_inet = 0;
+#endif
+    CHECK(context.live == 1 && skb->ip_summed == CHECKSUM_PARTIAL && skb->csum_start == start &&
+        skb->csum_offset == offset && !memcmp(skb->data, original, length));
+    struct rte_mbuf *held[30];
+    for (unsigned int i = 0; i < 30; ++i) { held[i] = ker_packet_alloc(&pool); CHECK(held[i]); }
+    CHECK(ker_skb_to_mbuf_software_checksum(skb, &output) == -ENOMEM && output == (void *)(uintptr_t)1);
+    CHECK(context.live == 1 && skb->ip_summed == CHECKSUM_PARTIAL && !memcmp(skb->data, original, length));
+    ker_packet_free(held[0]);
+    CHECK(ker_skb_to_mbuf_software_checksum(skb, &output) == 0 && output && output->pkt_len == length);
+    for (unsigned int i = 1; i < 30; ++i) ker_packet_free(held[i]);
+    CHECK(!memcmp(rte_pktmbuf_mtod(output, const void *), expected, length));
+    CHECK(ker_skb_free(skb) == 0);
+    ker_packet_free(output);
+
+    skb = partial_checksum_packet(true, 18, original, &length);
+    memcpy(expected, original, length);
+    expected[36] = 0x41; expected[37] = 0x14;
+    CHECK(length == 43 && skb->csum_start == 38 && skb->csum_offset == 16);
+    CHECK(ker_skb_to_mbuf_software_checksum(skb, &output) == 0 && output && output->pkt_len == length);
+    CHECK(output->ol_flags == 0 && !memcmp(rte_pktmbuf_mtod(output, const void *), expected, length));
+    CHECK(skb->ip_summed == CHECKSUM_PARTIAL && !memcmp(skb->data, original, length));
+    ker_packet_free(output);
+    CHECK(!memcmp(skb->data, original, length));
+    CHECK(ker_skb_free(skb) == 0 && context.live == 0 && rte_mempool_avail_count(pool.mbufs) == 31);
+
+    /* This valid UDP seed/payload folds to zero; Linux maps that wire value
+     * to CSUM_MANGLED_0 (0xffff) so the checksum is not mistaken for absent. */
+    skb = partial_checksum_packet(false, 18, original, &length);
+    skb->data[28] = original[28] = 0xbb;
+    skb->data[29] = original[29] = 0x3e;
+    memcpy(expected, original, length);
+    expected[26] = 0xff; expected[27] = 0xff;
+    CHECK(ker_skb_to_mbuf_software_checksum(skb, &output) == 0 && output);
+    CHECK(!memcmp(rte_pktmbuf_mtod(output, const void *), expected, length));
+    ker_packet_free(output);
+    CHECK(!memcmp(skb->data, original, length) && skb->ip_summed == CHECKSUM_PARTIAL);
+    CHECK(ker_skb_free(skb) == 0 && context.live == 0 && rte_mempool_avail_count(pool.mbufs) == 31);
+}
 static void multiseg_boundary(void)
 {
     struct rte_mbuf *a = ker_packet_alloc(&pool), *b = ker_packet_alloc(&pool); CHECK(a && b);
@@ -356,7 +478,8 @@ int main(int argc, char **argv)
         {"multiseg-ethernet-ingress", multiseg_ethernet_ingress},
         {"headroom-export", headroom_export},
         {"export-exhaustion-retry", export_exhaustion_retry},
-        {"offload-metadata-rejection", offload_metadata_rejection}
+        {"offload-metadata-rejection", offload_metadata_rejection},
+        {"software-checksum-completion", partial_checksum_software_completion}
     };
     CHECK(argc == 2); void (*run)(void) = NULL;
     for (unsigned int i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i)

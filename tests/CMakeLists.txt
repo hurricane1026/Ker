@@ -154,7 +154,8 @@ if(KER_WITH_DPDK)
         ker_linux_port ker_dpdk_port ker_skb_port Threads::Threads)
     foreach(fstack_case mbuf-release clock-monotonic empty-export null-context packet-export
             multiseg-boundary queue-isolation queue-full-ownership export-exhaustion-retry
-            offload-metadata-rejection headroom-export multiseg-copy multiseg-ethernet-ingress)
+            offload-metadata-rejection headroom-export multiseg-copy multiseg-ethernet-ingress
+            software-checksum-completion)
         add_test(NAME fstack-${fstack_case} COMMAND ker-fstack-adapted-test ${fstack_case})
         set_tests_properties(fstack-${fstack_case} PROPERTIES TIMEOUT 30)
         list(APPEND ker_fstack_tests fstack-${fstack_case})

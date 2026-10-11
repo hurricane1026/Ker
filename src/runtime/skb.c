@@ -2,7 +2,9 @@
 #include "runtime/skb-queue-internal.h"
 #include <rte_lcore.h>
 #include <errno.h>
+#include <limits.h>
 #include <string.h>
+#include <net/checksum.h>
 
 /* Backend bookkeeping is outside the unchanged upstream skb layout and cb. */
 struct skb_envelope {
@@ -315,14 +317,16 @@ int ker_skb_make_writable(struct sk_buff *skb, unsigned int headroom, unsigned i
     desc->backing = packet;
     return 0;
 }
-int ker_skb_to_mbuf(struct sk_buff *skb, struct rte_mbuf **result)
+static int skb_to_mbuf_copy(struct sk_buff *skb, struct rte_mbuf **result,
+    bool allow_partial_checksum)
 {
     if (!result)
         return -EINVAL;
     int error = supported(skb);
     if (error)
         return error;
-    if (skb->ip_summed == CHECKSUM_PARTIAL || skb_shinfo(skb)->gso_size || skb_shinfo(skb)->gso_type)
+    if ((!allow_partial_checksum && skb->ip_summed == CHECKSUM_PARTIAL) ||
+        skb_shinfo(skb)->gso_size || skb_shinfo(skb)->gso_type)
         return -ENOTSUP;
     struct rte_mbuf *packet = ker_packet_alloc(envelope(skb)->owner->packets);
     if (!packet)
@@ -336,6 +340,53 @@ int ker_skb_to_mbuf(struct sk_buff *skb, struct rte_mbuf **result)
     if (!data) { ker_packet_free(packet); return -ENOSPC; }
     memcpy(data, skb->data, skb->len);
     packet->ol_flags = 0;
+    *result = packet;
+    return 0;
+}
+int ker_skb_to_mbuf(struct sk_buff *skb, struct rte_mbuf **result)
+{
+    return skb_to_mbuf_copy(skb, result, false);
+}
+int ker_skb_to_mbuf_software_checksum(struct sk_buff *skb, struct rte_mbuf **result)
+{
+    if (!result)
+        return -EINVAL;
+    int error = supported(skb);
+    if (error)
+        return error;
+    if (skb->ip_summed != CHECKSUM_PARTIAL)
+        return -EINVAL;
+    if (skb_shared(skb) || skb_cloned(skb) || skb->nohdr ||
+#if defined(CONFIG_IP_SCTP) || defined(CONFIG_IP_SCTP_MODULE)
+        skb->csum_not_inet ||
+#endif
+        skb_shinfo(skb)->gso_size || skb_shinfo(skb)->gso_type)
+        return -ENOTSUP;
+
+    /* Match skb_checksum_help's data-relative start and field bounds before
+     * allocating. Use wide arithmetic so malformed u16 offsets cannot wrap. */
+    /* Exact Linux skb_checksum_start_offset() expression from pinned
+     * include/linux/skbuff.h; this compatibility header omits that helper. */
+    int start = (int)skb->csum_start - (int)skb_headroom(skb);
+    if (start < 0 || (unsigned int)start >= skb->len)
+        return -EINVAL;
+    uint64_t field = (uint64_t)(unsigned int)start + skb->csum_offset;
+    if (field > skb->len || skb->len - (unsigned int)field < sizeof(__sum16))
+        return -EINVAL;
+    if (skb->len - (unsigned int)start > INT_MAX)
+        return -EOVERFLOW;
+
+    struct rte_mbuf *packet = NULL;
+    error = skb_to_mbuf_copy(skb, &packet, true);
+    if (error)
+        return error;
+    __wsum sum = csum_partial((uint8_t *)rte_pktmbuf_mtod(packet, void *) + start,
+        (int)(skb->len - (unsigned int)start), 0);
+    __sum16 checksum = csum_fold(sum);
+    if (!checksum)
+        checksum = CSUM_MANGLED_0;
+    /* Linux stores __sum16 directly; memcpy also handles a valid odd offset. */
+    memcpy((uint8_t *)rte_pktmbuf_mtod(packet, void *) + field, &checksum, sizeof(checksum));
     *result = packet;
     return 0;
 }
