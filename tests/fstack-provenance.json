@@ -136,6 +136,11 @@
       "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
       "source_case": "test_ff_dpdk_if_send_tcp_csum",
       "adaptation": "Ker-specific explicit-address TCP/IPv4 packet-construction and worker receive-roundtrip extension motivated by the pinned TCP TX checksum-offload case, which is not a constructor or receive test. Ker writes fixed Ethernet/IPv4/TCP headers and software checksums; an application sink accepts a copy, then a real segmented chain is classified and validated by the existing TCP packet-view receiver. No socket, TCP state machine, route, NIC or hardware offload is claimed."
+    },
+    "tcp-options-create": {
+      "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
+      "source_case": "test_ff_dpdk_if_send_tcp_csum",
+      "adaptation": "Ker-specific extension of the pinned TCP TX checksum case: constructs fixed IPv4 headers with copied opaque TCP options and validates the software checksum through the worker receive path. The upstream case does not test option construction or interpretation. Options are not parsed, and this adds no TCP state, routing, socket, NIC or hardware offload support."
     }
   }
 }
