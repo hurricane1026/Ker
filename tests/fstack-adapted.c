@@ -63,13 +63,14 @@ static void packet_export(void)
 static void headroom_export(void)
 {
     struct sk_buff *skb = NULL;
-    CHECK(ker_skb_alloc(&context, 96, 128, &skb) == 0);
+    CHECK(ker_skb_alloc(&context, 96, 192, &skb) == 0);
+    CHECK(skb_headroom(skb) == 192);
     uint8_t *bytes;
     CHECK(ker_skb_put(skb, 96, &bytes) == 0);
     for (unsigned int i = 0; i < 96; ++i) bytes[i] = (uint8_t)(255 - i);
     struct rte_mbuf *copy = NULL;
     CHECK(ker_skb_to_mbuf(skb, &copy) == 0 && copy);
-    CHECK(copy->data_off == 128 && copy->data_len == 96 && copy->pkt_len == 96);
+    CHECK(copy->data_off == 192 && copy->data_len == 96 && copy->pkt_len == 96);
     CHECK(!memcmp(rte_pktmbuf_mtod(copy, const void *), skb->data, 96));
     CHECK(refcount_read(&skb->users) == 1 && context.live == 1);
     CHECK(ker_skb_free(skb) == 0);
