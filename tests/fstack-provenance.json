@@ -80,6 +80,11 @@
       "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
       "source_case": "test_ff_dpdk_if_send_multiseg",
       "adaptation": "Adapt the multisegment packet geometry intent in the ingress direction: split destination/source/type fields across real DPDK segments, copy to a linear skb, classify with unchanged Linux eth_type_trans and deliver one host packet through Ker's existing protocol runtime. Also verify broadcast/otherhost classification, ownership and failure boundaries. This is not F-Stack TX, NIC traffic, Ethernet offload or nonlinear Linux skb support."
+    },
+    "arp-chain-feedback": {
+      "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
+      "source_case": "test_ff_dpdk_if_send_multiseg",
+      "adaptation": "Ker-specific integration extension of the upstream multisegment geometry scenario: split a valid Ethernet ARP reply across a real DPDK chain, linearize and classify it, then exercise the existing ARP decoder and scoped native neighbor feedback from an actual worker RX poll. Verify rejection boundaries, timer/reference preservation, source-chain release and pool recovery. The ARP feedback scenario is not an upstream F-Stack test and does not claim NIC traffic or general ARP learning."
     }
   }
 }

@@ -5,7 +5,7 @@ unit 使用多种 stub/wrap，部分 integration 启动实际 EAL，但也用 st
 FreeBSD mbuf/veth。这不是可直接搬入 Ker 的 Linux TCP/IP 一致性套件。
 当前迁移固定到 F-Stack dev commit 646a641cfff77f4815e1e29829a09e1ed15a2999。
 
-按原始场景意图适配 Ker 真实实现的 F-Stack 场景当前共 13 个独立 CTest 用例。测试
+按原始场景意图适配 Ker 真实实现的 F-Stack 场景当前共 14 个独立 CTest 用例。测试
 实现重新编写，使用 Ker CHECK harness 和真实 EAL/mempool，不复制 ff_* glue、
 FreeBSD 栈、cmocka mock/stub 或覆盖率脚本。没有通过宿主机 socket 的结果
 冒充 Ker 网络栈通过，也不因 EAL 初始化失败跳过用例。
@@ -25,6 +25,7 @@ FreeBSD 栈、cmocka mock/stub 或覆盖率脚本。没有通过宿主机 socket
 | fstack-headroom-export | test_ff_dpdk_if_send_basic | 显式 headroom 转为 mbuf data_off，检查字节和 skb 释放后的副本生命周期 |
 | fstack-multiseg-copy | test_ff_dpdk_if_send_multiseg | 真实多段 DPDK 输入复制并合并到线性 Linux skb，检查零长度段、源链所有权和释放源链后的数据；不代表上游分段 TX 或 Linux nonlinear skb 支持 |
 | fstack-multiseg-ethernet-ingress | test_ff_dpdk_if_send_multiseg | 将目的/源 MAC 和 EtherType 拆分到真实 DPDK 段中，经 Ker copy adapter 线性化后调用原始 Linux Ethernet 分类器，并经现有协议 runtime 分发；方向改为 ingress，不宣称 F-Stack TX、NIC/offload 或 Linux nonlinear skb |
+| fstack-arp-chain-feedback | test_ff_dpdk_if_send_multiseg | Ker-specific integration extension：将有效 ARP reply 的以太网和 ARP 字段拆分到 DPDK chain，经 copy/classify、原始 ARP decoder 和实际 worker RX poll，验证现有 scoped neighbor feedback 从 DELAY 更新至 REACHABLE。该 ARP feedback 场景不是 F-Stack 上游测试，不代表一般 ARP learning 或 NIC 收发 |
 
 逐例上游路径、case 名、固定版本和原始文件 SHA256 记录于
 [provenance](../tests/fstack-provenance.json)。源链接固定到具体 commit；这是
