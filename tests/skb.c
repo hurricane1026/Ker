@@ -407,6 +407,7 @@ static void expect_chain_copy_error(struct rte_mbuf *head, struct rte_mbuf *tail
 {
     uint16_t head_segs = head->nb_segs, head_data_off = head->data_off, head_data_len = head->data_len;
     uint32_t head_len = head->pkt_len;
+    uint64_t head_flags = head->ol_flags, tail_flags = tail->ol_flags;
     struct rte_mbuf *head_next = head->next, *tail_next = tail->next;
     uint16_t tail_segs = tail->nb_segs, tail_data_off = tail->data_off, tail_data_len = tail->data_len;
     uint32_t tail_len = tail->pkt_len;
@@ -419,6 +420,7 @@ static void expect_chain_copy_error(struct rte_mbuf *head, struct rte_mbuf *tail
     CHECK(rte_mempool_avail_count(pool.mbufs) == available);
     CHECK(head->nb_segs == head_segs && head->pkt_len == head_len && head->data_off == head_data_off);
     CHECK(head->data_len == head_data_len && head->next == head_next && head->buf_addr == head_buf);
+    CHECK(head->ol_flags == head_flags && tail->ol_flags == tail_flags);
     CHECK(tail->nb_segs == tail_segs && tail->pkt_len == tail_len && tail->data_off == tail_data_off);
     CHECK(tail->data_len == tail_data_len && tail->next == tail_next && tail->buf_addr == tail_buf);
     CHECK(rte_mbuf_refcnt_read(head) == head_refs && rte_mbuf_refcnt_read(tail) == tail_refs);
@@ -462,9 +464,9 @@ static void test_mbuf_chain_copy(void)
     tail->data_off = tail->buf_len;
     expect_chain_copy_error(head, tail, -EINVAL);
     tail->data_off = RTE_PKTMBUF_HEADROOM;
-    tail->ol_flags = RTE_MBUF_F_RX_VLAN_STRIPPED;
+    head->ol_flags = RTE_MBUF_F_RX_VLAN_STRIPPED;
     expect_chain_copy_error(head, tail, -ENOTSUP);
-    tail->ol_flags = 0;
+    head->ol_flags = 0;
     rte_mbuf_refcnt_update(tail, 1);
     expect_chain_copy_error(head, tail, -EBUSY);
     rte_mbuf_refcnt_update(tail, -1);
@@ -480,6 +482,16 @@ static void test_mbuf_chain_copy(void)
     CHECK(ker_skb_copy_from_mbuf_chain(&ctx, head, 64, &result) == -ENOTSUP);
     CHECK(result == (struct sk_buff *)(uintptr_t)1 && head->next == tail && ctx.live == 0);
     tail->buf_addr = saved_tail_buffer;
+    ker_packet_free(head);
+    check_pool(31);
+
+    head = make_chain_pair(&tail);
+    tail->ol_flags = RTE_MBUF_F_RX_VLAN_STRIPPED | RTE_MBUF_F_RX_IP_CKSUM_NONE;
+    result = NULL;
+    CHECK(ker_skb_copy_from_mbuf_chain(&ctx, head, 64, &result) == 0);
+    CHECK(result && result->len == 5 && memcmp(result->data, "abcde", 5) == 0);
+    CHECK(tail->ol_flags == (RTE_MBUF_F_RX_VLAN_STRIPPED | RTE_MBUF_F_RX_IP_CKSUM_NONE));
+    CHECK(ker_skb_free(result) == 0);
     ker_packet_free(head);
     check_pool(31);
 

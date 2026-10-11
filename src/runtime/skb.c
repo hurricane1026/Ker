@@ -82,6 +82,8 @@ static int mbuf_chain_geometry(const struct rte_mbuf *head, uint32_t *length)
         return -EINVAL;
     if (count == 1)
         return head->next ? -EINVAL : -ENOTSUP;
+    if (rx_metadata_supported(head))
+        return -ENOTSUP;
     const struct rte_mbuf *segment = head;
     uint64_t total = 0;
     for (uint16_t i = 0; i < count; ++i) {
@@ -95,8 +97,6 @@ static int mbuf_chain_geometry(const struct rte_mbuf *head, uint32_t *length)
             return -EBUSY;
         if ((uint64_t)segment->data_off + segment->data_len > segment->buf_len)
             return -EINVAL;
-        if (rx_metadata_supported(segment))
-            return -ENOTSUP;
         total += segment->data_len;
         if (total > UINT32_MAX)
             return -EOVERFLOW;

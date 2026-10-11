@@ -132,12 +132,14 @@ static void multiseg_copy(void)
     memcpy(rte_pktmbuf_mtod(a, void *), "first", 5);
     memcpy(rte_pktmbuf_mtod(c, void *), "payload", 7);
     CHECK(rte_pktmbuf_chain(b, c) == 0 && rte_pktmbuf_chain(a, b) == 0);
+    b->ol_flags = RTE_MBUF_F_RX_VLAN_STRIPPED | RTE_MBUF_F_RX_IP_CKSUM_NONE;
     CHECK(a->nb_segs == 3 && a->pkt_len == 12 && a->next == b && b->nb_segs == 2 && b->next == c && !c->next);
     struct rte_mbuf *identity_b = a->next, *identity_c = b->next;
     struct sk_buff *skb = (void *)(uintptr_t)1;
     CHECK(ker_skb_copy_from_mbuf_chain(&context, a, 192, &skb) == 0 && skb != (void *)(uintptr_t)1);
     CHECK(skb->len == 12 && skb_headroom(skb) == 192 && !memcmp(skb->data, "firstpayload", 12));
     CHECK(a->nb_segs == 3 && a->pkt_len == 12 && a->next == identity_b && b->nb_segs == 2 && b->next == identity_c);
+    CHECK(b->ol_flags == (RTE_MBUF_F_RX_VLAN_STRIPPED | RTE_MBUF_F_RX_IP_CKSUM_NONE));
     CHECK(rte_mbuf_refcnt_read(a) == 1 && rte_mbuf_refcnt_read(b) == 1 && rte_mbuf_refcnt_read(c) == 1);
     CHECK(ker_skb_free(skb) == 0);
     CHECK(a->next == identity_b && b->next == identity_c && a->pkt_len == 12);
