@@ -140,10 +140,11 @@ if(KER_WITH_DPDK)
     add_executable(ker-fstack-adapted-test fstack-adapted.c)
     target_compile_definitions(ker-fstack-adapted-test PRIVATE _GNU_SOURCE)
     target_link_libraries(ker-fstack-adapted-test PRIVATE ker_neighbor_headers ker_neighbor_port
-        ker_address_port ker_napi_port ker_eth_port ker_linux_port ker_dpdk_port ker_skb_port Threads::Threads)
+        ker_receive_headers ker_receive_port ker_address_port ker_napi_port ker_eth_port
+        ker_linux_port ker_dpdk_port ker_skb_port Threads::Threads)
     foreach(fstack_case mbuf-release clock-monotonic empty-export null-context packet-export
             multiseg-boundary queue-isolation queue-full-ownership export-exhaustion-retry
-            offload-metadata-rejection headroom-export multiseg-copy)
+            offload-metadata-rejection headroom-export multiseg-copy multiseg-ethernet-ingress)
         add_test(NAME fstack-${fstack_case} COMMAND ker-fstack-adapted-test ${fstack_case})
         set_tests_properties(fstack-${fstack_case} PROPERTIES TIMEOUT 30)
         list(APPEND ker_fstack_tests fstack-${fstack_case})

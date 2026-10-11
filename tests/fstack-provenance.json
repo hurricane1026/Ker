@@ -75,6 +75,11 @@
       "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
       "source_case": "test_ff_dpdk_if_send_multiseg",
       "adaptation": "Use a real three-segment DPDK chain with uneven and zero-length segments as input to Ker's explicit chain-to-linear-skb copy adapter; verify source links/refcounts remain caller-owned and the copy survives source-chain release. This does not implement upstream's segmented TX path or Linux nonlinear skb support."
+    },
+    "multiseg-ethernet-ingress": {
+      "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
+      "source_case": "test_ff_dpdk_if_send_multiseg",
+      "adaptation": "Adapt the multisegment packet geometry intent in the ingress direction: split destination/source/type fields across real DPDK segments, copy to a linear skb, classify with unchanged Linux eth_type_trans and deliver one host packet through Ker's existing protocol runtime. Also verify broadcast/otherhost classification, ownership and failure boundaries. This is not F-Stack TX, NIC traffic, Ethernet offload or nonlinear Linux skb support."
     }
   }
 }

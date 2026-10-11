@@ -6,10 +6,16 @@
 #include "runtime/skb-queue.h"
 #include "runtime/memory.h"
 #include "runtime/timer.h"
+#include "runtime/ethernet.h"
+#include "runtime/receive.h"
 #include <errno.h>
 static struct ker_packet_pool pool;
 static struct ker_skb_context context;
 static struct ker_skb_queue first, second;
+static struct ker_eth_device ethernet_device;
+static struct ker_receive_runtime ethernet_receiver;
+static struct ker_protocol_handler ethernet_handler;
+static unsigned int ethernet_deliveries;
 static struct sk_buff *packet(unsigned int length)
 {
     struct sk_buff *skb = NULL; unsigned char *bytes;
@@ -152,6 +158,172 @@ static void multiseg_copy(void)
     CHECK(ker_skb_free(skb) == 0 && context.live == 0);
     CHECK(rte_mempool_avail_count(pool.mbufs) == 31);
 }
+static struct rte_mbuf *ethernet_chain(const unsigned char destination[ETH_ALEN],
+    uint16_t protocol, unsigned int frame_length, struct rte_mbuf *segments[6])
+{
+    static const unsigned int sizes[6] = {5, 0, 4, 3, 2, 4};
+    unsigned char frame[ETH_HLEN + 4] = {0};
+    CHECK(frame_length <= sizeof(frame));
+    memcpy(frame, destination, ETH_ALEN);
+    const unsigned char source[ETH_ALEN] = {2, 9, 8, 7, 6, 5};
+    memcpy(frame + ETH_ALEN, source, ETH_ALEN);
+    __be16 network_protocol = rte_cpu_to_be_16(protocol);
+    memcpy(frame + 12, &network_protocol, sizeof(network_protocol));
+    memset(frame + ETH_HLEN, 0x42, sizeof(frame) - ETH_HLEN);
+    unsigned int offset = 0;
+    for (unsigned int i = 0; i < 6; ++i) {
+        segments[i] = ker_packet_alloc(&pool);
+        CHECK(segments[i]);
+        unsigned int length = sizes[i];
+        if (offset + length > frame_length) length = frame_length - offset;
+        unsigned char *bytes = (unsigned char *)rte_pktmbuf_append(segments[i], length);
+        CHECK(length == 0 || bytes);
+        if (length) memcpy(bytes, frame + offset, length);
+        offset += length;
+    }
+    CHECK(offset == frame_length);
+    CHECK(rte_pktmbuf_chain(segments[4], segments[5]) == 0);
+    CHECK(rte_pktmbuf_chain(segments[2], segments[3]) == 0);
+    CHECK(rte_pktmbuf_chain(segments[0], segments[1]) == 0);
+    CHECK(rte_pktmbuf_chain(segments[0], segments[2]) == 0);
+    CHECK(rte_pktmbuf_chain(segments[0], segments[4]) == 0);
+    return segments[0];
+}
+static void check_ethernet_chain(struct rte_mbuf *chain, unsigned int length,
+    struct rte_mbuf *segments[6])
+{
+    CHECK(chain == segments[0] && chain->nb_segs == 6 && chain->pkt_len == length);
+    CHECK(segments[0]->next == segments[1] && segments[1]->next == segments[2]);
+    CHECK(segments[2]->next == segments[3] && segments[3]->next == segments[4]);
+    CHECK(segments[4]->next == segments[5] && !segments[5]->next);
+    for (unsigned int i = 0; i < 6; ++i) CHECK(rte_mbuf_refcnt_read(segments[i]) == 1);
+}
+static int ethernet_chain_receive(struct sk_buff *skb, struct ker_protocol_handler *handler,
+    struct net_device *original, void *arg)
+{
+    (void)handler; (void)arg;
+    CHECK(original == ethernet_device.native && skb->dev == original);
+    CHECK(skb->protocol == rte_cpu_to_be_16(ETH_P_IP) && skb->pkt_type == PACKET_HOST);
+    CHECK(skb->mac_len == ETH_HLEN && skb->len == 4);
+    CHECK(skb_mac_header(skb) == skb->data - ETH_HLEN);
+    CHECK(skb->head + skb->network_header == skb->data);
+    CHECK(memcmp(skb->data, "BBBB", 4) == 0);
+    ++ethernet_deliveries;
+    CHECK(ker_skb_free(skb) == 0);
+    return NET_RX_SUCCESS;
+}
+static void multiseg_ethernet_ingress(void)
+{
+    const unsigned char host[ETH_ALEN] = {2, 1, 2, 3, 4, 5};
+    const unsigned char broadcast[ETH_ALEN] = {255, 255, 255, 255, 255, 255};
+    const unsigned char other[ETH_ALEN] = {2, 7, 8, 9, 10, 11};
+    CHECK(ker_eth_device_init(&ethernet_device, &context, "eth-chain", 7, host) == 0);
+    CHECK(ker_receive_runtime_init(&ethernet_receiver, &context) == 0);
+    CHECK(ker_protocol_register(&ethernet_receiver, &ethernet_handler, &ethernet_device,
+        rte_cpu_to_be_16(ETH_P_IP), ethernet_chain_receive, NULL) == 0);
+
+    struct rte_mbuf *segments[6];
+    struct rte_mbuf *chain = ethernet_chain(host, ETH_P_IP, ETH_HLEN + 4, segments);
+    /* Source segment starts need not satisfy Linux's destination alignment. */
+    for (unsigned int i = 0; i < 6; ++i) {
+        unsigned char *data = rte_pktmbuf_mtod(segments[i], unsigned char *);
+        memmove(data + 1, data, segments[i]->data_len);
+        ++segments[i]->data_off;
+        CHECK(((uintptr_t)rte_pktmbuf_mtod(segments[i], void *) & 1) == 1);
+    }
+    segments[2]->ol_flags = RTE_MBUF_F_RX_VLAN_STRIPPED;
+    ++chain->pkt_len;
+    struct sk_buff *skb = (void *)(uintptr_t)1;
+    CHECK(ker_eth_receive_copy_chain(&ethernet_device, chain, 192, &skb) == -EINVAL);
+    CHECK(skb == (void *)(uintptr_t)1 && context.live == 0);
+    --chain->pkt_len;
+    check_ethernet_chain(chain, ETH_HLEN + 4, segments);
+    struct rte_mbuf *held[25];
+    for (unsigned int i = 0; i < 25; ++i) { held[i] = ker_packet_alloc(&pool); CHECK(held[i]); }
+    CHECK(ker_eth_receive_copy_chain(&ethernet_device, chain, 193, &skb) == -EINVAL);
+    CHECK(skb == (void *)(uintptr_t)1);
+    CHECK(ker_eth_receive_copy_chain(&ethernet_device, chain, 192, &skb) == -ENOMEM);
+    CHECK(skb == (void *)(uintptr_t)1 && context.live == 0);
+    check_ethernet_chain(chain, ETH_HLEN + 4, segments);
+    CHECK(segments[2]->ol_flags == RTE_MBUF_F_RX_VLAN_STRIPPED);
+    CHECK(ker_eth_receive_copy_chain(&ethernet_device, chain, 192, NULL) == -EINVAL);
+    struct ker_skb_context wrong_context = context;
+    ++wrong_context.lcore;
+    ethernet_device.context = &wrong_context;
+    CHECK(ker_eth_receive_copy_chain(&ethernet_device, chain, 192, &skb) == -EXDEV);
+    ethernet_device.context = &context;
+    unsigned int saved_addr_len = ethernet_device.native->addr_len;
+    ethernet_device.native->addr_len = ETH_ALEN - 1;
+    CHECK(ker_eth_receive_copy_chain(&ethernet_device, chain, 192, &skb) == -ENOTSUP);
+    ethernet_device.native->addr_len = saved_addr_len;
+    CHECK(skb == (void *)(uintptr_t)1);
+    ker_packet_free(held[0]);
+    CHECK(ker_eth_receive_copy_chain(&ethernet_device, chain, 192, &skb) == 0 && skb);
+    CHECK(skb->dev == ethernet_device.native && skb->protocol == rte_cpu_to_be_16(ETH_P_IP));
+    CHECK(skb->pkt_type == PACKET_HOST && skb->mac_len == ETH_HLEN && skb->len == 4);
+    CHECK(skb_mac_header(skb) == skb->data - ETH_HLEN && skb->head + skb->network_header == skb->data);
+    check_ethernet_chain(chain, ETH_HLEN + 4, segments);
+    struct ker_receive_result dispatched;
+    CHECK(ker_receive_dispatch(&ethernet_receiver, &ethernet_device, &skb, &dispatched) == 0);
+    CHECK(!skb && dispatched.handlers == 1 && dispatched.status == NET_RX_SUCCESS && ethernet_deliveries == 1);
+    check_ethernet_chain(chain, ETH_HLEN + 4, segments);
+    unsigned char flattened[ETH_HLEN + 4];
+    unsigned char expected_frame[ETH_HLEN + 4] = {0};
+    memcpy(expected_frame, host, ETH_ALEN);
+    const unsigned char expected_source[ETH_ALEN] = {2, 9, 8, 7, 6, 5};
+    memcpy(expected_frame + ETH_ALEN, expected_source, ETH_ALEN);
+    __be16 expected_ip = rte_cpu_to_be_16(ETH_P_IP);
+    memcpy(expected_frame + 12, &expected_ip, sizeof(expected_ip));
+    memset(expected_frame + ETH_HLEN, 0x42, sizeof(expected_frame) - ETH_HLEN);
+    const void *frame_bytes = rte_pktmbuf_read(chain, 0, sizeof(flattened), flattened);
+    CHECK(frame_bytes);
+    if (frame_bytes != flattened) memcpy(flattened, frame_bytes, sizeof(flattened));
+    CHECK(!memcmp(flattened, expected_frame, sizeof(expected_frame)));
+    for (unsigned int i = 1; i < 25; ++i) ker_packet_free(held[i]);
+    ker_packet_free(chain);
+
+    /* Source release before skb inspection is independent of skb ownership. */
+    chain = ethernet_chain(broadcast, ETH_P_ARP, ETH_HLEN + 4, segments);
+    CHECK(ker_eth_receive_copy_chain(&ethernet_device, chain, 192, &skb) == 0);
+    CHECK(skb->pkt_type == PACKET_BROADCAST && skb->protocol == rte_cpu_to_be_16(ETH_P_ARP));
+    ker_packet_free(chain);
+    CHECK(skb->dev == ethernet_device.native && skb->len == 4 && skb->data[0] == 0x42);
+    CHECK(ker_skb_free(skb) == 0);
+
+    chain = ethernet_chain(host, ETH_P_IP, ETH_HLEN, segments);
+    CHECK(ker_eth_receive_copy_chain(&ethernet_device, chain, 192, &skb) == 0);
+    CHECK(skb->pkt_type == PACKET_HOST && skb->protocol == rte_cpu_to_be_16(ETH_P_IP) && skb->len == 0);
+    CHECK(skb->mac_len == ETH_HLEN && skb->head + skb->network_header == skb->data);
+    CHECK(ker_skb_free(skb) == 0);
+    ker_packet_free(chain);
+
+    chain = ethernet_chain(other, ETH_P_IP, ETH_HLEN + 4, segments);
+    CHECK(ker_eth_receive_copy_chain(&ethernet_device, chain, 192, &skb) == 0);
+    CHECK(skb->pkt_type == PACKET_OTHERHOST && skb->protocol == rte_cpu_to_be_16(ETH_P_IP));
+    CHECK(ker_skb_free(skb) == 0);
+    ker_packet_free(chain);
+
+    chain = ethernet_chain(host, ETH_P_IP, ETH_HLEN - 1, segments);
+    skb = (void *)(uintptr_t)1;
+    CHECK(ker_eth_receive_copy_chain(&ethernet_device, chain, 192, &skb) == -EMSGSIZE);
+    CHECK(skb == (void *)(uintptr_t)1);
+    check_ethernet_chain(chain, ETH_HLEN - 1, segments);
+    ker_packet_free(chain);
+
+    chain = ethernet_chain(host, ETH_P_IP, ETH_HLEN + 4, segments);
+    segments[0]->ol_flags = RTE_MBUF_F_RX_VLAN_STRIPPED;
+    skb = (void *)(uintptr_t)1;
+    CHECK(ker_eth_receive_copy_chain(&ethernet_device, chain, 192, &skb) == -ENOTSUP);
+    CHECK(skb == (void *)(uintptr_t)1);
+    segments[0]->ol_flags = 0;
+    check_ethernet_chain(chain, ETH_HLEN + 4, segments);
+    ker_packet_free(chain);
+
+    CHECK(ker_protocol_unregister(&ethernet_handler) == 0);
+    CHECK(ker_receive_runtime_cleanup(&ethernet_receiver) == 0);
+    CHECK(ker_eth_device_cleanup(&ethernet_device) == 0);
+    CHECK(context.live == 0 && rte_mempool_avail_count(pool.mbufs) == 31);
+}
 static void queue_isolation(void)
 {
     struct sk_buff *skb = packet(16), *identity = skb, *output = (void *)(uintptr_t)1;
@@ -181,6 +353,7 @@ int main(int argc, char **argv)
         {"packet-export", packet_export}, {"multiseg-boundary", multiseg_boundary},
         {"queue-isolation", queue_isolation}, {"queue-full-ownership", queue_full_ownership},
         {"multiseg-copy", multiseg_copy},
+        {"multiseg-ethernet-ingress", multiseg_ethernet_ingress},
         {"headroom-export", headroom_export},
         {"export-exhaustion-retry", export_exhaustion_retry},
         {"offload-metadata-rejection", offload_metadata_rejection}
