@@ -257,6 +257,11 @@
         "test_ff_dpdk_if_send_multiseg"
       ],
       "adaptation": "Ker-specific constructor extension motivated by pinned IPv4 UDP/TCP checksum and segmented-TX cases; those upstream cases do not test IPv4 DS/ID/fragment-field construction. Ker copies an explicit opaque DS byte and wire-order identification into UDP/TCP/ICMP echo frames, admits only fragment field zero or DF, and independently verifies IPv4 plus transport checksums. Permanent-neighbor variants reuse the configured source/neighbor snapshot path; a concurrent 192-packet three-protocol worker-ring case verifies field preservation. An RX-ring case carries a DF profile through exact software checksum completion, allocation-pressure cancellation and FIFO recovery. Legacy constructors remain byte-identical zero-profile wrappers. This does not implement DSCP/ECN policy, ID generation, fragmentation, PMTU, routing, or NIC behavior."
+    },
+    "arp-configured": {
+      "source_file": "tests/arp-configured.c",
+      "source_case": "RFC 826 section 2 ARP packet format (Ker-specific constructor extension)",
+      "adaptation": "Checks the 42-byte Ethernet/ARP request and reply formats against an independent wire-byte oracle, including explicit broadcast destination and zero target hardware address for requests, and verifies byte-equivalence with Ker's existing raw adapter. RFC 826 reference: https://datatracker.ietf.org/doc/html/rfc826. No neighbor lookup, routing, automatic reply, or NIC transmission is implied. The separate existing arp-receive test covers DAD, Ethernet padding, malformed packets, callback ownership, and copied-message lifetime; this batch adds a segmented padded-DAD regression through the unchanged decoder."
     }
   }
 }

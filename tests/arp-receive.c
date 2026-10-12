@@ -190,6 +190,36 @@ static struct sk_buff *packet(unsigned int payload)
     memset(skb->cb, 0xa5, sizeof(skb->cb));
     return skb;
 }
+static struct sk_buff *padded_dad_chain(void)
+{
+    unsigned char frame[ETH_HLEN + 28 + 9] = {0};
+    memset(frame, 0xff, ETH_ALEN);
+    memcpy(frame + 6, peer, ETH_ALEN);
+    frame[12] = 0x08; frame[13] = 0x06;
+    frame[15] = ARPHRD_ETHER; frame[16] = 0x08;
+    frame[18] = ETH_ALEN; frame[19] = 4; frame[21] = ARPOP_REQUEST;
+    memcpy(frame + 22, peer, ETH_ALEN);
+    /* SPA and THA stay zero for DAD; TPA targets the configured address. */
+    memcpy(frame + 38, &local, sizeof(local));
+    memset(frame + ETH_HLEN + 28, 0x9c, 9);
+    const uint16_t lengths[] = {15, 17, sizeof(frame) - 32};
+    struct rte_mbuf *segments[3];
+    unsigned int offset = 0;
+    for (unsigned int i = 0; i < 3; ++i) {
+        segments[i] = ker_packet_alloc(&pool); CHECK(segments[i]);
+        unsigned char *bytes = (unsigned char *)rte_pktmbuf_append(segments[i], lengths[i]);
+        CHECK(bytes); memcpy(bytes, frame + offset, lengths[i]); offset += lengths[i];
+    }
+    CHECK(offset == sizeof(frame));
+    CHECK(rte_pktmbuf_chain(segments[0], segments[1]) == 0);
+    CHECK(rte_pktmbuf_chain(segments[0], segments[2]) == 0);
+    CHECK(segments[0]->nb_segs == 3 && segments[0]->pkt_len == sizeof(frame));
+    struct sk_buff *skb = NULL;
+    CHECK(ker_eth_receive_copy_chain(&device, segments[0], 128, &skb) == 0);
+    ker_packet_free(segments[0]);
+    CHECK(skb && skb->len == sizeof(frame) - ETH_HLEN);
+    return skb;
+}
 static int dispatch(struct sk_buff *skb, int error)
 {
     struct ker_receive_result result = {0};
@@ -295,6 +325,15 @@ int main(void)
     CHECK(!memcmp(reply->data + 28, &local, 4) && !memcmp(reply->data + 38, &remote, 4));
     CHECK(ker_skb_free(reply) == 0); reply = NULL;
     make_reply=false;
+    /* A DAD request remains a valid decoded message when padding spans
+     * multiple input segments; the callback copy survives source release. */
+    unsigned int before_dad_chain = messages;
+    CHECK(dispatch(padded_dad_chain(), 0) == NET_RX_SUCCESS && messages == before_dad_chain + 1);
+    CHECK(last.sender_ip == 0 && last.target_ip == local && last.target_local &&
+        !memcmp(last.sender_mac, peer, ETH_ALEN));
+    struct sk_buff *reuse = packet(28);
+    CHECK(last.sender_ip == 0 && last.target_ip == local && last.target_local);
+    CHECK(ker_skb_free(reuse) == 0 && !context.live);
     /* Native reply feedback is only admitted from an exact live host-reply
      * callback and updates an existing matching monitored entry. */
     struct ker_worker_config wcfg={.timer_budget=1,.rx_budget=1};

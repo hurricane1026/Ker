@@ -19,7 +19,7 @@ add_library(ker_arp_headers INTERFACE)
 target_include_directories(ker_arp_headers SYSTEM INTERFACE "${KER_ARP_IMPORT}")
 target_link_libraries(ker_arp_headers INTERFACE ker_eth_headers)
 add_library(ker_arp_port OBJECT "${KER_ARP_IMPORT}/linux_arp.c" src/runtime/arp.c)
-target_link_libraries(ker_arp_port PRIVATE ker_arp_headers)
+target_link_libraries(ker_arp_port PRIVATE ker_arp_headers ker_address_headers)
 target_compile_features(ker_arp_port PRIVATE c_std_11)
 set_target_properties(ker_arp_port PROPERTIES POSITION_INDEPENDENT_CODE ON C_VISIBILITY_PRESET hidden)
 

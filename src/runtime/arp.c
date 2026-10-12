@@ -1,4 +1,5 @@
 #include "runtime/arp.h"
+#include "runtime/ipv4-address.h"
 #include "runtime/memory.h"
 #include <rte_lcore.h>
 #include <errno.h>
@@ -63,6 +64,54 @@ int ker_arp_create(struct ker_eth_device *device, unsigned int operation,
     skb_reset_mac_header(skb); skb->mac_len = ETH_HLEN;
     *result = skb;
     return 0;
+}
+int ker_arp_create_configured(struct ker_ipv4_address *address,
+    unsigned int operation, __be32 target_ip,
+    const unsigned char destination_mac[ETH_ALEN],
+    const unsigned char target_mac[ETH_ALEN], struct sk_buff **result)
+{
+    if (!address || !result || !destination_mac || !target_mac ||
+        (operation != ARPOP_REQUEST && operation != ARPOP_REPLY))
+        return -EINVAL;
+
+    struct ker_eth_device *device = address->device;
+    if (!device || !device->native || !device->context ||
+        !device->context->descriptors)
+        return -ESHUTDOWN;
+    if (rte_lcore_id() != device->lcore || device->context->lcore != device->lcore)
+        return -EXDEV;
+
+    struct net_device *native = device->native;
+    struct in_device *native_address = address->native;
+    if (!native_address)
+        return -ESHUTDOWN;
+    if (native->type != ARPHRD_ETHER || native->addr_len != ETH_ALEN ||
+        !native->dev_addr)
+        return -ENOTSUP;
+    struct in_ifaddr *ifa = native_address->ifa_list;
+    if (native_address->dead || native->ip_ptr != native_address ||
+        native_address->dev != native ||
+        !ifa || ifa->ifa_next || ifa->ifa_dev != native_address ||
+        !(ifa->ifa_flags & IFA_F_PERMANENT) || !ifa->ifa_local)
+        return -ESHUTDOWN;
+
+    /* Copy every value that the raw constructor will consume before entering
+     * its allocator. Callers retain no mutable tuple authority afterward. */
+    struct ker_skb_context *context_snapshot = device->context;
+    struct ker_eth_device device_snapshot = {
+        .native = native,
+        .context = context_snapshot,
+        .lcore = device->lcore
+    };
+    __be32 source_ip = ifa->ifa_local;
+    unsigned char source_mac[ETH_ALEN];
+    unsigned char destination_snapshot[ETH_ALEN];
+    unsigned char target_snapshot[ETH_ALEN];
+    memcpy(source_mac, native->dev_addr, ETH_ALEN);
+    memcpy(destination_snapshot, destination_mac, ETH_ALEN);
+    memcpy(target_snapshot, target_mac, ETH_ALEN);
+    return ker_arp_create(&device_snapshot, operation, source_ip, target_ip,
+        destination_snapshot, source_mac, target_snapshot, result);
 }
 int ker_arp_capture_begin(struct ker_eth_device *device)
 {
