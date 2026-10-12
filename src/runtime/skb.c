@@ -82,8 +82,6 @@ static int mbuf_chain_geometry(const struct rte_mbuf *head, uint32_t *length)
     uint16_t count = head->nb_segs;
     if (!count)
         return -EINVAL;
-    if (count == 1)
-        return head->next ? -EINVAL : -ENOTSUP;
     if (rx_metadata_supported(head))
         return -ENOTSUP;
     const struct rte_mbuf *segment = head;

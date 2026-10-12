@@ -41,6 +41,7 @@ int ker_tx_ring_sink(struct rte_mbuf *chain, void *arg)
 int ker_tx_ring_take(struct ker_tx_ring *adapter, struct rte_mbuf **result)
 {
     if (!adapter || !adapter->ring || !result) return -EINVAL;
+    if (adapter->consumers) return -EBUSY;
     void *object = NULL;
     int rc = rte_ring_sc_dequeue(adapter->ring, &object);
     if (rc == -ENOENT) return 0;
@@ -54,6 +55,7 @@ int ker_tx_ring_cleanup(struct ker_tx_ring *adapter)
 {
     if (!adapter || !adapter->ring) return -EINVAL;
     if (rte_lcore_id() != adapter->owner_lcore) return -EXDEV;
+    if (adapter->consumers) return -EBUSY;
     if (!rte_ring_empty(adapter->ring)) return -EBUSY;
     rte_ring_free(adapter->ring);
     memset(adapter, 0, sizeof(*adapter));
