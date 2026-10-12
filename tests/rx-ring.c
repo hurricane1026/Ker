@@ -400,12 +400,18 @@ static void allocation_retry_and_cancel(void)
 
     static const uint8_t cancel_bytes[] = {0x71, 0x72};
     static const uint8_t after_cancel_bytes[] = {0x73, 0x74, 0x75};
+    uint8_t cancel_frame[ETH_HLEN + 60 + 8 + sizeof(cancel_bytes)];
     struct sk_buff *cancel_skb = NULL;
     CHECK(ker_icmp_echo_ipv4_create_ip_options(&context, src_mac, dst_mac,
-        src_ip, dst_ip, (__be16)0x2233, (__be16)0x4455, 8, 64, ip_options_b,
+        src_ip, dst_ip, rte_cpu_to_be_16(0x2233), rte_cpu_to_be_16(0x4455), 8, 64, ip_options_b,
         sizeof(ip_options_b), cancel_bytes, sizeof(cancel_bytes), &cancel_skb) == 0);
-    CHECK(ker_tx_export_enqueue(&tx, &cancel_skb) == 0 && !cancel_skb);
-    CHECK(ker_tx_export_poll(&tx, 1) == 1);
+    CHECK(cancel_skb->len <= sizeof(cancel_frame));
+    unsigned int cancel_frame_length = cancel_skb->len;
+    memcpy(cancel_frame, cancel_skb->data, cancel_frame_length);
+    struct rte_mbuf *cancel_chain = NULL;
+    CHECK(ker_skb_to_mbuf_chain_copy(cancel_skb, 13, &cancel_chain) == 0);
+    CHECK(ker_skb_free(cancel_skb) == 0);
+    CHECK(ker_tx_ring_sink(cancel_chain, &ring) == 0);
     exhaust_mbuf_pool(held, &count);
     CHECK(ker_rx_ring_poll(&rx, 1) == -ENOMEM && rx.pending);
     CHECK(count >= 8);
@@ -413,15 +419,16 @@ static void allocation_retry_and_cancel(void)
     stage_options(false, false, ip_options_a, sizeof(ip_options_a), NULL, 0,
         after_cancel_bytes, sizeof(after_cancel_bytes), NET_RX_SUCCESS);
     CHECK(ker_rx_ring_cleanup(&rx) == -EBUSY);
+    struct rte_mbuf *expected_pending = rx.pending;
+    CHECK(expected_pending && expected_pending->nb_segs > 1);
     struct rte_mbuf *cancelled = NULL;
-    CHECK(ker_rx_ring_cancel(&rx, &cancelled) == 1 && cancelled && !rx.pending);
+    CHECK(ker_rx_ring_cancel(&rx, &cancelled) == 1 && cancelled == expected_pending && !rx.pending);
     sentinel = (void *)(uintptr_t)1;
     CHECK(ker_rx_ring_cancel(&rx, &sentinel) == 0 && sentinel == (void *)(uintptr_t)1);
-    CHECK(cancelled->pkt_len >= ETH_HLEN + 24 + 8 + sizeof(cancel_bytes));
-    uint8_t header[ETH_HLEN + 60 + 8 + sizeof(cancel_bytes)];
-    const void *part = rte_pktmbuf_read(cancelled, 0,
-        ETH_HLEN + 24 + 8 + sizeof(cancel_bytes), header);
-    CHECK(part);
+    CHECK(cancelled->pkt_len == cancel_frame_length);
+    uint8_t read_frame[sizeof(cancel_frame)];
+    const void *part = rte_pktmbuf_read(cancelled, 0, cancel_frame_length, read_frame);
+    CHECK(part && !memcmp(part, cancel_frame, cancel_frame_length));
     const uint8_t *wire = part;
     CHECK((wire[ETH_HLEN] & 0x0fU) == 6 && wire[ETH_HLEN + 9] == IPPROTO_ICMP &&
         wire[ETH_HLEN + 24] == 8 && wire[ETH_HLEN + 25] == 0 &&
