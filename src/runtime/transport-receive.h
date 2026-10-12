@@ -3,14 +3,16 @@
 #include "runtime/receive.h"
 #include "runtime/udp-packet-view.h"
 #include "runtime/tcp-packet-view.h"
+#include "runtime/icmp-echo-packet-view.h"
 
-enum ker_transport_protocol { KER_TRANSPORT_UDP = 17, KER_TRANSPORT_TCP = 6 };
+enum ker_transport_protocol { KER_TRANSPORT_ICMP_ECHO = 1, KER_TRANSPORT_UDP = 17, KER_TRANSPORT_TCP = 6 };
 struct ker_transport_message {
     enum ker_transport_protocol protocol;
     struct ker_ipv4_packet_view ipv4;
     union {
         struct ker_udp_packet_view udp;
         struct ker_tcp_packet_view tcp;
+        struct ker_icmp_echo_packet_view icmp_echo;
     } packet;
 };
 /* Message and packet pointers are borrowed only for this synchronous call.
@@ -25,9 +27,10 @@ struct ker_transport_receiver {
     int validation_error; /* Last worker-local decode/admission error, or 0. */
 };
 /* Stable zero-initialized storage; pins device while registered. Only IPv4
- * UDP/TCP views are delivered. A descriptor shared by protocol fanout fails
- * closed via the existing unique-owner view checks. No socket, routing,
- * fragment reassembly, TCP state machine or NIC pipeline. */
+ * UDP/TCP and ICMP echo request/reply views are delivered. A descriptor
+ * shared by protocol fanout fails closed via the existing unique-owner view
+ * checks. No socket, routing, fragment reassembly, ICMP control handling, TCP
+ * state machine or NIC pipeline. */
 int ker_transport_receiver_register(struct ker_transport_receiver *,
     struct ker_receive_runtime *, struct ker_eth_device *, ker_transport_receive_fn, void *);
 int ker_transport_receiver_unregister(struct ker_transport_receiver *);

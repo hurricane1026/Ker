@@ -21,6 +21,10 @@ static int transport_receive(struct sk_buff *skb, struct ker_protocol_handler *h
         goto reject;
     message.ipv4 = ip;
     switch (ip.header[9]) {
+    case KER_TRANSPORT_ICMP_ECHO:
+        message.protocol = KER_TRANSPORT_ICMP_ECHO;
+        error = ker_icmp_echo_packet_view_init(context, skb, &message.packet.icmp_echo);
+        break;
     case KER_TRANSPORT_UDP:
         message.protocol = KER_TRANSPORT_UDP;
         error = ker_udp_packet_view_init(context, skb, &message.packet.udp);

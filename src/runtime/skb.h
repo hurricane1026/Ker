@@ -58,6 +58,10 @@ int ker_skb_to_mbuf_chain_copy(struct sk_buff *skb,
  * remain rejected; no TX offload flags or nonlinear Linux skb are implied. */
 int ker_skb_to_mbuf_chain_software_checksum(struct sk_buff *skb,
     unsigned int segment_payload_limit, struct rte_mbuf **result);
+/* Exact-fold variant: a folded zero remains zero. The caller is responsible
+ * for any protocol-specific zero mangling policy. */
+int ker_skb_to_mbuf_chain_software_checksum_exact(struct sk_buff *skb,
+    unsigned int segment_payload_limit, struct rte_mbuf **result);
 /* Complete a linear CHECKSUM_PARTIAL skb in a private copied mbuf using Linux
  * Internet-checksum semantics. Source bytes/metadata remain unchanged; no TX
  * offload metadata is set. CRC32C, GSO and unsupported skb layouts are rejected. */

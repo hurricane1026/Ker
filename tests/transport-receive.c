@@ -21,6 +21,7 @@ static int callback_status = NET_RX_SUCCESS;
 static int expected_dispatch_error;
 static unsigned int expected_handlers = 1;
 static int expected_status = NET_RX_SUCCESS;
+static unsigned char expected_echo_type = 8;
 static const unsigned char mac[ETH_ALEN] = {2, 0x11, 0x22, 0x33, 0x44, 0x55};
 
 static uint16_t checksum(const unsigned char *p, unsigned int n)
@@ -58,6 +59,17 @@ static void make_frame(unsigned char frame[57], unsigned char protocol, bool val
         } else { tcp[16] = 0x45; tcp[17] = 0x67; }
         return;
     }
+    if (protocol == 1) {
+        unsigned char *icmp = ip + 20;
+        icmp[0] = expected_echo_type; icmp[1] = 0;
+        icmp[4] = 0x12; icmp[5] = 0x34; icmp[6] = 0x56; icmp[7] = 0x78;
+        icmp[8] = 0xaa; icmp[9] = 0xbb; icmp[10] = 0xcc;
+        if (valid_checksum) {
+            uint16_t csum = checksum(icmp, 11);
+            icmp[2] = (unsigned char)(csum >> 8); icmp[3] = (unsigned char)csum;
+        } else { icmp[2] = 0x45; icmp[3] = 0x67; }
+        return;
+    }
     if (protocol != 17) return;
     unsigned char *udp = ip + 20;
     udp[0] = 0x12; udp[1] = 0x34; udp[2] = 0x56; udp[3] = 0x78;
@@ -81,7 +93,13 @@ static int message(const struct ker_transport_message *m, void *arg)
 {
     CHECK(arg == &receiver && worker.polling && !worker.timers.polling);
     CHECK(m->protocol == expected_protocol && m->ipv4.packet_length >= 23);
-    if (m->protocol == KER_TRANSPORT_UDP) {
+    if (m->protocol == KER_TRANSPORT_ICMP_ECHO) {
+        CHECK(m->packet.icmp_echo.type == expected_echo_type && m->packet.icmp_echo.code == 0);
+        CHECK(m->packet.icmp_echo.identifier == rte_cpu_to_be_16(0x1234));
+        CHECK(m->packet.icmp_echo.sequence == rte_cpu_to_be_16(0x5678));
+        CHECK(m->packet.icmp_echo.payload_length == 3 && m->packet.icmp_echo.payload[0] == 0xaa &&
+            m->packet.icmp_echo.payload[2] == 0xcc);
+    } else if (m->protocol == KER_TRANSPORT_UDP) {
         CHECK(m->packet.udp.source_port == rte_cpu_to_be_16(0x1234));
         CHECK(m->packet.udp.destination_port == rte_cpu_to_be_16(0x5678));
         CHECK(m->packet.udp.payload_length == 3 && m->packet.udp.payload[0] == 0xaa && m->packet.udp.payload[2] == 0xcc);
@@ -166,7 +184,7 @@ int main(void)
     expected_status = NET_RX_DROP;
     make_frame(frame, 17, false); poll_frame(frame);
     CHECK(callbacks == 1 && receiver.validation_error == -EBADMSG);
-    make_frame(frame, 1, true); poll_frame(frame);
+    make_frame(frame, 132, true); poll_frame(frame);
     CHECK(callbacks == 1 && receiver.validation_error == -EPROTONOSUPPORT);
     make_frame(frame, 17, true); frame[ETH_HLEN + 10] ^= 1; poll_frame(frame);
     CHECK(callbacks == 1 && receiver.validation_error == -EBADMSG);
@@ -185,14 +203,62 @@ int main(void)
     expected_status = NET_RX_DROP;
     make_frame(frame, 6, false); poll_frame(frame);
     CHECK(callbacks == 2 && receiver.validation_error == -EBADMSG);
+    expected_protocol = KER_TRANSPORT_ICMP_ECHO;
     expected_status = NET_RX_SUCCESS;
+    make_frame(frame, 1, true); poll_frame(frame);
+    CHECK(callbacks == 3 && receiver.validation_error == 0);
+    expected_echo_type = 0;
+    make_frame(frame, 1, true); poll_frame(frame);
+    CHECK(callbacks == 4 && receiver.validation_error == 0);
+    expected_status = NET_RX_DROP;
+    expected_echo_type = 8;
+    make_frame(frame, 1, true); frame[ETH_HLEN + 20] = 3; poll_frame(frame);
+    CHECK(callbacks == 4 && receiver.validation_error == -ENOTSUP);
+    make_frame(frame, 1, true);
+    frame[ETH_HLEN + 6] = 0x20; /* ICMP fragments are not reassembled. */
+    frame[ETH_HLEN + 10] = frame[ETH_HLEN + 11] = 0;
+    repaired = checksum(frame + ETH_HLEN, 20);
+    frame[ETH_HLEN + 10] = (unsigned char)(repaired >> 8);
+    frame[ETH_HLEN + 11] = (unsigned char)repaired;
+    poll_frame(frame);
+    CHECK(callbacks == 4 && receiver.validation_error == -ENOTSUP);
+    make_frame(frame, 1, true);
+    frame[ETH_HLEN + 7] = 1; /* Nonzero fragment offset also requires reassembly. */
+    frame[ETH_HLEN + 10] = frame[ETH_HLEN + 11] = 0;
+    repaired = checksum(frame + ETH_HLEN, 20);
+    frame[ETH_HLEN + 10] = (unsigned char)(repaired >> 8);
+    frame[ETH_HLEN + 11] = (unsigned char)repaired;
+    poll_frame(frame);
+    CHECK(callbacks == 4 && receiver.validation_error == -ENOTSUP);
+    expected_status = NET_RX_DROP;
+    make_frame(frame, 1, false); poll_frame(frame);
+    CHECK(callbacks == 4 && receiver.validation_error == -EBADMSG);
+    make_frame(frame, 1, true); frame[ETH_HLEN + 20 + 1] = 1; poll_frame(frame);
+    CHECK(callbacks == 4 && receiver.validation_error == -EINVAL);
+    make_frame(frame, 1, true);
+    frame[ETH_HLEN + 3] = 27; /* Seven ICMP bytes despite trailing Ethernet padding. */
+    frame[ETH_HLEN + 10] = frame[ETH_HLEN + 11] = 0;
+    repaired = checksum(frame + ETH_HLEN, 20);
+    frame[ETH_HLEN + 10] = (unsigned char)(repaired >> 8);
+    frame[ETH_HLEN + 11] = (unsigned char)repaired;
+    poll_frame(frame);
+    CHECK(callbacks == 4 && receiver.validation_error == -EMSGSIZE);
+    expected_status = NET_RX_SUCCESS;
+    make_frame(frame, 1, true);
+    callback_status = NET_RX_DROP; expected_status = NET_RX_DROP;
+    poll_frame(frame);
+    CHECK(callbacks == 5 && receiver.validation_error == 0);
+    callback_status = -EINVAL; expected_dispatch_error = -EPROTO;
+    poll_frame(frame);
+    CHECK(callbacks == 6 && receiver.validation_error == 0);
+    callback_status = NET_RX_SUCCESS; expected_dispatch_error = 0; expected_status = NET_RX_SUCCESS;
     callback_status = NET_RX_DROP;
     expected_status = NET_RX_DROP;
     make_frame(frame, 17, true); expected_protocol = KER_TRANSPORT_UDP; poll_frame(frame);
-    CHECK(callbacks == 3);
+    CHECK(callbacks == 7);
     callback_status = -EINVAL; expected_dispatch_error = -EPROTO;
     poll_frame(frame);
-    CHECK(callbacks == 4);
+    CHECK(callbacks == 8);
     callback_status = NET_RX_SUCCESS; expected_dispatch_error = 0; expected_status = NET_RX_SUCCESS;
 
     /* A second matching handler makes the earlier callback see a shared skb.
@@ -204,6 +270,10 @@ int main(void)
     CHECK(ker_transport_receiver_register(&receiver, &runtime, &device, message, &receiver) == 0);
     unsigned int before_fanout = callbacks;
     expected_handlers = 2;
+    poll_frame(frame);
+    CHECK(callbacks == before_fanout && receiver.validation_error == -EBUSY);
+    expected_protocol = KER_TRANSPORT_ICMP_ECHO; expected_echo_type = 8;
+    make_frame(frame, 1, true);
     poll_frame(frame);
     CHECK(callbacks == before_fanout && receiver.validation_error == -EBUSY);
     CHECK(ker_protocol_unregister(&observer) == 0);

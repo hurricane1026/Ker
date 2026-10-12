@@ -2,6 +2,8 @@
 #include "eal.h"
 #include "runtime/buffer.h"
 #include "runtime/ethernet.h"
+#include "runtime/icmp-echo-create.h"
+#include "runtime/icmp-echo-packet-view.h"
 #include "runtime/memory.h"
 #include "runtime/rx-ring.h"
 #include "runtime/skb.h"
@@ -42,6 +44,7 @@ static const __be16 src_port = (__be16)0x3412;
 static const __be16 dst_port = (__be16)0x7856;
 struct expected_message {
     bool tcp;
+    bool icmp;
     const uint8_t *payload;
     size_t length, ip_options_length, tcp_options_length;
     uint8_t ip_options[40], tcp_options[40];
@@ -75,16 +78,28 @@ static void expect(bool tcp, const uint8_t *payload, size_t length, int status)
         .tcp = tcp, .payload = payload, .length = length, .status = status};
 }
 
+static void expect_icmp(const uint8_t *payload, size_t length, int status)
+{
+    CHECK(expected_count < MAX_MESSAGES);
+    expected[expected_count++] = (struct expected_message){
+        .icmp = true, .payload = payload, .length = length, .status = status};
+}
+
 static int receive_message(const struct ker_transport_message *message, void *arg)
 {
     CHECK(arg == &receiver && worker.initialized && !worker.timers.polling);
     CHECK(received < expected_count);
     struct expected_message *item = &expected[received];
-    CHECK(message->protocol == (item->tcp ? KER_TRANSPORT_TCP : KER_TRANSPORT_UDP));
+    CHECK(message->protocol == (item->icmp ? KER_TRANSPORT_ICMP_ECHO :
+        item->tcp ? KER_TRANSPORT_TCP : KER_TRANSPORT_UDP));
     CHECK(message->ipv4.header_length == 20 + item->ip_options_length);
     if (item->ip_options_length)
         CHECK(!memcmp(message->ipv4.header + 20, item->ip_options, item->ip_options_length));
-    if (item->tcp) {
+    if (item->icmp) {
+        CHECK(message->packet.icmp_echo.type == 8 && message->packet.icmp_echo.code == 0 &&
+            message->packet.icmp_echo.payload_length == item->length &&
+            !memcmp(message->packet.icmp_echo.payload, item->payload, item->length));
+    } else if (item->tcp) {
         CHECK(message->packet.tcp.tcp_header_length == 20 + item->tcp_options_length);
         if (item->tcp_options_length)
             CHECK(!memcmp(message->packet.tcp.header + 20, item->tcp_options,
@@ -217,6 +232,15 @@ static void release_mbuf_pool(struct rte_mbuf **held, unsigned int *count)
     while (*count) ker_packet_free(held[--*count]);
 }
 
+static uint16_t wire_checksum(const uint8_t *bytes, size_t length)
+{
+    uint32_t sum = 0;
+    for (size_t i = 0; i < length; i += 2)
+        sum += ((uint16_t)bytes[i] << 8) | (i + 1 < length ? bytes[i + 1] : 0);
+    while (sum >> 16) sum = (sum & 0xffffU) + (sum >> 16);
+    return (uint16_t)~sum;
+}
+
 static void single_segment_copy_ownership(void)
 {
     static const uint8_t bytes[] = {0x81, 0x00, 0x7f, 0x22, 0xaa};
@@ -346,20 +370,18 @@ static void allocation_retry_and_cancel(void)
     static const uint8_t later_bytes[] = {0x66, 0x67, 0x68};
     static const uint8_t ip_options_a[4] = {1, 1, 0, 0};
     static const uint8_t ip_options_b[4] = {0x94, 0x04, 0x12, 0x34};
-    static const uint8_t tcp_options_b[4] = {2, 4, 0x05, 0xb4};
-    struct sk_buff *later_skb = make_packet_options(true, false, ip_options_b,
-        sizeof(ip_options_b), tcp_options_b, sizeof(tcp_options_b), later_bytes,
-        sizeof(later_bytes));
+    struct sk_buff *later_skb = NULL;
+    CHECK(ker_icmp_echo_ipv4_create_ip_options(&context, src_mac, dst_mac,
+        src_ip, dst_ip, (__be16)0x3344, (__be16)0x5566, 8, 64, ip_options_b,
+        sizeof(ip_options_b), later_bytes, sizeof(later_bytes), &later_skb) == 0);
     struct rte_mbuf *later_chain = NULL;
     CHECK(ker_skb_to_mbuf_chain_copy(later_skb, 16, &later_chain) == 0);
     CHECK(ker_skb_free(later_skb) == 0);
     stage_options(false, false, ip_options_a, sizeof(ip_options_a), NULL, 0,
         retry_bytes, sizeof(retry_bytes), NET_RX_SUCCESS);
-    expect(true, later_bytes, sizeof(later_bytes), NET_RX_SUCCESS);
+    expect_icmp(later_bytes, sizeof(later_bytes), NET_RX_SUCCESS);
     expected[expected_count - 1].ip_options_length = sizeof(ip_options_b);
-    expected[expected_count - 1].tcp_options_length = sizeof(tcp_options_b);
     memcpy(expected[expected_count - 1].ip_options, ip_options_b, sizeof(ip_options_b));
-    memcpy(expected[expected_count - 1].tcp_options, tcp_options_b, sizeof(tcp_options_b));
     struct rte_mbuf *held[POOL_SIZE];
     unsigned int count;
     exhaust_mbuf_pool(held, &count);
@@ -378,11 +400,18 @@ static void allocation_retry_and_cancel(void)
 
     static const uint8_t cancel_bytes[] = {0x71, 0x72};
     static const uint8_t after_cancel_bytes[] = {0x73, 0x74, 0x75};
-    struct sk_buff *cancel_skb = make_packet_options(true, true, ip_options_b,
-        sizeof(ip_options_b), tcp_options_b, sizeof(tcp_options_b), cancel_bytes,
-        sizeof(cancel_bytes));
-    CHECK(ker_tx_export_enqueue(&tx, &cancel_skb) == 0 && !cancel_skb);
-    CHECK(ker_tx_export_poll(&tx, 1) == 1);
+    uint8_t cancel_frame[ETH_HLEN + 60 + 8 + sizeof(cancel_bytes)];
+    struct sk_buff *cancel_skb = NULL;
+    CHECK(ker_icmp_echo_ipv4_create_ip_options(&context, src_mac, dst_mac,
+        src_ip, dst_ip, rte_cpu_to_be_16(0x2233), rte_cpu_to_be_16(0x4455), 8, 64, ip_options_b,
+        sizeof(ip_options_b), cancel_bytes, sizeof(cancel_bytes), &cancel_skb) == 0);
+    CHECK(cancel_skb->len <= sizeof(cancel_frame));
+    unsigned int cancel_frame_length = cancel_skb->len;
+    memcpy(cancel_frame, cancel_skb->data, cancel_frame_length);
+    struct rte_mbuf *cancel_chain = NULL;
+    CHECK(ker_skb_to_mbuf_chain_copy(cancel_skb, 13, &cancel_chain) == 0);
+    CHECK(ker_skb_free(cancel_skb) == 0);
+    CHECK(ker_tx_ring_sink(cancel_chain, &ring) == 0);
     exhaust_mbuf_pool(held, &count);
     CHECK(ker_rx_ring_poll(&rx, 1) == -ENOMEM && rx.pending);
     CHECK(count >= 8);
@@ -390,35 +419,21 @@ static void allocation_retry_and_cancel(void)
     stage_options(false, false, ip_options_a, sizeof(ip_options_a), NULL, 0,
         after_cancel_bytes, sizeof(after_cancel_bytes), NET_RX_SUCCESS);
     CHECK(ker_rx_ring_cleanup(&rx) == -EBUSY);
+    struct rte_mbuf *expected_pending = rx.pending;
+    CHECK(expected_pending && expected_pending->nb_segs > 1);
     struct rte_mbuf *cancelled = NULL;
-    CHECK(ker_rx_ring_cancel(&rx, &cancelled) == 1 && cancelled && !rx.pending);
+    CHECK(ker_rx_ring_cancel(&rx, &cancelled) == 1 && cancelled == expected_pending && !rx.pending);
     sentinel = (void *)(uintptr_t)1;
     CHECK(ker_rx_ring_cancel(&rx, &sentinel) == 0 && sentinel == (void *)(uintptr_t)1);
-    CHECK(cancelled->pkt_len >= ETH_HLEN);
-    uint8_t payload_copy[sizeof(cancel_bytes)];
-    uint8_t header[ETH_HLEN + 60 + 60];
-    CHECK(cancelled->pkt_len >= ETH_HLEN + 20);
-    const void *part = rte_pktmbuf_read(cancelled, 0, ETH_HLEN + 20, header);
-    CHECK(part);
+    CHECK(cancelled->pkt_len == cancel_frame_length);
+    uint8_t read_frame[sizeof(cancel_frame)];
+    const void *part = rte_pktmbuf_read(cancelled, 0, cancel_frame_length, read_frame);
+    CHECK(part && !memcmp(part, cancel_frame, cancel_frame_length));
     const uint8_t *wire = part;
-    unsigned int ihl = (wire[ETH_HLEN] & 0x0fU) * 4U;
-    CHECK(ihl >= 20 && ihl <= 60 && cancelled->pkt_len >= ETH_HLEN + ihl + 20);
-    part = rte_pktmbuf_read(cancelled, 0, ETH_HLEN + ihl + 20, header);
-    CHECK(part);
-    wire = part;
-    unsigned int thl = (wire[ETH_HLEN + ihl + 12] >> 4) * 4U;
-    CHECK(thl >= 20 && thl <= 60 &&
-        cancelled->pkt_len >= ETH_HLEN + ihl + thl + sizeof(payload_copy));
-    part = rte_pktmbuf_read(cancelled, 0,
-        ETH_HLEN + ihl + thl + sizeof(payload_copy), header);
-    CHECK(part);
-    wire = part;
-    CHECK(ihl == 24 && thl == 24 &&
+    CHECK((wire[ETH_HLEN] & 0x0fU) == 6 && wire[ETH_HLEN + 9] == IPPROTO_ICMP &&
+        wire[ETH_HLEN + 24] == 8 && wire[ETH_HLEN + 25] == 0 &&
         !memcmp(wire + ETH_HLEN + 20, ip_options_b, sizeof(ip_options_b)) &&
-        !memcmp(wire + ETH_HLEN + ihl + 20, tcp_options_b, sizeof(tcp_options_b)));
-    const void *payload = rte_pktmbuf_read(cancelled,
-        ETH_HLEN + ihl + thl, sizeof(payload_copy), payload_copy);
-    CHECK(payload && !memcmp(payload, cancel_bytes, sizeof(payload_copy)));
+        !memcmp(wire + ETH_HLEN + 24 + 8, cancel_bytes, sizeof(cancel_bytes)));
     ker_packet_free(cancelled);
     release_mbuf_pool(held, &count);
     CHECK(rte_ring_count(ring.ring) == 1 && ker_rx_ring_poll(&rx, 1) == 1 &&
@@ -450,6 +465,55 @@ static void cleanup_preserves_ring_queue(void)
     CHECK(ker_tx_ring_take(&ring, &out) == 1 && out == queued);
     ker_packet_free(out);
     CHECK(ker_rx_ring_init(&rx, &ring, &device, &runtime, 128) == 0);
+}
+
+static void icmp_ring_delivery_and_drop(void)
+{
+    static const uint8_t payload[] = {0x81, 0x32, 0x43, 0x54, 0x65};
+    struct sk_buff *skb = NULL;
+    CHECK(ker_icmp_echo_ipv4_create(&context, src_mac, dst_mac, src_ip, dst_ip,
+        (__be16)0x1234, (__be16)0x5678, 8, 64, payload, sizeof(payload), &skb) == 0);
+    expect_icmp(payload, sizeof(payload), NET_RX_SUCCESS);
+    CHECK(ker_tx_export_enqueue(&tx, &skb) == 0 && !skb);
+    CHECK(ker_tx_export_poll(&tx, 1) == 1);
+    CHECK(ker_rx_ring_poll(&rx, 1) == 1 && received == 10 && !rx.last_dropped);
+
+    for (unsigned int kind = 0; kind < 5; ++kind) {
+        CHECK(ker_icmp_echo_ipv4_create(&context, src_mac, dst_mac, src_ip, dst_ip,
+            (__be16)(0x4321U + kind), (__be16)0x8765, 8, 64, payload,
+            sizeof(payload), &skb) == 0);
+        uint8_t *ip = skb->data + ETH_HLEN;
+        uint8_t *icmp = ip + 20;
+        int expected_error;
+        if (kind == 0) {
+            icmp[2] ^= 1;
+            expected_error = -EBADMSG;
+        } else if (kind == 1 || kind == 2) {
+            icmp[0] = kind == 1 ? 3 : 8;
+            icmp[1] = kind == 1 ? 0 : 1;
+            icmp[2] = icmp[3] = 0;
+            __be16 sum = rte_cpu_to_be_16(wire_checksum(icmp,
+                skb->len - ETH_HLEN - 20));
+            memcpy(icmp + 2, &sum, sizeof(sum));
+            expected_error = kind == 1 ? -ENOTSUP : -EINVAL;
+        } else {
+            if (kind == 3) {
+                ip[6] |= 0x20;
+                expected_error = -ENOTSUP;
+            } else {
+                ip[9] = 132;
+                expected_error = -EPROTONOSUPPORT;
+            }
+            ip[10] = ip[11] = 0;
+            __be16 sum = rte_cpu_to_be_16(wire_checksum(ip, 20));
+            memcpy(ip + 10, &sum, sizeof(sum));
+        }
+        CHECK(ker_tx_export_enqueue(&tx, &skb) == 0 && !skb);
+        CHECK(ker_tx_export_poll(&tx, 1) == 1);
+        unsigned int before = received;
+        CHECK(ker_rx_ring_poll(&rx, 1) == 1 && received == before &&
+            rx.last_dropped == 1 && receiver.validation_error == expected_error);
+    }
 }
 
 int main(void)
@@ -557,6 +621,7 @@ int main(void)
     allocation_retry_and_cancel();
     permanent_drop();
     CHECK(received == 9);
+    icmp_ring_delivery_and_drop();
     cleanup_preserves_ring_queue();
     CHECK(ker_worker_cleanup(&worker) == 0);
     CHECK(ker_transport_receiver_unregister(&receiver) == 0);

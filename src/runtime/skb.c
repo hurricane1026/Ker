@@ -452,8 +452,8 @@ static int chain_write(struct rte_mbuf *chain, uint32_t offset,
     return -EINVAL;
 }
 
-int ker_skb_to_mbuf_chain_software_checksum(struct sk_buff *skb,
-    unsigned int segment_payload_limit, struct rte_mbuf **result)
+static int skb_to_mbuf_chain_software_checksum(struct sk_buff *skb,
+    unsigned int segment_payload_limit, struct rte_mbuf **result, bool mangle_zero)
 {
     if (!result || !segment_payload_limit)
         return -EINVAL;
@@ -486,7 +486,7 @@ int ker_skb_to_mbuf_chain_software_checksum(struct sk_buff *skb,
 
     __sum16 checksum = csum_fold(csum_partial(skb->data + start,
         (int)(skb->len - (unsigned int)start), 0));
-    if (!checksum)
+    if (mangle_zero && !checksum)
         checksum = CSUM_MANGLED_0;
     struct rte_mbuf *chain = NULL;
     error = skb_to_mbuf_chain_copy(skb, segment_payload_limit, &chain, true);
@@ -499,6 +499,16 @@ int ker_skb_to_mbuf_chain_software_checksum(struct sk_buff *skb,
     }
     *result = chain;
     return 0;
+}
+int ker_skb_to_mbuf_chain_software_checksum(struct sk_buff *skb,
+    unsigned int segment_payload_limit, struct rte_mbuf **result)
+{
+    return skb_to_mbuf_chain_software_checksum(skb, segment_payload_limit, result, true);
+}
+int ker_skb_to_mbuf_chain_software_checksum_exact(struct sk_buff *skb,
+    unsigned int segment_payload_limit, struct rte_mbuf **result)
+{
+    return skb_to_mbuf_chain_software_checksum(skb, segment_payload_limit, result, false);
 }
 int ker_skb_to_mbuf_software_checksum(struct sk_buff *skb, struct rte_mbuf **result)
 {
