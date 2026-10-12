@@ -3,6 +3,7 @@
 #include "runtime/buffer.h"
 #include "runtime/ethernet.h"
 #include "runtime/icmp-echo-create.h"
+#include "runtime/ipv4-fields.h"
 #include "runtime/memory.h"
 #include "runtime/rx-ring.h"
 #include "runtime/skb.h"
@@ -27,6 +28,7 @@
 #define PAYLOAD_MAX 32U
 struct record {
     uint8_t protocol;
+    struct ker_ipv4_header_fields ipv4_fields;
     unsigned int length, ip_options_length, tcp_options_length;
     uint8_t ip_options[8], tcp_options[8], payload[PAYLOAD_MAX];
 };
@@ -132,10 +134,10 @@ static struct sk_buff *make_packet(unsigned int index)
     const struct record *record = &f.expected[index];
     struct sk_buff *skb = NULL;
     if (record->protocol == IPPROTO_TCP) {
-        CHECK(ker_tcp_ipv4_create_headers(&f.producer_context, source_mac, destination_mac,
+        CHECK(ker_tcp_ipv4_create_fields(&f.producer_context, source_mac, destination_mac,
             source_ip, destination_ip, source_port, destination_port,
             (__be32)(UINT32_C(0x10000000) + index), (__be32)0,
-            (__be16)2048, 0x18, 63, record->ip_options,
+            (__be16)2048, 0x18, 63, &record->ipv4_fields, record->ip_options,
             record->ip_options_length, record->tcp_options,
             record->tcp_options_length, record->payload, record->length, &skb) == 0);
         unsigned int start = ETH_HLEN + 20 + record->ip_options_length;
@@ -148,9 +150,10 @@ static struct sk_buff *make_packet(unsigned int index)
         skb->csum_start = (uint16_t)(skb_headroom(skb) + start);
         skb->csum_offset = 16;
     } else if (record->protocol == IPPROTO_ICMP) {
-        CHECK(ker_icmp_echo_ipv4_create_ip_options(&f.producer_context, source_mac,
+        CHECK(ker_icmp_echo_ipv4_create_fields(&f.producer_context, source_mac,
             destination_mac, source_ip, destination_ip, rte_cpu_to_be_16((uint16_t)(0x1000U + index)),
-            rte_cpu_to_be_16((uint16_t)index), 8, 61, record->ip_options, record->ip_options_length,
+            rte_cpu_to_be_16((uint16_t)index), 8, 61, &record->ipv4_fields,
+            record->ip_options, record->ip_options_length,
             record->payload, record->length, &skb) == 0);
         unsigned int start = ETH_HLEN + 20 + record->ip_options_length;
         const __be16 zero = 0;
@@ -159,9 +162,9 @@ static struct sk_buff *make_packet(unsigned int index)
         skb->csum_start = (uint16_t)(skb_headroom(skb) + start);
         skb->csum_offset = 2;
     } else {
-        CHECK(ker_udp_ipv4_create_ip_options(&f.producer_context, source_mac,
+        CHECK(ker_udp_ipv4_create_fields(&f.producer_context, source_mac,
             destination_mac, source_ip, destination_ip, source_port,
-            destination_port, 61, record->ip_options,
+            destination_port, 61, &record->ipv4_fields, record->ip_options,
             record->ip_options_length, record->payload, record->length, &skb) == 0);
     }
     return skb;
@@ -176,6 +179,9 @@ static int receive_message(const struct ker_transport_message *message, void *ar
     CHECK(message->protocol == (record->protocol == IPPROTO_TCP ? KER_TRANSPORT_TCP :
         record->protocol == IPPROTO_ICMP ? KER_TRANSPORT_ICMP_ECHO : KER_TRANSPORT_UDP));
     CHECK(message->ipv4.header_length == 20 + record->ip_options_length);
+    CHECK(message->ipv4.header[1] == record->ipv4_fields.ds_field &&
+        !memcmp(message->ipv4.header + 4, &record->ipv4_fields.identification, 2) &&
+        !memcmp(message->ipv4.header + 6, &record->ipv4_fields.frag_off, 2));
     if (record->ip_options_length)
         CHECK(!memcmp(message->ipv4.header + 20, record->ip_options,
             record->ip_options_length));
@@ -278,6 +284,9 @@ static void fill_records(void)
         struct record *record = &f.expected[i];
         record->protocol = (i % 3U == 0) ? IPPROTO_UDP :
             (i % 3U == 1) ? IPPROTO_TCP : IPPROTO_ICMP;
+        record->ipv4_fields.ds_field = (uint8_t)(i * 37U + 0x19U);
+        record->ipv4_fields.identification = rte_cpu_to_be_16((uint16_t)(0x8000U + i));
+        record->ipv4_fields.frag_off = (i & 1U) ? rte_cpu_to_be_16(0x4000U) : 0;
         record->length = 11U + (i % 20U);
         record->ip_options_length = (i % 3U) * 4U;
         record->tcp_options_length = record->protocol == IPPROTO_TCP ? ((i / 3U) % 3U) * 4U : 0;

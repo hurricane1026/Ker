@@ -248,6 +248,15 @@
         "test_ff_dpdk_if_send_udp_csum"
       ],
       "adaptation": "Ker-specific exact-fold checksum-copy extension motivated by segmented TX and checksum cases. An explicit opt-in chain mode preserves a folded zero in a private CHECKSUM_PARTIAL checksum completion; the existing checksum mode retains its zero-mangling behavior. ICMP echo packets verify the exact checksum through segmented worker RX and ring backpressure. This is software completion, not NIC offload, automatic ICMP response, or a claim about general protocol zero-mangling policy."
+    },
+    "ipv4-field-profiles": {
+      "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
+      "source_case": [
+        "test_ff_dpdk_if_send_udp_csum",
+        "test_ff_dpdk_if_send_tcp_csum",
+        "test_ff_dpdk_if_send_multiseg"
+      ],
+      "adaptation": "Ker-specific constructor extension motivated by pinned IPv4 UDP/TCP checksum and segmented-TX cases; those upstream cases do not test IPv4 DS/ID/fragment-field construction. Ker copies an explicit opaque DS byte and wire-order identification into UDP/TCP/ICMP echo frames, admits only fragment field zero or DF, and independently verifies IPv4 plus transport checksums. Permanent-neighbor variants reuse the configured source/neighbor snapshot path; a concurrent 192-packet three-protocol worker-ring case verifies field preservation. An RX-ring case carries a DF profile through exact software checksum completion, allocation-pressure cancellation and FIFO recovery. Legacy constructors remain byte-identical zero-profile wrappers. This does not implement DSCP/ECN policy, ID generation, fragmentation, PMTU, routing, or NIC behavior."
     }
   }
 }

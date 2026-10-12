@@ -1,6 +1,7 @@
 #ifndef KER_RUNTIME_UDP_CREATE_H
 #define KER_RUNTIME_UDP_CREATE_H
 #include "runtime/skb.h"
+#include "runtime/ipv4-fields.h"
 
 /* Construct a caller-owned Ethernet + fixed 20-byte IPv4 + UDP packet.
  * Addresses and ports are in wire order; payload is copied and borrowed only for this call.
@@ -21,4 +22,12 @@ int ker_udp_ipv4_create_ip_options(struct ker_skb_context *context,
     __be16 destination_port, uint8_t ttl, const void *options,
     unsigned int options_length, const void *payload, unsigned int payload_length,
     struct sk_buff **result);
+/* As above with a required copied IPv4 field profile. The DS byte is opaque;
+ * identification and permitted zero/DF fragment field are in wire order. */
+int ker_udp_ipv4_create_fields(struct ker_skb_context *context,
+    const unsigned char source_mac[6], const unsigned char destination_mac[6],
+    __be32 source_ip, __be32 destination_ip, __be16 source_port,
+    __be16 destination_port, uint8_t ttl, const struct ker_ipv4_header_fields *fields,
+    const void *ip_options, unsigned int ip_options_length, const void *payload,
+    unsigned int payload_length, struct sk_buff **result);
 #endif

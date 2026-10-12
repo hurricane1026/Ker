@@ -1,6 +1,7 @@
 #ifndef KER_RUNTIME_ICMP_ECHO_CREATE_H
 #define KER_RUNTIME_ICMP_ECHO_CREATE_H
 #include "runtime/skb.h"
+#include "runtime/ipv4-fields.h"
 
 /* Explicit-address Ethernet/IPv4 ICMP echo request/reply constructor. MACs,
  * IPs, identifier and sequence are wire order. Payload/options are borrowed
@@ -16,6 +17,15 @@ int ker_icmp_echo_ipv4_create_ip_options(struct ker_skb_context *context,
     const unsigned char source_mac[6], const unsigned char destination_mac[6],
     __be32 source_ip, __be32 destination_ip, __be16 identifier,
     __be16 sequence, uint8_t type, uint8_t ttl, const void *ip_options,
+    unsigned int ip_options_length, const void *payload,
+    unsigned int payload_length, struct sk_buff **result);
+/* As above with a required copied IPv4 field profile. DS is opaque, ID is
+ * copied verbatim, and frag_off is restricted to zero or DF. */
+int ker_icmp_echo_ipv4_create_fields(struct ker_skb_context *context,
+    const unsigned char source_mac[6], const unsigned char destination_mac[6],
+    __be32 source_ip, __be32 destination_ip, __be16 identifier,
+    __be16 sequence, uint8_t type, uint8_t ttl,
+    const struct ker_ipv4_header_fields *fields, const void *ip_options,
     unsigned int ip_options_length, const void *payload,
     unsigned int payload_length, struct sk_buff **result);
 #endif

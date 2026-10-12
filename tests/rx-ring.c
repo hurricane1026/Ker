@@ -402,14 +402,37 @@ static void allocation_retry_and_cancel(void)
     static const uint8_t after_cancel_bytes[] = {0x73, 0x74, 0x75};
     uint8_t cancel_frame[ETH_HLEN + 60 + 8 + sizeof(cancel_bytes)];
     struct sk_buff *cancel_skb = NULL;
-    CHECK(ker_icmp_echo_ipv4_create_ip_options(&context, src_mac, dst_mac,
-        src_ip, dst_ip, rte_cpu_to_be_16(0x2233), rte_cpu_to_be_16(0x4455), 8, 64, ip_options_b,
+    const struct ker_ipv4_header_fields cancel_fields = {
+        .ds_field = 0xa6, .identification = rte_cpu_to_be_16(0x91a2),
+        .frag_off = rte_cpu_to_be_16(0x4000)
+    };
+    CHECK(ker_icmp_echo_ipv4_create_fields(&context, src_mac, dst_mac,
+        src_ip, dst_ip, rte_cpu_to_be_16(0x2233), rte_cpu_to_be_16(0x4455), 8, 64,
+        &cancel_fields, ip_options_b,
         sizeof(ip_options_b), cancel_bytes, sizeof(cancel_bytes), &cancel_skb) == 0);
     CHECK(cancel_skb->len <= sizeof(cancel_frame));
     unsigned int cancel_frame_length = cancel_skb->len;
+    /* Preserve the expected completed wire packet before marking the owned skb
+     * as PARTIAL; the software-copy exporter must leave that seed untouched. */
     memcpy(cancel_frame, cancel_skb->data, cancel_frame_length);
+    uint8_t seeded_frame[sizeof(cancel_frame)];
+    uint8_t *cancel_icmp = cancel_skb->data + ETH_HLEN + 20 + sizeof(ip_options_b);
+    const __be16 seed = 0;
+    memcpy(cancel_icmp + 2, &seed, sizeof(seed));
+    cancel_skb->ip_summed = CHECKSUM_PARTIAL;
+    cancel_skb->csum_start = (uint16_t)(skb_headroom(cancel_skb) +
+        ETH_HLEN + 20 + sizeof(ip_options_b));
+    cancel_skb->csum_offset = 2;
+    memcpy(seeded_frame, cancel_skb->data, cancel_frame_length);
+    uint16_t seeded_start = cancel_skb->csum_start;
+    uint16_t seeded_offset = cancel_skb->csum_offset;
     struct rte_mbuf *cancel_chain = NULL;
-    CHECK(ker_skb_to_mbuf_chain_copy(cancel_skb, 13, &cancel_chain) == 0);
+    CHECK(ker_skb_to_mbuf_chain_software_checksum_exact(cancel_skb, 13,
+        &cancel_chain) == 0);
+    CHECK(cancel_skb->ip_summed == CHECKSUM_PARTIAL &&
+        cancel_skb->csum_start == seeded_start && cancel_skb->csum_offset == seeded_offset &&
+        !memcmp(cancel_skb->data, seeded_frame, cancel_frame_length));
+    CHECK(cancel_chain->pkt_len == cancel_frame_length && cancel_chain->nb_segs > 1);
     CHECK(ker_skb_free(cancel_skb) == 0);
     CHECK(ker_tx_ring_sink(cancel_chain, &ring) == 0);
     exhaust_mbuf_pool(held, &count);
@@ -431,6 +454,9 @@ static void allocation_retry_and_cancel(void)
     CHECK(part && !memcmp(part, cancel_frame, cancel_frame_length));
     const uint8_t *wire = part;
     CHECK((wire[ETH_HLEN] & 0x0fU) == 6 && wire[ETH_HLEN + 9] == IPPROTO_ICMP &&
+        wire[ETH_HLEN + 1] == cancel_fields.ds_field &&
+        !memcmp(wire + ETH_HLEN + 4, &cancel_fields.identification, 2) &&
+        !memcmp(wire + ETH_HLEN + 6, &cancel_fields.frag_off, 2) &&
         wire[ETH_HLEN + 24] == 8 && wire[ETH_HLEN + 25] == 0 &&
         !memcmp(wire + ETH_HLEN + 20, ip_options_b, sizeof(ip_options_b)) &&
         !memcmp(wire + ETH_HLEN + 24 + 8, cancel_bytes, sizeof(cancel_bytes)));
@@ -478,7 +504,7 @@ static void icmp_ring_delivery_and_drop(void)
     CHECK(ker_tx_export_poll(&tx, 1) == 1);
     CHECK(ker_rx_ring_poll(&rx, 1) == 1 && received == 10 && !rx.last_dropped);
 
-    for (unsigned int kind = 0; kind < 5; ++kind) {
+    for (unsigned int kind = 0; kind < 6; ++kind) {
         CHECK(ker_icmp_echo_ipv4_create(&context, src_mac, dst_mac, src_ip, dst_ip,
             (__be16)(0x4321U + kind), (__be16)0x8765, 8, 64, payload,
             sizeof(payload), &skb) == 0);
@@ -497,10 +523,14 @@ static void icmp_ring_delivery_and_drop(void)
             memcpy(icmp + 2, &sum, sizeof(sum));
             expected_error = kind == 1 ? -ENOTSUP : -EINVAL;
         } else {
-            if (kind == 3) {
+            if (kind == 3 || kind == 5) {
                 ip[6] |= 0x20;
                 expected_error = -ENOTSUP;
-            } else {
+                if (kind == 5) {
+                    ip[6] = 0;
+                    ip[7] = 1;
+                }
+            } else if (kind == 4) {
                 ip[9] = 132;
                 expected_error = -EPROTONOSUPPORT;
             }

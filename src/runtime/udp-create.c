@@ -15,10 +15,11 @@ static void put_be16(unsigned char *p, unsigned int value)
     p[1] = (unsigned char)value;
 }
 
-int ker_udp_ipv4_create_ip_options(struct ker_skb_context *context,
+static int udp_create_fields(struct ker_skb_context *context,
     const unsigned char source_mac[ETH_ALEN], const unsigned char destination_mac[ETH_ALEN],
     __be32 source_ip, __be32 destination_ip, __be16 source_port,
-    __be16 destination_port, uint8_t ttl, const void *options,
+    __be16 destination_port, uint8_t ttl, const struct ker_ipv4_header_fields *fields,
+    const void *options,
     unsigned int options_length, const void *payload, unsigned int payload_length,
     struct sk_buff **result)
 {
@@ -33,6 +34,11 @@ int ker_udp_ipv4_create_ip_options(struct ker_skb_context *context,
         payload_length;
     if (ip_length_wide > UINT16_MAX)
         return -EMSGSIZE;
+    int fields_error = ker_ipv4_header_fields_validate(fields);
+    if (fields_error)
+        return fields_error;
+    const struct ker_ipv4_header_fields field_snapshot =
+        ker_ipv4_header_fields_snapshot(fields);
 
     const unsigned int udp_length = UDP_HEADER_LENGTH + payload_length;
     const unsigned int ip_length = (unsigned int)ip_length_wide;
@@ -54,6 +60,7 @@ int ker_udp_ipv4_create_ip_options(struct ker_skb_context *context,
     unsigned char *ip = frame + ETH_HLEN;
     memset(ip, 0, ip_header_length);
     ip[0] = (unsigned char)(0x40U | (ip_header_length / 4U));
+    ker_ipv4_header_fields_apply(ip, &field_snapshot);
     put_be16(ip + 2, ip_length);
     ip[8] = ttl;
     ip[9] = KER_IPPROTO_UDP;
@@ -86,6 +93,31 @@ int ker_udp_ipv4_create_ip_options(struct ker_skb_context *context,
     skb->protocol = rte_cpu_to_be_16(ETH_P_IP);
     *result = skb;
     return 0;
+}
+
+int ker_udp_ipv4_create_fields(struct ker_skb_context *context,
+    const unsigned char source_mac[ETH_ALEN], const unsigned char destination_mac[ETH_ALEN],
+    __be32 source_ip, __be32 destination_ip, __be16 source_port,
+    __be16 destination_port, uint8_t ttl, const struct ker_ipv4_header_fields *fields,
+    const void *ip_options, unsigned int ip_options_length, const void *payload,
+    unsigned int payload_length, struct sk_buff **result)
+{
+    return udp_create_fields(context, source_mac, destination_mac, source_ip,
+        destination_ip, source_port, destination_port, ttl, fields, ip_options,
+        ip_options_length, payload, payload_length, result);
+}
+
+int ker_udp_ipv4_create_ip_options(struct ker_skb_context *context,
+    const unsigned char source_mac[ETH_ALEN], const unsigned char destination_mac[ETH_ALEN],
+    __be32 source_ip, __be32 destination_ip, __be16 source_port,
+    __be16 destination_port, uint8_t ttl, const void *options,
+    unsigned int options_length, const void *payload, unsigned int payload_length,
+    struct sk_buff **result)
+{
+    const struct ker_ipv4_header_fields fields = {0};
+    return udp_create_fields(context, source_mac, destination_mac, source_ip,
+        destination_ip, source_port, destination_port, ttl, &fields, options,
+        options_length, payload, payload_length, result);
 }
 
 int ker_udp_ipv4_create(struct ker_skb_context *context,

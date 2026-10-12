@@ -19,4 +19,10 @@ int ker_udp_ipv4_create_neighbor_ip_options(struct ker_neighbor_table *table,
     __be32 destination_ip, __be16 source_port, __be16 destination_port, uint8_t ttl,
     const void *ip_options, unsigned int ip_options_length, const void *payload,
     unsigned int payload_length, struct sk_buff **result);
+/* As above with a required copied IPv4 profile; validation precedes lookup. */
+int ker_udp_ipv4_create_neighbor_fields(struct ker_neighbor_table *table,
+    __be32 destination_ip, __be16 source_port, __be16 destination_port,
+    uint8_t ttl, const struct ker_ipv4_header_fields *fields,
+    const void *ip_options, unsigned int ip_options_length,
+    const void *payload, unsigned int payload_length, struct sk_buff **result);
 #endif

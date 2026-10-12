@@ -2,6 +2,7 @@
 #include "eal.h"
 #include "runtime/udp-neighbor-create.h"
 #include "runtime/icmp-echo-neighbor-create.h"
+#include "runtime/tcp-neighbor-create.h"
 #include "runtime/neighbor.h"
 #include "runtime/ipv4-address.h"
 #include "runtime/ethernet.h"
@@ -64,6 +65,18 @@ static uint16_t udp_oracle(const unsigned char *frame, unsigned int ihl,
     uint32_t sum = oracle_sum(pseudo, sizeof(pseudo)) + oracle_sum(udp, udp_length);
     while (sum >> 16) sum = (sum & 0xffff) + (sum >> 16);
     return (uint16_t)sum;
+}
+
+static void verify_profile_header(const struct sk_buff *skb,
+    const struct ker_ipv4_header_fields *fields, uint8_t protocol,
+    unsigned int ip_length)
+{
+    const unsigned char *ip = skb->data + ETH_HLEN;
+    CHECK(ip[1] == fields->ds_field &&
+        !memcmp(ip + 4, &fields->identification, 2) &&
+        !memcmp(ip + 6, &fields->frag_off, 2));
+    CHECK(ip[9] == protocol && (((unsigned int)ip[2] << 8) | ip[3]) == ip_length);
+    CHECK(oracle_sum(ip, (ip[0] & 0x0fU) * 4U) == 0xffff);
 }
 
 static int tx_sink(struct rte_mbuf *packet, void *arg)
@@ -315,6 +328,45 @@ static void transactional_failures(void)
     unsigned char options[40];
     for (unsigned int i = 0; i < sizeof(options); ++i) options[i] = (unsigned char)(i * 7U + 3U);
     unsigned char options_copy[sizeof(options)]; memcpy(options_copy, options, sizeof(options));
+    const __be32 absent_options = rte_cpu_to_be_32(0xc6336403);
+    const struct ker_ipv4_header_fields valid_profile = {
+        .ds_field = 0x2e, .identification = rte_cpu_to_be_16(0x1234),
+        .frag_off = rte_cpu_to_be_16(0x4000)
+    };
+    const struct ker_ipv4_header_fields invalid_profile = {
+        .ds_field = 0x5a, .identification = rte_cpu_to_be_16(0x1234),
+        .frag_off = rte_cpu_to_be_16(0x2000)
+    };
+    CHECK(ker_udp_ipv4_create_neighbor_fields(&table, absent_options, source_port,
+        destination_port, 64, &invalid_profile, options, 4, payload,
+        sizeof(payload), &sentinel) == -ENOTSUP);
+    CHECK(ker_tcp_ipv4_create_neighbor_fields(&table, absent_options, source_port,
+        destination_port, 1, 2, rte_cpu_to_be_16(64), 0x18, 64,
+        &invalid_profile, options, 4, options, 4, payload, sizeof(payload),
+        &sentinel) == -ENOTSUP);
+    CHECK(ker_icmp_echo_ipv4_create_neighbor_fields(&table, absent_options,
+        1, 2, 8, 64, &invalid_profile, options, 4, payload,
+        sizeof(payload), &sentinel) == -ENOTSUP);
+    CHECK(ker_udp_ipv4_create_neighbor_fields(&table, destination_ip, source_port,
+        destination_port, 64, NULL, NULL, 0, payload, sizeof(payload),
+        &sentinel) == -EINVAL);
+    CHECK(ker_tcp_ipv4_create_neighbor_fields(&table, destination_ip, source_port,
+        destination_port, 1, 2, rte_cpu_to_be_16(64), 0x18, 64, NULL,
+        NULL, 0, NULL, 0, payload, sizeof(payload), &sentinel) == -EINVAL);
+    CHECK(ker_icmp_echo_ipv4_create_neighbor_fields(&table, destination_ip,
+        1, 2, 8, 64, NULL, NULL, 0, payload, sizeof(payload),
+        &sentinel) == -EINVAL);
+    CHECK(ker_udp_ipv4_create_neighbor_fields(&table, absent_options, source_port,
+        destination_port, 64, &valid_profile, NULL, 0, payload,
+        sizeof(payload), &sentinel) == -ENOENT);
+    CHECK(ker_tcp_ipv4_create_neighbor_fields(&table, absent_options, source_port,
+        destination_port, 1, 2, rte_cpu_to_be_16(64), 0x18, 64, &valid_profile,
+        NULL, 0, NULL, 0, payload, sizeof(payload), &sentinel) == -ENOENT);
+    CHECK(ker_icmp_echo_ipv4_create_neighbor_fields(&table, absent_options,
+        1, 2, 8, 64, &valid_profile, NULL, 0, payload, sizeof(payload),
+        &sentinel) == -ENOENT);
+    CHECK(sentinel == (void *)(uintptr_t)0x1234 && context.live == 0 &&
+        rte_mempool_avail_count(pool.mbufs) == 63 && refcount_read(&held_entry->refcnt) == 2);
     CHECK(ker_udp_ipv4_create_neighbor_ip_options(&table, destination_ip, source_port,
         destination_port, 64, NULL, 4, payload, sizeof(payload), &sentinel) == -EINVAL);
     CHECK(ker_udp_ipv4_create_neighbor_ip_options(&table, destination_ip, source_port,
@@ -326,13 +378,18 @@ static void transactional_failures(void)
     CHECK(ker_udp_ipv4_create_neighbor_ip_options(&table, destination_ip, source_port,
         destination_port, 64, options, 40, payload, UINT16_MAX - 20U - 40U - 8U,
         &sentinel) == -ENOSPC);
-    const __be32 absent_options = rte_cpu_to_be_32(0xc6336403);
     CHECK(ker_udp_ipv4_create_neighbor_ip_options(&table, absent_options, source_port,
         destination_port, 64, options, 4, payload, sizeof(payload), &sentinel) == -ENOENT);
     CHECK(refcount_read(&held_entry->refcnt) == 2 && sentinel == (void *)(uintptr_t)0x1234);
     held_entry->nud_state = NUD_STALE;
     CHECK(ker_udp_ipv4_create_neighbor_ip_options(&table, destination_ip, source_port,
         destination_port, 64, options, 40, payload, sizeof(payload), &sentinel) == -ENOTSUP);
+    CHECK(ker_tcp_ipv4_create_neighbor_fields(&table, destination_ip, source_port,
+        destination_port, 1, 2, rte_cpu_to_be_16(64), 0x18, 64, &valid_profile,
+        options, 40, options, 40, payload, sizeof(payload), &sentinel) == -ENOTSUP);
+    CHECK(ker_icmp_echo_ipv4_create_neighbor_fields(&table, destination_ip,
+        1, 2, 8, 64, &valid_profile, options, 40, payload,
+        sizeof(payload), &sentinel) == -ENOTSUP);
     held_entry->nud_state = NUD_PERMANENT;
     CHECK(refcount_read(&held_entry->refcnt) == 2 && sentinel == (void *)(uintptr_t)0x1234);
     CHECK(!memcmp(options, options_copy, sizeof(options)) && context.live == 0);
@@ -362,6 +419,15 @@ static void transactional_failures(void)
     held_entry->nud_state = NUD_PERMANENT;
 
     ker_memory_fail_after(0);
+    CHECK(ker_udp_ipv4_create_neighbor_fields(&table, destination_ip, source_port,
+        destination_port, 64, &valid_profile, options, 40, payload,
+        sizeof(payload), &sentinel) == -ENOMEM);
+    CHECK(ker_tcp_ipv4_create_neighbor_fields(&table, destination_ip, source_port,
+        destination_port, 1, 2, rte_cpu_to_be_16(64), 0x18, 64, &valid_profile,
+        options, 40, options, 40, payload, sizeof(payload), &sentinel) == -ENOMEM);
+    CHECK(ker_icmp_echo_ipv4_create_neighbor_fields(&table, destination_ip,
+        1, 2, 8, 64, &valid_profile, options, 40, payload,
+        sizeof(payload), &sentinel) == -ENOMEM);
     CHECK(ker_udp_ipv4_create_neighbor_ip_options(&table, destination_ip,
         source_port, destination_port, 64, options, 40, payload, sizeof(payload),
         &sentinel) == -ENOMEM);
@@ -372,6 +438,21 @@ static void transactional_failures(void)
     CHECK(sentinel == (void *)(uintptr_t)0x1234 && context.live == 0);
     CHECK(refcount_read(&held_entry->refcnt) == 2);
     struct sk_buff *descriptor_retry = NULL;
+    CHECK(ker_udp_ipv4_create_neighbor_fields(&table, destination_ip, source_port,
+        destination_port, 64, &valid_profile, NULL, 0, payload, sizeof(payload),
+        &descriptor_retry) == 0);
+    CHECK(descriptor_retry && ker_skb_free(descriptor_retry) == 0);
+    descriptor_retry = NULL;
+    CHECK(ker_tcp_ipv4_create_neighbor_fields(&table, destination_ip, source_port,
+        destination_port, 1, 2, rte_cpu_to_be_16(64), 0x18, 64, &valid_profile,
+        NULL, 0, NULL, 0, payload, sizeof(payload), &descriptor_retry) == 0);
+    CHECK(descriptor_retry && ker_skb_free(descriptor_retry) == 0);
+    descriptor_retry = NULL;
+    CHECK(ker_icmp_echo_ipv4_create_neighbor_fields(&table, destination_ip,
+        1, 2, 8, 64, &valid_profile, NULL, 0, payload, sizeof(payload),
+        &descriptor_retry) == 0);
+    CHECK(descriptor_retry && ker_skb_free(descriptor_retry) == 0);
+    descriptor_retry = NULL;
     CHECK(ker_udp_ipv4_create_neighbor(&table, destination_ip, source_port, destination_port,
         64, payload, sizeof(payload), &descriptor_retry) == 0);
     CHECK(descriptor_retry && ker_skb_free(descriptor_retry) == 0 && context.live == 0);
@@ -537,6 +618,10 @@ static void exact_icmp_checksum_worker_roundtrip(void)
 static void *foreign_create(void *arg)
 {
     struct sk_buff **result = arg;
+    const struct ker_ipv4_header_fields fields = {
+        .ds_field = 0x2e, .identification = rte_cpu_to_be_16(0x1234),
+        .frag_off = rte_cpu_to_be_16(0x4000)
+    };
     CHECK(ker_udp_ipv4_create_neighbor(&table, destination_ip, source_port, destination_port,
         64, NULL, 0, result) == -EXDEV);
     CHECK(*result == (void *)(uintptr_t)0x1234);
@@ -545,6 +630,17 @@ static void *foreign_create(void *arg)
     CHECK(*result == (void *)(uintptr_t)0x1234);
     CHECK(ker_udp_ipv4_create_neighbor_ip_options(&table, destination_ip,
         source_port, destination_port, 64, NULL, 0, NULL, 0, result) == -EXDEV);
+    CHECK(*result == (void *)(uintptr_t)0x1234);
+    CHECK(ker_udp_ipv4_create_neighbor_fields(&table, destination_ip,
+        source_port, destination_port, 64, &fields, NULL, 0, NULL, 0,
+        result) == -EXDEV);
+    CHECK(*result == (void *)(uintptr_t)0x1234);
+    CHECK(ker_tcp_ipv4_create_neighbor_fields(&table, destination_ip,
+        source_port, destination_port, 1, 2, rte_cpu_to_be_16(64), 0x18, 64,
+        &fields, NULL, 0, NULL, 0, NULL, 0, result) == -EXDEV);
+    CHECK(*result == (void *)(uintptr_t)0x1234);
+    CHECK(ker_icmp_echo_ipv4_create_neighbor_fields(&table, destination_ip,
+        1, 2, 8, 64, &fields, NULL, 0, NULL, 0, result) == -EXDEV);
     CHECK(*result == (void *)(uintptr_t)0x1234);
     return NULL;
 }
@@ -563,6 +659,62 @@ int main(void)
     CHECK(ker_ipv4_address_init(&address, &device, source_ip, 24) == 0);
     CHECK(ker_neighbor_table_init(&table, &address, "udp_neighbor_records", 4, 2) == 0);
     CHECK(ker_neighbor_add(&table, destination_ip, destination_mac) == 0);
+    unsigned char profile_ip_options[40], profile_tcp_options[40];
+    for (unsigned int i = 0; i < 40; ++i) {
+        profile_ip_options[i] = (unsigned char)(0x31U + i * 7U);
+        profile_tcp_options[i] = (unsigned char)(0x52U + i * 9U);
+    }
+    const struct ker_ipv4_header_fields field_profile = {
+        .ds_field = 0x2e, .identification = rte_cpu_to_be_16(0x1234),
+        .frag_off = rte_cpu_to_be_16(0x4000)
+    };
+    unsigned char profile_payload[2] = {0x34, 0x56};
+    struct neighbour *profile_entry = NULL;
+    CHECK(ker_neighbor_lookup(&table, destination_ip, &profile_entry) == 0);
+    CHECK(refcount_read(&profile_entry->refcnt) == 2);
+    struct sk_buff *profile_probe = NULL;
+    CHECK(ker_udp_ipv4_create_neighbor_fields(&table, destination_ip,
+        source_port, destination_port, 64, &field_profile, profile_ip_options, 40,
+        profile_payload, sizeof(profile_payload), &profile_probe) == 0);
+    verify_profile_header(profile_probe, &field_profile, UDP_PROTOCOL,
+        20 + 40 + 8 + sizeof(profile_payload));
+    CHECK(udp_oracle(profile_probe->data, 60, sizeof(profile_payload)) == 0xffff);
+    CHECK(!memcmp(profile_probe->data + ETH_HLEN + 20, profile_ip_options, 40));
+    CHECK(refcount_read(&profile_entry->refcnt) == 2);
+    CHECK(profile_probe && ker_skb_free(profile_probe) == 0);
+    profile_probe = NULL;
+    CHECK(ker_tcp_ipv4_create_neighbor_fields(&table, destination_ip,
+        source_port, destination_port, 1, 2, rte_cpu_to_be_16(128), 0x18, 64,
+        &field_profile, profile_ip_options, 40, profile_tcp_options, 40, profile_payload,
+        sizeof(profile_payload), &profile_probe) == 0);
+    verify_profile_header(profile_probe, &field_profile, IPPROTO_TCP,
+        20 + 40 + 20 + 40 + sizeof(profile_payload));
+    CHECK(!memcmp(profile_probe->data + ETH_HLEN + 20, profile_ip_options, 40));
+    {
+        const unsigned char *ip = profile_probe->data + ETH_HLEN;
+        const unsigned char *tcp = ip + 60;
+        unsigned char pseudo[12];
+        memcpy(pseudo, ip + 12, 8); pseudo[8] = 0; pseudo[9] = IPPROTO_TCP;
+        pseudo[10] = 0; pseudo[11] = (unsigned char)(60 + sizeof(profile_payload));
+        uint32_t sum = oracle_sum(pseudo, sizeof(pseudo)) + oracle_sum(tcp, 60 + sizeof(profile_payload));
+        while (sum >> 16) sum = (sum & 0xffff) + (sum >> 16);
+        CHECK(sum == 0xffff);
+        CHECK(tcp[12] >> 4 == 15 && !memcmp(tcp + 20, profile_tcp_options, 40));
+    }
+    CHECK(refcount_read(&profile_entry->refcnt) == 2);
+    CHECK(profile_probe && ker_skb_free(profile_probe) == 0);
+    profile_probe = NULL;
+    CHECK(ker_icmp_echo_ipv4_create_neighbor_fields(&table, destination_ip,
+        rte_cpu_to_be_16(1), rte_cpu_to_be_16(2), 8, 64, &field_profile,
+        profile_ip_options, 40, profile_payload, sizeof(profile_payload), &profile_probe) == 0);
+    verify_profile_header(profile_probe, &field_profile, IPPROTO_ICMP,
+        20 + 40 + 8 + sizeof(profile_payload));
+    CHECK(!memcmp(profile_probe->data + ETH_HLEN + 20, profile_ip_options, 40));
+    CHECK(oracle_sum(profile_probe->data + ETH_HLEN + 60,
+        8 + sizeof(profile_payload)) == 0xffff);
+    CHECK(refcount_read(&profile_entry->refcnt) == 2);
+    CHECK(profile_probe && ker_skb_free(profile_probe) == 0);
+    CHECK(ker_neighbor_release(&table, profile_entry) == 0);
     struct sk_buff *icmp_baseline = NULL;
     CHECK(ker_icmp_echo_ipv4_create_neighbor_ip_options(&table, destination_ip,
         rte_cpu_to_be_16(1), rte_cpu_to_be_16(2), 8, 64, NULL, 0, NULL, 0,
