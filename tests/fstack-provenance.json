@@ -181,6 +181,11 @@
       "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
       "source_case": ["test_ff_dpdk_if_send_udp_csum", "test_ff_dpdk_if_send_tcp_csum"],
       "adaptation": "Ker-specific worker TX extension motivated by pinned UDP/TCP TX checksum cases. An explicit exporter mode admits CHECKSUM_NONE and supported Internet CHECKSUM_PARTIAL packets, completes partial checksums in a private direct-chain copy, and preserves the original skb on sink rejection for retry. Tests verify checksum bytes through the actual worker receive path. The upstream cases exercise offload; this does not claim NIC/hardware offload, nonlinear Linux skb support, sockets, or TCP state."
+    },
+    "cross-worker-ring-rx": {
+      "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
+      "source_case": "test_ff_dpdk_if_send_multiseg",
+      "adaptation": "Ker-specific same-process SP/SC worker extension motivated by the pinned multisegment TX case. Worker A exports UDP/TCP chains to a DPDK ring; a distinct EAL worker B uses its own packet pool, skb context, device, and actual worker RX poll to classify and validate the packets. Pool pressure retains the FIFO head for retry. Lifecycle changes require external quiescence. The upstream case exercises F-Stack TX; this does not claim RSS steering, multiprocess rings, NIC I/O, or F-Stack RX."
     }
   }
 }

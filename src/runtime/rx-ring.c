@@ -36,7 +36,7 @@ int ker_rx_ring_init(struct ker_rx_ring *rx, struct ker_tx_ring *ring,
         return -ENOSPC;
     if (rx->ring || rx->device || rx->runtime || rx->pending) return -EALREADY;
     unsigned int lcore = rte_lcore_id();
-    if (lcore == LCORE_ID_ANY || ring->owner_lcore != lcore || device->lcore != lcore ||
+    if (lcore == LCORE_ID_ANY || ring->owner_lcore == LCORE_ID_ANY || device->lcore != lcore ||
         runtime->lcore != lcore || device->context->lcore != lcore ||
         runtime->context != device->context)
         return -EXDEV;
