@@ -31,7 +31,7 @@ int ker_receive_runtime_cleanup(struct ker_receive_runtime *runtime)
 {
     int error = runtime_valid(runtime);
     if (error) return error;
-    if (runtime->dispatching || runtime->live) return -EBUSY;
+    if (runtime->dispatching || runtime->live || runtime->rx_ring_live) return -EBUSY;
     runtime->context->receive_live--;
     *runtime = (struct ker_receive_runtime){0};
     return 0;

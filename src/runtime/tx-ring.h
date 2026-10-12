@@ -7,6 +7,7 @@ struct rte_ring;
 struct ker_tx_ring {
     struct rte_ring *ring;
     unsigned int owner_lcore;
+    unsigned int consumers;
 };
 
 /* Initialize ring to zero. Capacity is exact and bounded to 1..65535. The
@@ -17,11 +18,13 @@ int ker_tx_ring_init(struct ker_tx_ring *, const char *name,
 /* Compatible with ker_tx_export_sink_fn: zero transfers the whole chain;
  * a full ring returns -EAGAIN and accepts nothing. */
 int ker_tx_ring_sink(struct rte_mbuf *, void *);
-/* A single consumer may call take, sequentially, from any thread. Returns
- * one with ownership, zero when empty; all other results preserve *result. */
+/* A single consumer may call take, sequentially, from any thread while no RX
+ * adapter is attached. Returns one with ownership, zero when empty; all other
+ * results preserve *result. */
 int ker_tx_ring_take(struct ker_tx_ring *, struct rte_mbuf **result);
 /* Owner-lcore only. Producer, consumer, and sink borrowers must be quiescent;
- * cleanup requires an empty ring and never discards queued chains. */
+ * attached RX adapters block cleanup. Cleanup requires an empty ring and
+ * never discards queued chains. */
 int ker_tx_ring_cleanup(struct ker_tx_ring *);
 
 #endif

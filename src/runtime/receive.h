@@ -16,6 +16,7 @@ struct ker_receive_runtime {
     struct ker_skb_context *context;
     unsigned int lcore;
     unsigned int live;
+    unsigned int rx_ring_live;
     unsigned int delivered;
     int callback_error;
     bool initialized;

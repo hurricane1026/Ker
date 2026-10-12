@@ -167,6 +167,11 @@
       "source_case": "test_ff_dpdk_if_send_multiseg",
       "adaptation": "Ker-specific application-ring transport extension motivated by the pinned multisegment TX case. The worker exporter submits whole copied chains to an exact-capacity DPDK ring configured for one producer and one consumer; a ring-full result preserves the original skb for retry, while the consumer validates and drains accepted chains through Ker's existing Ethernet copy/classify and worker transport receive path. The upstream test exercises F-Stack TX. This does not claim an ethdev, NIC/RSS, multi-process ring, or F-Stack TX integration."
     },
+    "rx-ring-drain": {
+      "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
+      "source_case": "test_ff_dpdk_if_send_multiseg",
+      "adaptation": "Ker-specific worker RX extension motivated by the pinned multisegment TX/ring drain path. One attached consumer copies whole direct DPDK chains into owned skbs, invokes the existing Ethernet classifier and protocol dispatcher, and retains a popped chain across allocation pressure for retry. This is not F-Stack RX, an ethdev/NIC/RSS path, NAPI polling, multi-process sharing, or socket delivery."
+    },
     "fstack-chain-software-checksum": {
       "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
       "source_case": ["test_ff_dpdk_if_send_udp_csum", "test_ff_dpdk_if_send_tcp_csum"],
