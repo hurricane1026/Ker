@@ -187,6 +187,38 @@ static void failure_vectors(void)
         &sentinel) == -ESHUTDOWN);
     native_address->dead = 0;
 
+    /* Broken address associations are shutdown errors, distinct from bad API
+     * arguments and live-but-unsupported address profiles. */
+    struct in_device *saved_native = address.native;
+    struct ker_eth_device *saved_device = address.device;
+    address.native = NULL;
+    CHECK(ker_udp_ipv4_create_configured(&address, destination_mac, destination_ip,
+        source_port, destination_port, 64, NULL, 0, payload, sizeof(payload),
+        &sentinel) == -ESHUTDOWN);
+    address.native = saved_native;
+    address.device = NULL;
+    CHECK(ker_udp_ipv4_create_configured(&address, destination_mac, destination_ip,
+        source_port, destination_port, 64, NULL, 0, payload, sizeof(payload),
+        &sentinel) == -ESHUTDOWN);
+    address.device = saved_device;
+
+    struct in_ifaddr *saved_ifa_list = native_address->ifa_list;
+    native_address->ifa_list = NULL;
+    CHECK(ker_udp_ipv4_create_configured(&address, destination_mac, destination_ip,
+        source_port, destination_port, 64, NULL, 0, payload, sizeof(payload),
+        &sentinel) == -ESHUTDOWN);
+    native_address->ifa_list = saved_ifa_list;
+    struct in_ifaddr *ifa = native_address->ifa_list;
+    struct in_device wrong_address = {0};
+    struct in_device *saved_ifa_dev = ifa->ifa_dev;
+    ifa->ifa_dev = &wrong_address;
+    CHECK(ker_udp_ipv4_create_configured(&address, destination_mac, destination_ip,
+        source_port, destination_port, 64, NULL, 0, payload, sizeof(payload),
+        &sentinel) == -ESHUTDOWN);
+    ifa->ifa_dev = saved_ifa_dev;
+    CHECK(sentinel == (void *)(uintptr_t)0x1234 && context.live == 0 &&
+        rte_mempool_avail_count(pool.mbufs) == free_before);
+
     ker_memory_fail_after(0);
     CHECK(ker_udp_ipv4_create_configured_fields(&address, destination_mac,
         destination_ip, source_port, destination_port, 64, &good, NULL, 0,

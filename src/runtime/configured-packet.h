@@ -18,8 +18,10 @@ static inline int ker_configured_packet_source_snapshot(
     const unsigned char destination_mac[ETH_ALEN],
     struct ker_configured_packet_source *snapshot)
 {
-    if (!address || !address->native || !address->device || !destination_mac || !snapshot)
+    if (!address || !destination_mac || !snapshot)
         return -EINVAL;
+    if (!address->native || !address->device)
+        return -ESHUTDOWN;
     struct ker_eth_device *device = address->device;
     if (!device->native || !device->context || !device->context->descriptors)
         return -ESHUTDOWN;
@@ -36,8 +38,9 @@ static inline int ker_configured_packet_source_snapshot(
         return -ENOTSUP;
 
     struct in_ifaddr *ifa = native_address->ifa_list;
-    if (!ifa || ifa->ifa_next || ifa->ifa_dev != native_address ||
-        !(ifa->ifa_flags & IFA_F_PERMANENT) || !ifa->ifa_local ||
+    if (!ifa || ifa->ifa_dev != native_address)
+        return -ESHUTDOWN;
+    if (ifa->ifa_next || !(ifa->ifa_flags & IFA_F_PERMANENT) || !ifa->ifa_local ||
         ifa->ifa_address != ifa->ifa_local)
         return -ENOTSUP;
 
