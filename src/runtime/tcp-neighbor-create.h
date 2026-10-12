@@ -25,4 +25,12 @@ int ker_tcp_ipv4_create_neighbor_headers(struct ker_neighbor_table *table,
     uint8_t ttl, const void *ip_options, unsigned int ip_options_length,
     const void *tcp_options, unsigned int tcp_options_length, const void *payload,
     unsigned int payload_length, struct sk_buff **result);
+/* As above with a required copied IPv4 profile, validated before lookup. */
+int ker_tcp_ipv4_create_neighbor_fields(struct ker_neighbor_table *table,
+    __be32 destination_ip, __be16 source_port, __be16 destination_port,
+    __be32 sequence, __be32 acknowledgment, __be16 window, uint8_t flags,
+    uint8_t ttl, const struct ker_ipv4_header_fields *fields,
+    const void *ip_options, unsigned int ip_options_length,
+    const void *tcp_options, unsigned int tcp_options_length,
+    const void *payload, unsigned int payload_length, struct sk_buff **result);
 #endif

@@ -34,7 +34,8 @@ static int icmp_echo_create_fields(struct ker_skb_context *context,
     int fields_error = ker_ipv4_header_fields_validate(fields);
     if (fields_error)
         return fields_error;
-    const struct ker_ipv4_header_fields field_snapshot = *fields;
+    const struct ker_ipv4_header_fields field_snapshot =
+        ker_ipv4_header_fields_snapshot(fields);
     unsigned int ip_header_length = IP_BASE + ip_options_length;
     unsigned int icmp_length = (unsigned int)icmp_length_wide;
     unsigned int ip_length = (unsigned int)ip_length_wide;

@@ -42,7 +42,8 @@ static int tcp_create_fields(struct ker_skb_context *context,
     if (ip_length_wide > UINT16_MAX) return -EMSGSIZE;
     int fields_error = ker_ipv4_header_fields_validate(fields);
     if (fields_error) return fields_error;
-    const struct ker_ipv4_header_fields field_snapshot = *fields;
+    const struct ker_ipv4_header_fields field_snapshot =
+        ker_ipv4_header_fields_snapshot(fields);
     const unsigned int ip_header_length = (unsigned int)ip_header_wide;
     const unsigned int tcp_header_length = (unsigned int)tcp_header_wide;
     const unsigned int tcp_length = (unsigned int)tcp_length_wide;

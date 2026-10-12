@@ -209,7 +209,8 @@ if(KER_WITH_DPDK)
     add_test(NAME udp-ip-options COMMAND ker-udp-ip-options-test)
     set_tests_properties(udp-ip-options PROPERTIES TIMEOUT 30)
     add_executable(ker-udp-neighbor-create-test udp-neighbor-create.c)
-    target_link_libraries(ker-udp-neighbor-create-test PRIVATE ker_icmp_echo_neighbor_create_port ker_icmp_echo_create_port)
+    target_link_libraries(ker-udp-neighbor-create-test PRIVATE ker_icmp_echo_neighbor_create_port ker_icmp_echo_create_port
+        ker_tcp_neighbor_create_port ker_tcp_create_port)
     target_include_directories(ker-udp-neighbor-create-test PRIVATE "${PROJECT_SOURCE_DIR}/src")
     target_compile_definitions(ker-udp-neighbor-create-test PRIVATE _GNU_SOURCE)
     target_link_libraries(ker-udp-neighbor-create-test PRIVATE ker_neighbor_headers ker_address_port ker_neighbor_port

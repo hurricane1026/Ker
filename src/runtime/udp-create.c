@@ -37,7 +37,8 @@ static int udp_create_fields(struct ker_skb_context *context,
     int fields_error = ker_ipv4_header_fields_validate(fields);
     if (fields_error)
         return fields_error;
-    const struct ker_ipv4_header_fields field_snapshot = *fields;
+    const struct ker_ipv4_header_fields field_snapshot =
+        ker_ipv4_header_fields_snapshot(fields);
 
     const unsigned int udp_length = UDP_HEADER_LENGTH + payload_length;
     const unsigned int ip_length = (unsigned int)ip_length_wide;

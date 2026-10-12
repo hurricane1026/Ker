@@ -25,6 +25,16 @@ static inline int ker_ipv4_header_fields_validate(
     return 0;
 }
 
+static inline struct ker_ipv4_header_fields ker_ipv4_header_fields_snapshot(
+    const struct ker_ipv4_header_fields *fields)
+{
+    return (struct ker_ipv4_header_fields){
+        .ds_field = fields->ds_field,
+        .identification = fields->identification,
+        .frag_off = fields->frag_off
+    };
+}
+
 static inline void ker_ipv4_header_fields_apply(uint8_t *ip,
     const struct ker_ipv4_header_fields *fields)
 {
