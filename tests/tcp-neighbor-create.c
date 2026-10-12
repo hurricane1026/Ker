@@ -32,6 +32,8 @@ static __be16 source_port, destination_port, window;
 static unsigned char expected_payload[8];
 static unsigned int expected_payload_len;
 static unsigned char expected_options[40];
+static unsigned char expected_ip_options[40];
+static unsigned int expected_ip_options_len, expected_tcp_options_len;
 static struct neighbour *held_entry;
 static const unsigned char source_mac[6] = {2,1,2,3,4,5};
 static const unsigned char destination_mac[6] = {2,6,7,8,9,10};
@@ -64,10 +66,15 @@ static int tcp_message(const struct ker_transport_message *message, void *arg)
     CHECK(arg == &receiver && worker.polling && !worker.timers.polling);
     CHECK(message->protocol == KER_TRANSPORT_TCP);
     const struct ker_tcp_packet_view *tcp = &message->packet.tcp;
-    CHECK(tcp->tcp_header_length == 60 && tcp->payload_length == expected_payload_len);
+    CHECK(message->ipv4.header_length == 20 + expected_ip_options_len);
+    CHECK(message->ipv4.packet_length == message->ipv4.header_length + tcp->segment_length);
+    if (expected_ip_options_len)
+        CHECK(!memcmp(message->ipv4.header + 20, expected_ip_options, expected_ip_options_len));
+    CHECK(tcp->tcp_header_length == 20 + expected_tcp_options_len && tcp->payload_length == expected_payload_len);
     CHECK(tcp->source_port == source_port && tcp->destination_port == destination_port);
-    CHECK(tcp->header[12] == 0xf0 && tcp->header[13] == FIXED_FLAGS);
-    CHECK(!memcmp(tcp->header + 20, expected_options, sizeof(expected_options)));
+    CHECK(tcp->header[12] == (unsigned char)(((20 + expected_tcp_options_len) / 4) << 4) && tcp->header[13] == FIXED_FLAGS);
+    if (expected_tcp_options_len)
+        CHECK(!memcmp(tcp->header + 20, expected_options, expected_tcp_options_len));
     CHECK(!memcmp(tcp->payload, expected_payload, expected_payload_len));
     CHECK(!memcmp(tcp->header + 4, &sequence, 4) && !memcmp(tcp->header + 8, &acknowledgment, 4));
     ++received; return NET_RX_SUCCESS;
@@ -105,6 +112,15 @@ static struct sk_buff *create(const void *options, unsigned int olen, const void
     struct sk_buff *skb = NULL;
     CHECK(ker_tcp_ipv4_create_neighbor(&table, destination_ip, source_port, destination_port, sequence, acknowledgment, window, FIXED_FLAGS, 64,
         options, olen, payload, plen, &skb) == 0 && skb);
+    return skb;
+}
+static struct sk_buff *create_headers(const void *ip_options, unsigned int iplen,
+    const void *tcp_options, unsigned int tcplen, const void *payload, unsigned int plen)
+{
+    struct sk_buff *skb = NULL;
+    CHECK(ker_tcp_ipv4_create_neighbor_headers(&table, destination_ip, source_port,
+        destination_port, sequence, acknowledgment, window, FIXED_FLAGS, 64,
+        ip_options, iplen, tcp_options, tcplen, payload, plen, &skb) == 0 && skb);
     return skb;
 }
 static void verify(struct sk_buff *skb, const unsigned char *options, unsigned int olen,
@@ -146,6 +162,34 @@ static void invalid_inputs(void)
         sequence, acknowledgment, window, 0x20, 64, NULL, 0, payload,
         sizeof(payload), &out) == -ENOTSUP);
     CHECK(out == (void *)(uintptr_t)0x1234);
+    CHECK(ker_tcp_ipv4_create_neighbor_headers(&table, destination_ip, source_port,
+        destination_port, sequence, acknowledgment, window, FIXED_FLAGS, 64,
+        NULL, 4, options, 4, payload, sizeof(payload), &out) == -EINVAL);
+    CHECK(ker_tcp_ipv4_create_neighbor_headers(&table, destination_ip, source_port,
+        destination_port, sequence, acknowledgment, window, 0x20, 64,
+        NULL, 0, NULL, 0, payload, sizeof(payload), &out) == -ENOTSUP);
+    CHECK(ker_tcp_ipv4_create_neighbor_headers(&table, destination_ip, source_port,
+        destination_port, sequence, acknowledgment, window, FIXED_FLAGS, 64,
+        options, 3, options, 4, payload, sizeof(payload), &out) == -EINVAL);
+    CHECK(ker_tcp_ipv4_create_neighbor_headers(&table, destination_ip, source_port,
+        destination_port, sequence, acknowledgment, window, FIXED_FLAGS, 64,
+        options, 44, options, 0, payload, sizeof(payload), &out) == -EINVAL);
+    CHECK(ker_tcp_ipv4_create_neighbor_headers(&table, destination_ip, source_port,
+        destination_port, sequence, acknowledgment, window, FIXED_FLAGS, 64,
+        NULL, 0, NULL, 4, payload, sizeof(payload), &out) == -EINVAL);
+    CHECK(ker_tcp_ipv4_create_neighbor_headers(&table, destination_ip, source_port,
+        destination_port, sequence, acknowledgment, window, FIXED_FLAGS, 64,
+        NULL, 0, options, 3, payload, sizeof(payload), &out) == -EINVAL);
+    CHECK(ker_tcp_ipv4_create_neighbor_headers(&table, destination_ip, source_port,
+        destination_port, sequence, acknowledgment, window, FIXED_FLAGS, 64,
+        NULL, 0, options, 44, payload, sizeof(payload), &out) == -EINVAL);
+    CHECK(ker_tcp_ipv4_create_neighbor_headers(&table, destination_ip, source_port,
+        destination_port, sequence, acknowledgment, window, FIXED_FLAGS, 64,
+        NULL, 0, options, UINT_MAX, payload, sizeof(payload), &out) == -EINVAL);
+    CHECK(ker_tcp_ipv4_create_neighbor_headers(&table, destination_ip, source_port,
+        destination_port, sequence, acknowledgment, window, FIXED_FLAGS, 64,
+        options, 40, options, 40, payload, UINT_MAX, &out) == -EMSGSIZE);
+    CHECK(out == (void *)(uintptr_t)0x1234 && context.live == 0 && refcount_read(&held_entry->refcnt) == 2);
     CHECK(!memcmp(options, copy, sizeof(options)) && !memcmp(payload, payload_copy, sizeof(payload)) && context.live == 0);
     CHECK(refcount_read(&held_entry->refcnt) == 2);
 
@@ -169,6 +213,18 @@ static void invalid_inputs(void)
     ker_memory_fail_after(-1);
     CHECK(out == (void *)(uintptr_t)0x1234 && context.live == 0);
     CHECK(refcount_read(&held_entry->refcnt) == 2);
+    ker_memory_fail_after(0);
+    CHECK(ker_tcp_ipv4_create_neighbor_headers(&table, destination_ip, source_port,
+        destination_port, sequence, acknowledgment, window, FIXED_FLAGS, 64,
+        one_option, sizeof(one_option), one_option, sizeof(one_option), payload,
+        sizeof(payload), &out) == -ENOMEM);
+    ker_memory_fail_after(-1);
+    CHECK(out == (void *)(uintptr_t)0x1234 && context.live == 0 &&
+        refcount_read(&held_entry->refcnt) == 2);
+    struct sk_buff *headers_retry = create_headers(one_option, sizeof(one_option),
+        one_option, sizeof(one_option), payload, sizeof(payload));
+    CHECK(headers_retry && context.live == 1 && refcount_read(&held_entry->refcnt) == 2);
+    CHECK(ker_skb_free(headers_retry) == 0 && context.live == 0);
     struct sk_buff *retry = NULL;
     CHECK(ker_tcp_ipv4_create_neighbor(&table, destination_ip, source_port, destination_port, sequence, acknowledgment, window, FIXED_FLAGS, 64,
         one_option, sizeof(one_option), payload, sizeof(payload), &retry) == 0);
@@ -178,11 +234,23 @@ static void invalid_inputs(void)
     struct rte_mbuf *held[127]; unsigned int held_count = 0;
     while (held_count < 127 && (held[held_count] = ker_packet_alloc(&pool)) != NULL) held_count++;
     CHECK(held_count == 127);
+    CHECK(ker_tcp_ipv4_create_neighbor_headers(&table, destination_ip, source_port,
+        destination_port, sequence, acknowledgment, window, FIXED_FLAGS, 64,
+        one_option, sizeof(one_option), one_option, sizeof(one_option), payload,
+        sizeof(payload), &out) == -ENOMEM);
+    CHECK(out == (void *)(uintptr_t)0x1234 && context.live == 0 &&
+        refcount_read(&held_entry->refcnt) == 2);
     CHECK(ker_tcp_ipv4_create_neighbor(&table, destination_ip, source_port, destination_port, sequence, acknowledgment, window, FIXED_FLAGS, 64,
         one_option, sizeof(one_option), payload, sizeof(payload), &out) == -ENOMEM);
     CHECK(out == (void *)(uintptr_t)0x1234 && context.live == 0);
     CHECK(refcount_read(&held_entry->refcnt) == 2);
     ker_packet_free(held[--held_count]);
+    CHECK(ker_tcp_ipv4_create_neighbor_headers(&table, destination_ip, source_port,
+        destination_port, sequence, acknowledgment, window, FIXED_FLAGS, 64,
+        one_option, sizeof(one_option), one_option, sizeof(one_option), payload,
+        sizeof(payload), &retry) == 0);
+    CHECK(context.live == 1 && ker_skb_free(retry) == 0 && context.live == 0 &&
+        refcount_read(&held_entry->refcnt) == 2);
     CHECK(ker_tcp_ipv4_create_neighbor(&table, destination_ip, source_port, destination_port, sequence, acknowledgment, window, FIXED_FLAGS, 64,
         one_option, sizeof(one_option), payload, sizeof(payload), &retry) == 0);
     CHECK(context.live == 1 && ker_skb_free(retry) == 0 && context.live == 0);
@@ -193,8 +261,9 @@ static void invalid_inputs(void)
 static void *foreign_create(void *arg)
 {
     struct sk_buff **out = arg;
-    CHECK(ker_tcp_ipv4_create_neighbor(&table, destination_ip, source_port, destination_port,
-        sequence, acknowledgment, window, FIXED_FLAGS, 64, NULL, 0, NULL, 0, out) == -EXDEV);
+    CHECK(ker_tcp_ipv4_create_neighbor_headers(&table, destination_ip, source_port, destination_port,
+        sequence, acknowledgment, window, FIXED_FLAGS, 64, NULL, 0, NULL, 0,
+        NULL, 0, out) == -EXDEV);
     CHECK(*out == (void *)(uintptr_t)0x1234);
     return NULL;
 }
@@ -217,6 +286,46 @@ int main(void)
     struct ker_worker_ops ops = {.tx = ker_tx_export_poll, .rx = rx_poll, .arg = &tx};
     CHECK(ker_worker_init(&worker, &pool, &config, &ops) == 0);
 
+    /* The combined neighbor API snapshots the permanent mapping and releases
+     * its reference before the constructor allocates the skb. */
+    unsigned char options40_probe[40];
+    for (unsigned int i = 0; i < sizeof(options40_probe); ++i)
+        options40_probe[i] = (unsigned char)(0x83U - i * 2U);
+    unsigned char options40_tcp[40];
+    for (unsigned int i = 0; i < sizeof(options40_tcp); ++i)
+        options40_tcp[i] = (unsigned char)(i * 5U + 3U);
+    unsigned char combined_payload[3] = {0xa1, 0xb2, 0xc3};
+    CHECK(ker_neighbor_lookup(&table, destination_ip, &held_entry) == 0);
+    CHECK(refcount_read(&held_entry->refcnt) == 2);
+    struct sk_buff *combined = create_headers(options40_probe, sizeof(options40_probe),
+        options40_tcp, sizeof(options40_tcp), combined_payload, sizeof(combined_payload));
+    CHECK(refcount_read(&held_entry->refcnt) == 2 && context.live == 1);
+    const unsigned char *combined_ip = combined->data + ETH_HLEN;
+    const unsigned char *combined_tcp = combined_ip + 60;
+    CHECK(combined_ip[0] == 0x4f && combined_ip[9] == IPPROTO_TCP_TEST);
+    CHECK(sum16(combined_ip, 60) == 0xffff);
+    CHECK(!memcmp(combined_ip + 20, options40_probe, sizeof(options40_probe)));
+    CHECK(combined_tcp[12] == 0xf0 && !memcmp(combined_tcp + 20, options40_tcp, sizeof(options40_tcp)));
+    CHECK(tcp_oracle(combined_ip, combined_tcp, 63) == 0xffff);
+    CHECK(!memcmp(combined_tcp + 60, combined_payload, sizeof(combined_payload)));
+    memcpy(expected_ip_options, options40_probe, sizeof(expected_ip_options));
+    memcpy(expected_options, options40_tcp, sizeof(expected_options));
+    expected_ip_options_len = expected_tcp_options_len = 40;
+    memcpy(expected_payload, combined_payload, sizeof(combined_payload));
+    expected_payload_len = sizeof(combined_payload);
+    memset(options40_probe, 0, sizeof(options40_probe));
+    memset(options40_tcp, 0, sizeof(options40_tcp));
+    memset(combined_payload, 0, sizeof(combined_payload));
+    CHECK(ker_tx_export_enqueue(&tx, &combined) == 0 && !combined);
+    struct ker_worker_result combined_progress = {0};
+    CHECK(ker_worker_poll(&worker, worker.timers.now_ns, &combined_progress) == -EAGAIN);
+    CHECK(tx.pending && context.live == 1);
+    CHECK(ker_worker_poll(&worker, worker.timers.now_ns, &combined_progress) == 0);
+    CHECK(combined_progress.tx == 1 && combined_progress.rx == 1);
+    CHECK(received == 1 && context.live == 0 && refcount_read(&held_entry->refcnt) == 2);
+    expected_ip_options_len = expected_tcp_options_len = 0;
+    backpressure = 1;
+
     unsigned char options4[4] = {1,1,1,1};
     struct sk_buff *short_options = create(options4, sizeof(options4), NULL, 0);
     verify(short_options, options4, sizeof(options4), NULL, 0); CHECK(ker_skb_free(short_options) == 0);
@@ -231,7 +340,7 @@ int main(void)
     verify(max_options, options40, sizeof(options40), odd_payload, sizeof(odd_payload));
     CHECK(!memcmp(options40, options40_original, sizeof(options40)));
     CHECK(ker_skb_free(max_options) == 0);
-    memcpy(expected_options, options40, sizeof(expected_options));
+    memcpy(expected_options, options40, sizeof(expected_options)); expected_tcp_options_len = 40;
 
     /* The old API is exactly the zero-options specialization. */
     const unsigned char data[4] = {4,3,2,1};
@@ -253,7 +362,7 @@ int main(void)
     CHECK(ker_worker_poll(&worker, worker.timers.now_ns, &progress) == -EAGAIN && !progress.tx && !progress.rx);
     CHECK(tx.pending && context.live == 1 && !accepted);
     CHECK(ker_worker_poll(&worker, worker.timers.now_ns, &progress) == 0 && progress.tx == 1 && progress.rx == 1);
-    CHECK(sink_calls == 2 && received == 1 && context.live == 0 && !tx.packets && !accepted);
+    CHECK(sink_calls == 4 && received == 2 && context.live == 0 && !tx.packets && !accepted);
     unsigned char max_payload[65455]; memset(max_payload, 0x5a, sizeof(max_payload));
     struct sk_buff *sentinel = (void *)(uintptr_t)0x1234;
     CHECK(ker_tcp_ipv4_create_neighbor(&table, destination_ip, source_port, destination_port, sequence, acknowledgment, window, FIXED_FLAGS, 64,
@@ -262,7 +371,16 @@ int main(void)
     CHECK(ker_tcp_ipv4_create_neighbor(&table, destination_ip, source_port, destination_port, sequence, acknowledgment, window, FIXED_FLAGS, 64,
         options40_original, sizeof(options40_original), max_payload, sizeof(max_payload) + 1U, &sentinel) == -EMSGSIZE);
     CHECK(sentinel == (void *)(uintptr_t)0x1234 && context.live == 0);
-    CHECK(ker_neighbor_lookup(&table, destination_ip, &held_entry) == 0 && refcount_read(&held_entry->refcnt) == 2);
+    CHECK(ker_tcp_ipv4_create_neighbor_headers(&table, destination_ip, source_port,
+        destination_port, sequence, acknowledgment, window, FIXED_FLAGS, 64,
+        options40_original, 40, options40_original, 40, max_payload, 65415,
+        &sentinel) == -ENOSPC);
+    CHECK(ker_tcp_ipv4_create_neighbor_headers(&table, destination_ip, source_port,
+        destination_port, sequence, acknowledgment, window, FIXED_FLAGS, 64,
+        options40_original, 40, options40_original, 40, max_payload, 65416,
+        &sentinel) == -EMSGSIZE);
+    CHECK(sentinel == (void *)(uintptr_t)0x1234 && context.live == 0);
+    CHECK(refcount_read(&held_entry->refcnt) == 2);
     invalid_inputs();
     pthread_t foreign;
     CHECK(pthread_create(&foreign, NULL, foreign_create, &sentinel) == 0 && pthread_join(foreign, NULL) == 0);

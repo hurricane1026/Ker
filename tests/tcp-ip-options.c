@@ -143,6 +143,15 @@ static int rx_poll(void *arg, unsigned int budget)
     int taken = ker_tx_ring_take(&f.ring, &chain);
     if (!taken) return 0;
     CHECK(taken == 1 && chain && f.context.live == 1 - f.received);
+    uint32_t source_length = chain->pkt_len;
+    uint16_t segment_count = 0;
+    uint32_t linked_bytes = 0;
+    for (const struct rte_mbuf *part = chain; part; part = part->next) {
+        ++segment_count;
+        linked_bytes += part->data_len;
+    }
+    CHECK(segment_count == chain->nb_segs && segment_count > 1 &&
+        linked_bytes == source_length);
     char *padding = rte_pktmbuf_append(chain, 5);
     CHECK(padding);
     memset(padding, 0xa7, 5);

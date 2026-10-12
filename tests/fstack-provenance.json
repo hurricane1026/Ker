@@ -167,12 +167,12 @@
     "rx-ring-drain": {
       "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
       "source_case": "test_ff_dpdk_if_send_multiseg",
-      "adaptation": "Ker-specific worker RX extension motivated by the pinned multisegment TX/ring drain path. One attached consumer copies whole direct DPDK chains into owned skbs, invokes the existing Ethernet classifier and protocol dispatcher, and retains a popped chain across allocation pressure for retry. This is not F-Stack RX, an ethdev/NIC/RSS path, NAPI polling, multi-process sharing, or socket delivery."
+      "adaptation": "Ker-specific worker RX extension motivated by the pinned multisegment TX/ring drain path. One attached consumer copies whole direct DPDK chains into owned skbs, invokes the existing Ethernet classifier and protocol dispatcher, and retains a popped chain across allocation pressure for retry. Option-bearing UDP/TCP packets exercise FIFO preservation across allocation retry and explicit pending-chain cancellation. This is not F-Stack RX, an ethdev/NIC/RSS path, NAPI polling, multi-process sharing, or socket delivery."
     },
     "fstack-chain-software-checksum": {
       "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
       "source_case": ["test_ff_dpdk_if_send_udp_csum", "test_ff_dpdk_if_send_tcp_csum"],
-      "adaptation": "Ker-specific software-completion extension motivated by the pinned IPv4 UDP/TCP checksum TX cases: completes a linear CHECKSUM_PARTIAL skb with the existing Linux checksum semantics, copies it into direct DPDK segments (including a checksum field split across segment boundaries), then validates it through native Ethernet classification and the actual worker transport receiver. The upstream cases exercise TX checksum offload; this does not claim NIC or hardware offload, nonlinear Linux skb support, sockets, or TCP state."
+      "adaptation": "Ker-specific software-completion extension motivated by the pinned IPv4 UDP/TCP checksum TX cases: completes a linear CHECKSUM_PARTIAL skb with the existing Linux checksum semantics, copies it into direct DPDK segments (including a checksum field split across segment boundaries), then validates it through native Ethernet classification and the actual worker transport receiver. This regression set also places checksum start after variable IPv4 IHL/options for both UDP and TCP. The upstream cases exercise TX checksum offload; this does not claim NIC or hardware offload, nonlinear Linux skb support, sockets, or TCP state."
     },
     "tx-chain-software-checksum": {
       "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
@@ -190,7 +190,7 @@
     "fstack-concurrent-ring": {
       "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
       "source_case": ["test_ff_dpdk_if_send_multiseg", "test_ff_dpdk_if_send_udp_csum", "test_ff_dpdk_if_send_tcp_csum"],
-      "adaptation": "Ker-specific concurrent same-process SP/SC extension motivated by pinned F-Stack segmented TX and UDP/TCP checksum TX cases. A registered EAL producer and distinct registered EAL consumer overlap across 192 alternating UDP/TCP chains using a capacity-one DPDK ring; an independent wire-byte checksum oracle runs before enqueue and the actual consumer worker validates dispatch order and payloads. Initial backpressure is deterministic. This does not claim MPMC, multiprocess/RSS, NIC I/O, F-Stack RX, or upstream concurrency coverage."
+      "adaptation": "Ker-specific concurrent same-process SP/SC extension motivated by pinned F-Stack segmented TX and UDP/TCP checksum TX cases. A registered EAL producer and distinct registered EAL consumer overlap across 192 alternating UDP/TCP chains using a capacity-one DPDK ring; an independent wire-byte checksum oracle runs before enqueue and the actual consumer worker validates dispatch order and payloads. IPv4 and TCP option lengths vary across the 192 records and are checked byte-for-byte after receive. Initial backpressure is deterministic. This does not claim MPMC, multiprocess/RSS, NIC I/O, F-Stack RX, or upstream concurrency coverage."
     },
     "udp-ip-options": {
       "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
@@ -207,6 +207,16 @@
         "test_ff_dpdk_if_send_multiseg"
       ],
       "adaptation": "Ker-specific extension constructs Ethernet/IPv4/TCP packets with independently supplied opaque IPv4 and TCP option bytes, verifies both checksums with independent wire-byte oracles, and sends a segmented copy through the actual worker receive path. Existing constructors remain zero-IP-options wrappers. The pinned F-Stack cases motivate checksum and segmented-buffer coverage, not IPv4/TCP option semantics; no routing, source-route processing, TCP state, sockets or NIC transmission is claimed."
+    },
+    "udp-neighbor-ip-options": {
+      "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
+      "source_case": "test_ff_dpdk_if_send_udp_csum",
+      "adaptation": "Ker-specific neighbor-backed construction extension: copy opaque IPv4 options into a UDP packet derived from one configured local address/device and an existing permanent neighbor; verify variable-IHL and UDP checksums, reference release before allocation, rollback and worker RX retry. The pinned upstream case is TX checksum-only and does not cover neighbor selection or options. No ARP resolution, routing, source fallback, sockets or NIC transmission."
+    },
+    "tcp-neighbor-headers": {
+      "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
+      "source_case": "test_ff_dpdk_if_send_tcp_csum",
+      "adaptation": "Ker-specific combined neighbor-construction extension: copy independent opaque IPv4 and TCP options (including 40-byte areas), verify both checksums and lookup-reference release before allocation, then exercise worker TX/RX retry. The pinned upstream case is TX checksum-only and does not cover neighbor selection or options. No option interpretation, ARP resolution, routing, TCP state, sockets or NIC transmission."
     }
   }
 }

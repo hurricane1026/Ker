@@ -40,7 +40,13 @@ static const __be32 src_ip = (__be32)0x010200c0;
 static const __be32 dst_ip = (__be32)0x026433c6;
 static const __be16 src_port = (__be16)0x3412;
 static const __be16 dst_port = (__be16)0x7856;
-struct expected_message { bool tcp; const uint8_t *payload; size_t length; int status; };
+struct expected_message {
+    bool tcp;
+    const uint8_t *payload;
+    size_t length, ip_options_length, tcp_options_length;
+    uint8_t ip_options[40], tcp_options[40];
+    int status;
+};
 static struct expected_message expected[MAX_MESSAGES];
 static unsigned int expected_count, received;
 static bool test_reentry;
@@ -65,7 +71,8 @@ static int wildcard_receive(struct sk_buff *skb, struct ker_protocol_handler *ha
 static void expect(bool tcp, const uint8_t *payload, size_t length, int status)
 {
     CHECK(expected_count < MAX_MESSAGES);
-    expected[expected_count++] = (struct expected_message){tcp, payload, length, status};
+    expected[expected_count++] = (struct expected_message){
+        .tcp = tcp, .payload = payload, .length = length, .status = status};
 }
 
 static int receive_message(const struct ker_transport_message *message, void *arg)
@@ -74,7 +81,14 @@ static int receive_message(const struct ker_transport_message *message, void *ar
     CHECK(received < expected_count);
     struct expected_message *item = &expected[received];
     CHECK(message->protocol == (item->tcp ? KER_TRANSPORT_TCP : KER_TRANSPORT_UDP));
+    CHECK(message->ipv4.header_length == 20 + item->ip_options_length);
+    if (item->ip_options_length)
+        CHECK(!memcmp(message->ipv4.header + 20, item->ip_options, item->ip_options_length));
     if (item->tcp) {
+        CHECK(message->packet.tcp.tcp_header_length == 20 + item->tcp_options_length);
+        if (item->tcp_options_length)
+            CHECK(!memcmp(message->packet.tcp.header + 20, item->tcp_options,
+                item->tcp_options_length));
         CHECK(message->packet.tcp.source_port == src_port &&
             message->packet.tcp.destination_port == dst_port);
         CHECK(message->packet.tcp.payload_length == item->length &&
@@ -94,20 +108,24 @@ static int receive_message(const struct ker_transport_message *message, void *ar
     return item->status;
 }
 
-static struct sk_buff *make_packet(bool tcp, bool partial,
+static struct sk_buff *make_packet_options(bool tcp, bool partial,
+    const uint8_t *ip_options, unsigned int ip_options_length,
+    const uint8_t *tcp_options, unsigned int tcp_options_length,
     const uint8_t *payload, size_t length)
 {
     struct sk_buff *skb = NULL;
     if (tcp) {
-        CHECK(ker_tcp_ipv4_create(&context, src_mac, dst_mac, src_ip, dst_ip,
+        CHECK(ker_tcp_ipv4_create_headers(&context, src_mac, dst_mac, src_ip, dst_ip,
             src_port, dst_port, (__be32)0x10203040, (__be32)0x50607080,
-            (__be16)4096, 0x18, 61, payload, length, &skb) == 0);
+            (__be16)4096, 0x18, 61, ip_options, ip_options_length,
+            tcp_options, tcp_options_length, payload, length, &skb) == 0);
     } else {
-        CHECK(ker_udp_ipv4_create(&context, src_mac, dst_mac, src_ip, dst_ip,
-            src_port, dst_port, 63, payload, length, &skb) == 0);
+        CHECK(ker_udp_ipv4_create_ip_options(&context, src_mac, dst_mac, src_ip,
+            dst_ip, src_port, dst_port, 63, ip_options, ip_options_length,
+            payload, length, &skb) == 0);
     }
     if (partial) {
-        unsigned int start = ETH_HLEN + 20;
+        unsigned int start = ETH_HLEN + 20 + ip_options_length;
         unsigned int offset = tcp ? 16 : 6;
         unsigned int l4_length = skb->len - start;
         __wsum pseudo = csum_tcpudp_nofold(src_ip, dst_ip, l4_length,
@@ -121,6 +139,12 @@ static struct sk_buff *make_packet(bool tcp, bool partial,
     return skb;
 }
 
+static struct sk_buff *make_packet(bool tcp, bool partial,
+    const uint8_t *payload, size_t length)
+{
+    return make_packet_options(tcp, partial, NULL, 0, NULL, 0, payload, length);
+}
+
 static void stage(bool tcp, bool partial, const uint8_t *payload, size_t length,
     int status)
 {
@@ -128,6 +152,23 @@ static void stage(bool tcp, bool partial, const uint8_t *payload, size_t length,
     CHECK(ker_tx_export_enqueue(&tx, &skb) == 0 && !skb);
     CHECK(ker_tx_export_poll(&tx, 1) == 1);
     expect(tcp, payload, length, status);
+}
+
+static void stage_options(bool tcp, bool partial, const uint8_t *ip_options,
+    unsigned int ip_options_length, const uint8_t *tcp_options,
+    unsigned int tcp_options_length, const uint8_t *payload, size_t length,
+    int status)
+{
+    struct sk_buff *skb = make_packet_options(tcp, partial, ip_options,
+        ip_options_length, tcp_options, tcp_options_length, payload, length);
+    CHECK(ker_tx_export_enqueue(&tx, &skb) == 0 && !skb);
+    CHECK(ker_tx_export_poll(&tx, 1) == 1);
+    expect(tcp, payload, length, status);
+    struct expected_message *item = &expected[expected_count - 1];
+    item->ip_options_length = ip_options_length;
+    item->tcp_options_length = tcp_options_length;
+    if (ip_options_length) memcpy(item->ip_options, ip_options, ip_options_length);
+    if (tcp_options_length) memcpy(item->tcp_options, tcp_options, tcp_options_length);
 }
 
 static int worker_rx(void *arg, unsigned int budget)
@@ -303,13 +344,22 @@ static void allocation_retry_and_cancel(void)
 
     static const uint8_t retry_bytes[] = {0x61, 0x62, 0x63, 0x64, 0x65};
     static const uint8_t later_bytes[] = {0x66, 0x67, 0x68};
-    struct sk_buff *later_skb = make_packet(false, false, later_bytes,
+    static const uint8_t ip_options_a[4] = {1, 1, 0, 0};
+    static const uint8_t ip_options_b[4] = {0x94, 0x04, 0x12, 0x34};
+    static const uint8_t tcp_options_b[4] = {2, 4, 0x05, 0xb4};
+    struct sk_buff *later_skb = make_packet_options(true, false, ip_options_b,
+        sizeof(ip_options_b), tcp_options_b, sizeof(tcp_options_b), later_bytes,
         sizeof(later_bytes));
     struct rte_mbuf *later_chain = NULL;
     CHECK(ker_skb_to_mbuf_chain_copy(later_skb, 16, &later_chain) == 0);
     CHECK(ker_skb_free(later_skb) == 0);
-    stage(false, false, retry_bytes, sizeof(retry_bytes), NET_RX_SUCCESS);
-    expect(false, later_bytes, sizeof(later_bytes), NET_RX_SUCCESS);
+    stage_options(false, false, ip_options_a, sizeof(ip_options_a), NULL, 0,
+        retry_bytes, sizeof(retry_bytes), NET_RX_SUCCESS);
+    expect(true, later_bytes, sizeof(later_bytes), NET_RX_SUCCESS);
+    expected[expected_count - 1].ip_options_length = sizeof(ip_options_b);
+    expected[expected_count - 1].tcp_options_length = sizeof(tcp_options_b);
+    memcpy(expected[expected_count - 1].ip_options, ip_options_b, sizeof(ip_options_b));
+    memcpy(expected[expected_count - 1].tcp_options, tcp_options_b, sizeof(tcp_options_b));
     struct rte_mbuf *held[POOL_SIZE];
     unsigned int count;
     exhaust_mbuf_pool(held, &count);
@@ -327,9 +377,18 @@ static void allocation_retry_and_cancel(void)
     release_mbuf_pool(held, &count);
 
     static const uint8_t cancel_bytes[] = {0x71, 0x72};
-    stage(false, false, cancel_bytes, sizeof(cancel_bytes), NET_RX_SUCCESS);
+    static const uint8_t after_cancel_bytes[] = {0x73, 0x74, 0x75};
+    struct sk_buff *cancel_skb = make_packet_options(true, true, ip_options_b,
+        sizeof(ip_options_b), tcp_options_b, sizeof(tcp_options_b), cancel_bytes,
+        sizeof(cancel_bytes));
+    CHECK(ker_tx_export_enqueue(&tx, &cancel_skb) == 0 && !cancel_skb);
+    CHECK(ker_tx_export_poll(&tx, 1) == 1);
     exhaust_mbuf_pool(held, &count);
     CHECK(ker_rx_ring_poll(&rx, 1) == -ENOMEM && rx.pending);
+    CHECK(count >= 8);
+    for (unsigned int i = 0; i < 4; ++i) ker_packet_free(held[--count]);
+    stage_options(false, false, ip_options_a, sizeof(ip_options_a), NULL, 0,
+        after_cancel_bytes, sizeof(after_cancel_bytes), NET_RX_SUCCESS);
     CHECK(ker_rx_ring_cleanup(&rx) == -EBUSY);
     struct rte_mbuf *cancelled = NULL;
     CHECK(ker_rx_ring_cancel(&rx, &cancelled) == 1 && cancelled && !rx.pending);
@@ -337,11 +396,33 @@ static void allocation_retry_and_cancel(void)
     CHECK(ker_rx_ring_cancel(&rx, &sentinel) == 0 && sentinel == (void *)(uintptr_t)1);
     CHECK(cancelled->pkt_len >= ETH_HLEN);
     uint8_t payload_copy[sizeof(cancel_bytes)];
+    uint8_t header[ETH_HLEN + 60 + 60];
+    CHECK(cancelled->pkt_len >= ETH_HLEN + 20);
+    const void *part = rte_pktmbuf_read(cancelled, 0, ETH_HLEN + 20, header);
+    CHECK(part);
+    const uint8_t *wire = part;
+    unsigned int ihl = (wire[ETH_HLEN] & 0x0fU) * 4U;
+    CHECK(ihl >= 20 && ihl <= 60 && cancelled->pkt_len >= ETH_HLEN + ihl + 20);
+    part = rte_pktmbuf_read(cancelled, 0, ETH_HLEN + ihl + 20, header);
+    CHECK(part);
+    wire = part;
+    unsigned int thl = (wire[ETH_HLEN + ihl + 12] >> 4) * 4U;
+    CHECK(thl >= 20 && thl <= 60 &&
+        cancelled->pkt_len >= ETH_HLEN + ihl + thl + sizeof(payload_copy));
+    part = rte_pktmbuf_read(cancelled, 0,
+        ETH_HLEN + ihl + thl + sizeof(payload_copy), header);
+    CHECK(part);
+    wire = part;
+    CHECK(ihl == 24 && thl == 24 &&
+        !memcmp(wire + ETH_HLEN + 20, ip_options_b, sizeof(ip_options_b)) &&
+        !memcmp(wire + ETH_HLEN + ihl + 20, tcp_options_b, sizeof(tcp_options_b)));
     const void *payload = rte_pktmbuf_read(cancelled,
-        ETH_HLEN + 20 + 8, sizeof(payload_copy), payload_copy);
+        ETH_HLEN + ihl + thl, sizeof(payload_copy), payload_copy);
     CHECK(payload && !memcmp(payload, cancel_bytes, sizeof(payload_copy)));
     ker_packet_free(cancelled);
     release_mbuf_pool(held, &count);
+    CHECK(rte_ring_count(ring.ring) == 1 && ker_rx_ring_poll(&rx, 1) == 1 &&
+        !rx.pending && received == 9 && rte_ring_count(ring.ring) == 0);
 }
 
 static void permanent_drop(void)
@@ -475,7 +556,7 @@ int main(void)
     receive_flow_and_guards();
     allocation_retry_and_cancel();
     permanent_drop();
-    CHECK(received == 8);
+    CHECK(received == 9);
     cleanup_preserves_ring_queue();
     CHECK(ker_worker_cleanup(&worker) == 0);
     CHECK(ker_transport_receiver_unregister(&receiver) == 0);
