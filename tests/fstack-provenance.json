@@ -257,6 +257,21 @@
         "test_ff_dpdk_if_send_multiseg"
       ],
       "adaptation": "Ker-specific constructor extension motivated by pinned IPv4 UDP/TCP checksum and segmented-TX cases; those upstream cases do not test IPv4 DS/ID/fragment-field construction. Ker copies an explicit opaque DS byte and wire-order identification into UDP/TCP/ICMP echo frames, admits only fragment field zero or DF, and independently verifies IPv4 plus transport checksums. Permanent-neighbor variants reuse the configured source/neighbor snapshot path; a concurrent 192-packet three-protocol worker-ring case verifies field preservation. An RX-ring case carries a DF profile through exact software checksum completion, allocation-pressure cancellation and FIFO recovery. Legacy constructors remain byte-identical zero-profile wrappers. This does not implement DSCP/ECN policy, ID generation, fragmentation, PMTU, routing, or NIC behavior."
+    },
+    "arp-configured": {
+      "source_file": "tests/arp-configured.c",
+      "source_case": "RFC 826 section 2 ARP packet format (Ker-specific constructor extension)",
+      "adaptation": "Checks the 42-byte Ethernet/ARP request and reply formats against an independent wire-byte oracle, including explicit broadcast destination and zero target hardware address for requests, and verifies byte-equivalence with Ker's existing raw adapter. RFC 826 reference: https://datatracker.ietf.org/doc/html/rfc826. No neighbor lookup, routing, automatic reply, or NIC transmission is implied. The separate existing arp-receive test covers DAD, Ethernet padding, malformed packets, callback ownership, and copied-message lifetime; this batch adds a segmented padded-DAD regression through the unchanged decoder."
+    },
+    "arp-ring": {
+      "source_file": "tests/arp-ring.c",
+      "source_case": "test_ff_dpdk_if_send_multiseg",
+      "adaptation": "Ker-specific integration extension motivated by the pinned F-Stack segmented-ring TX case; upstream has no ARP test. Configured 42-byte requests/replies travel as real DPDK chains through worker TX export, a bounded ring, actual worker RX polling, Ethernet classification and the original ARP receiver. It checks retry ownership, existing scoped feedback rejection/acceptance, short-frame drops, and pool-pressure cancellation/FIFO recovery. This does not claim general ARP learning, automatic response, NIC/RSS, or F-Stack RX."
+    },
+    "arp-concurrent-ring": {
+      "source_file": "tests/arp-concurrent-ring.c",
+      "source_case": "test_ff_dpdk_if_send_multiseg",
+      "adaptation": "Ker-specific same-process SP/SC extension motivated by the pinned F-Stack segmented-ring TX case; upstream has no ARP test. Distinct configured request/reply frames cross a capacity-one ring between separate EAL workers; the consumer uses its own packet pool/context/device and actual worker RX dispatcher to verify all 192 records in FIFO order. This does not claim MPMC, multiprocess/RSS, NIC I/O, or a general ARP protocol stack."
     }
   }
 }
