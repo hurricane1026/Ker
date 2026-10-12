@@ -64,7 +64,8 @@ int ker_protocol_register(struct ker_receive_runtime *runtime, struct ker_protoc
     if (device && (!device->native || device->context != runtime->context)) return -EINVAL;
     if (device && device->lcore != runtime->lcore) return -EXDEV;
     if (runtime->live >= KER_RECEIVE_MAX_HANDLERS) return -ENOSPC;
-    if (device && device->receive_runtime && device->receive_runtime != runtime) return -EBUSY;
+    if (device && ((device->receive_runtime && device->receive_runtime != runtime) ||
+        (device->rx_ring_runtime && device->rx_ring_runtime != runtime))) return -EBUSY;
     if (device && device->protocol_live == UINT_MAX) return -EOVERFLOW;
     *handler = (struct ker_protocol_handler){.runtime = runtime, .device = device,
         .receive = receive, .arg = arg, .registered = true};
@@ -114,7 +115,8 @@ int ker_receive_dispatch(struct ker_receive_runtime *runtime, struct ker_eth_dev
     if (runtime->dispatching || ker_local_irq_disabled()) return -EBUSY;
     if (device->lcore != runtime->lcore) return -EXDEV;
     if (device->context != runtime->context ||
-        (device->receive_runtime && device->receive_runtime != runtime)) return -EINVAL;
+        (device->receive_runtime && device->receive_runtime != runtime) ||
+        (device->rx_ring_runtime && device->rx_ring_runtime != runtime)) return -EINVAL;
     struct sk_buff *skb = *packet;
     error = ker_skb_validate(skb, runtime->context);
     if (error) return error;

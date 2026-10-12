@@ -40,10 +40,12 @@ int ker_rx_ring_init(struct ker_rx_ring *rx, struct ker_tx_ring *ring,
         runtime->lcore != lcore || device->context->lcore != lcore ||
         runtime->context != device->context)
         return -EXDEV;
-    if (device->receive_runtime && device->receive_runtime != runtime) return -EBUSY;
+    if ((device->receive_runtime && device->receive_runtime != runtime) ||
+        (device->rx_ring_runtime && device->rx_ring_runtime != runtime)) return -EBUSY;
     if (ring->consumers || device->rx_ring_live || runtime->rx_ring_live) return -EBUSY;
     if (device->rx_ring_live == UINT_MAX || runtime->rx_ring_live == UINT_MAX)
         return -EOVERFLOW;
+    device->rx_ring_runtime = runtime;
     ring->consumers++;
     device->rx_ring_live++;
     runtime->rx_ring_live++;
@@ -122,7 +124,8 @@ int ker_rx_ring_cleanup(struct ker_rx_ring *rx)
     if (rx->polling || rx->runtime->dispatching) return -EBUSY;
     if (rx->pending) return -EBUSY;
     BUG_ON(!rx->ring->consumers || !rx->device->rx_ring_live ||
-           !rx->runtime->rx_ring_live);
+           !rx->runtime->rx_ring_live || rx->device->rx_ring_runtime != rx->runtime);
+    rx->device->rx_ring_runtime = NULL;
     rx->ring->consumers--;
     rx->device->rx_ring_live--;
     rx->runtime->rx_ring_live--;

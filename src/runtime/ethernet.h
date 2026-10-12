@@ -13,6 +13,7 @@ struct ker_eth_device {
     unsigned int protocol_handlers;
     unsigned int protocol_live; /* registrations and dispatch pin */
     unsigned int rx_ring_live; /* attached bounded ring consumers */
+    struct ker_receive_runtime *rx_ring_runtime; /* exclusive binding while RX ring attached */
     unsigned int napi_live; /* attached NAPI contexts pin this device */
 };
 int ker_eth_device_init(struct ker_eth_device *device, struct ker_skb_context *context,

@@ -29,6 +29,9 @@ static struct ker_rx_ring rx;
 static struct ker_tx_export tx;
 static struct ker_eth_device device;
 static struct ker_receive_runtime runtime;
+static struct ker_receive_runtime alternate_runtime;
+static struct ker_protocol_handler wildcard_handler;
+static struct ker_protocol_handler alternate_handler;
 static struct ker_transport_receiver receiver;
 static struct ker_worker worker;
 static const uint8_t src_mac[6] = {2, 1, 2, 3, 4, 5};
@@ -43,6 +46,21 @@ static unsigned int expected_count, received;
 static bool test_reentry;
 static int callback_reentry_result;
 static int callback_cleanup_result;
+
+struct wildcard_state { struct ker_receive_runtime *runtime; unsigned int calls; };
+static int wildcard_receive(struct sk_buff *skb, struct ker_protocol_handler *handler,
+    struct net_device *original, void *arg)
+{
+    struct wildcard_state *state = arg;
+    CHECK(handler && handler->runtime == state->runtime && !handler->device);
+    CHECK(original == device.native && skb->dev == device.native &&
+        skb->protocol == rte_cpu_to_be_16(ETH_P_IP));
+    struct ker_ipv4_packet_view view;
+    CHECK(ker_ipv4_packet_view_init(&context, skb, &view) == 0);
+    state->calls++;
+    CHECK(ker_skb_free(skb) == 0);
+    return NET_RX_SUCCESS;
+}
 
 static void expect(bool tcp, const uint8_t *payload, size_t length, int status)
 {
@@ -364,8 +382,42 @@ int main(void)
     CHECK(ker_tx_ring_init(&ring, "ker_rx_ring", 1, SOCKET_ID_ANY) == 0);
     CHECK(ker_eth_device_init(&device, &context, "rx0", 17, src_mac) == 0);
     CHECK(ker_receive_runtime_init(&runtime, &context) == 0);
+    CHECK(ker_receive_runtime_init(&alternate_runtime, &context) == 0);
+    struct wildcard_state wildcard_b = {.runtime = &alternate_runtime};
+    struct ker_rx_ring conflicting_rx = {0};
+    CHECK(ker_rx_ring_init(&conflicting_rx, &ring, &device, &runtime, 128) == 0);
+    CHECK(!device.receive_runtime && device.rx_ring_runtime == &runtime);
+    static const uint8_t conflict_payload[] = {0xd1, 0xd2};
+    struct sk_buff *raw_conflict = make_packet(false, false, conflict_payload,
+        sizeof(conflict_payload));
+    struct rte_mbuf *mbuf_conflict = NULL;
+    CHECK(ker_skb_to_mbuf(raw_conflict, &mbuf_conflict) == 0);
+    CHECK(ker_skb_free(raw_conflict) == 0);
+    struct sk_buff *classified_conflict = NULL;
+    CHECK(ker_eth_receive_copy_chain(&device, mbuf_conflict, 128,
+        &classified_conflict) == 0);
+    ker_packet_free(mbuf_conflict);
+    struct ker_receive_result conflict_result = {.handlers = 77, .status = 88};
+    CHECK(ker_receive_dispatch(&alternate_runtime, &device, &classified_conflict,
+        &conflict_result) == -EINVAL && classified_conflict &&
+        conflict_result.handlers == 77 && conflict_result.status == 88);
+    CHECK(ker_skb_free(classified_conflict) == 0);
+    CHECK(ker_protocol_register(&alternate_runtime, &alternate_handler, &device,
+        rte_cpu_to_be_16(ETH_P_IP), wildcard_receive, &wildcard_b) == -EBUSY);
+    CHECK(!alternate_handler.registered && !alternate_runtime.live &&
+        !device.receive_runtime && device.protocol_handlers == 0 &&
+        !device.native->ptype_specific.next && !device.native->ptype_specific.prev &&
+        ring.consumers == 1 &&
+        device.rx_ring_live == 1 && runtime.rx_ring_live == 1);
+    CHECK(ker_rx_ring_cleanup(&conflicting_rx) == 0);
+    CHECK(!device.rx_ring_runtime && !ring.consumers && !device.rx_ring_live &&
+        !runtime.rx_ring_live);
     CHECK(ker_transport_receiver_register(&receiver, &runtime, &device,
         receive_message, &receiver) == 0);
+    CHECK(ker_rx_ring_init(&conflicting_rx, &ring, &device, &alternate_runtime, 128) == -EBUSY);
+    CHECK(!conflicting_rx.ring && !ring.consumers && !device.rx_ring_live &&
+        !runtime.rx_ring_live && !alternate_runtime.rx_ring_live &&
+        device.receive_runtime == &runtime && !device.rx_ring_runtime);
 
     uint32_t backing = RTE_ALIGN_FLOOR(
         rte_pktmbuf_data_room_size(pool.mbufs), SMP_CACHE_BYTES);
@@ -426,14 +478,52 @@ int main(void)
     CHECK(received == 8);
     cleanup_preserves_ring_queue();
     CHECK(ker_worker_cleanup(&worker) == 0);
-    CHECK(ker_tx_export_cleanup(&tx) == 0);
     CHECK(ker_transport_receiver_unregister(&receiver) == 0);
+    CHECK(!device.receive_runtime && device.rx_ring_live == 1);
+
+    struct wildcard_state wildcard_a = {.runtime = &runtime};
+    CHECK(ker_protocol_register(&runtime, &wildcard_handler, NULL,
+        rte_cpu_to_be_16(ETH_P_IP), wildcard_receive, &wildcard_a) == 0);
+    static const uint8_t wildcard_payload[] = {0xa1, 0xb2, 0xc3};
+    struct sk_buff *wildcard_packet = make_packet(false, false, wildcard_payload,
+        sizeof(wildcard_payload));
+    CHECK(ker_tx_export_enqueue(&tx, &wildcard_packet) == 0 && !wildcard_packet);
+    CHECK(ker_tx_export_poll(&tx, 1) == 1);
+    CHECK(ker_rx_ring_poll(&rx, 1) == 1 && wildcard_a.calls == 1);
+    CHECK(ker_protocol_unregister(&wildcard_handler) == 0);
+
+    CHECK(ker_protocol_register(&alternate_runtime, &alternate_handler, &device,
+        rte_cpu_to_be_16(ETH_P_IP), wildcard_receive, &wildcard_b) == -EBUSY);
+    CHECK(!alternate_handler.registered && alternate_runtime.live == 0 &&
+        !device.receive_runtime && device.rx_ring_runtime == &runtime &&
+        device.protocol_handlers == 0 && list_empty(&device.native->ptype_specific));
+    CHECK(ker_tx_export_cleanup(&tx) == 0);
     CHECK(ker_receive_runtime_cleanup(&runtime) == -EBUSY);
     CHECK(ker_eth_device_cleanup(&device) == -EBUSY);
     CHECK(ker_tx_ring_cleanup(&ring) == -EBUSY);
     CHECK(ker_rx_ring_cleanup(&rx) == 0);
-    CHECK(!ring.consumers && !device.rx_ring_live && !runtime.rx_ring_live);
+    CHECK(!ring.consumers && !device.rx_ring_live && !runtime.rx_ring_live &&
+        !device.rx_ring_runtime);
+
+    CHECK(ker_protocol_register(&alternate_runtime, &alternate_handler, &device,
+        rte_cpu_to_be_16(ETH_P_IP), wildcard_receive, &wildcard_b) == 0);
+    CHECK(device.receive_runtime == &alternate_runtime);
+    CHECK(ker_rx_ring_init(&conflicting_rx, &ring, &device, &runtime, 128) == -EBUSY);
+    CHECK(!conflicting_rx.ring && !ring.consumers && !device.rx_ring_live &&
+        !runtime.rx_ring_live && !device.rx_ring_runtime);
+    CHECK(ker_protocol_unregister(&alternate_handler) == 0);
+
+    CHECK(ker_transport_receiver_register(&receiver, &runtime, &device,
+        receive_message, &receiver) == 0);
+    CHECK(ker_rx_ring_init(&rx, &ring, &device, &runtime, 128) == 0);
+    CHECK(ker_rx_ring_cleanup(&rx) == 0);
+    CHECK(device.receive_runtime == &runtime && !device.rx_ring_runtime);
+    CHECK(ker_protocol_register(&alternate_runtime, &alternate_handler, &device,
+        rte_cpu_to_be_16(ETH_P_IP), wildcard_receive, &wildcard_b) == -EBUSY);
+    CHECK(!alternate_handler.registered && device.receive_runtime == &runtime);
+    CHECK(ker_transport_receiver_unregister(&receiver) == 0);
     CHECK(ker_receive_runtime_cleanup(&runtime) == 0);
+    CHECK(ker_receive_runtime_cleanup(&alternate_runtime) == 0);
     CHECK(ker_eth_device_cleanup(&device) == 0);
     CHECK(ker_tx_ring_cleanup(&ring) == 0);
     CHECK(ker_skb_context_cleanup(&context) == 0);
