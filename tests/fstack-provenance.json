@@ -116,10 +116,7 @@
     },
     "transport-receive": {
       "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
-      "source_case": [
-        "test_ff_dpdk_if_send_udp_csum",
-        "test_ff_dpdk_if_send_tcp_csum"
-      ],
+      "source_case": ["test_ff_dpdk_if_send_udp_csum", "test_ff_dpdk_if_send_tcp_csum"],
       "adaptation": "Ker-specific worker RX integration extension motivated by upstream UDP/TCP TX checksum-offload cases; neither upstream case tests ingress. A registered ETH_P_IP handler validates and synchronously exposes existing immutable UDP/TCP packet views, consumes its skb reference on every path, and fails closed when protocol fanout shares the skb descriptor reference. This is not socket delivery, routing, fragment reassembly, TCP state or NIC receive support."
     },
     "udp-create": {
@@ -179,7 +176,10 @@
     },
     "tx-chain-software-checksum": {
       "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
-      "source_case": ["test_ff_dpdk_if_send_udp_csum", "test_ff_dpdk_if_send_tcp_csum"],
+      "source_case": [
+        "test_ff_dpdk_if_send_udp_csum",
+        "test_ff_dpdk_if_send_tcp_csum"
+      ],
       "adaptation": "Ker-specific worker TX extension motivated by pinned UDP/TCP TX checksum cases. An explicit exporter mode admits CHECKSUM_NONE and supported Internet CHECKSUM_PARTIAL packets, completes partial checksums in a private direct-chain copy, and preserves the original skb on sink rejection for retry. Tests verify checksum bytes through the actual worker receive path. The upstream cases exercise offload; this does not claim NIC/hardware offload, nonlinear Linux skb support, sockets, or TCP state."
     },
     "cross-worker-ring-rx": {
@@ -191,6 +191,14 @@
       "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
       "source_case": ["test_ff_dpdk_if_send_multiseg", "test_ff_dpdk_if_send_udp_csum", "test_ff_dpdk_if_send_tcp_csum"],
       "adaptation": "Ker-specific concurrent same-process SP/SC extension motivated by pinned F-Stack segmented TX and UDP/TCP checksum TX cases. A registered EAL producer and distinct registered EAL consumer overlap across 192 alternating UDP/TCP chains using a capacity-one DPDK ring; an independent wire-byte checksum oracle runs before enqueue and the actual consumer worker validates dispatch order and payloads. Initial backpressure is deterministic. This does not claim MPMC, multiprocess/RSS, NIC I/O, F-Stack RX, or upstream concurrency coverage."
+    },
+    "udp-ip-options": {
+      "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
+      "source_case": [
+        "test_ff_dpdk_if_send_udp_csum",
+        "test_ff_dpdk_if_send_multiseg"
+      ],
+      "adaptation": "Ker-specific extension: construct explicit Ethernet/IPv4/UDP packets with opaque copied IPv4 options, validate the variable-IHL IPv4 and UDP checksums, then export a segmented copy through the actual worker receive path. The pinned cases motivate checksum and segmented-buffer coverage; they do not test IPv4 options semantics. No routing, source-route processing, socket delivery or NIC transmission is claimed."
     }
   }
 }

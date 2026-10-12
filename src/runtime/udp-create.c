@@ -4,9 +4,9 @@
 #include <errno.h>
 
 #define KER_UDP_CREATE_HEADROOM 128U
-#define IPV4_HEADER_LENGTH 20U
+#define IPV4_BASE_HEADER_LENGTH 20U
 #define UDP_HEADER_LENGTH 8U
-#define MAX_UDP_PAYLOAD (UINT16_MAX - IPV4_HEADER_LENGTH - UDP_HEADER_LENGTH)
+#define MAX_IPV4_OPTIONS_LENGTH 40U
 #define KER_IPPROTO_UDP 17U
 
 static void put_be16(unsigned char *p, unsigned int value)
@@ -15,20 +15,27 @@ static void put_be16(unsigned char *p, unsigned int value)
     p[1] = (unsigned char)value;
 }
 
-int ker_udp_ipv4_create(struct ker_skb_context *context,
+int ker_udp_ipv4_create_ip_options(struct ker_skb_context *context,
     const unsigned char source_mac[ETH_ALEN], const unsigned char destination_mac[ETH_ALEN],
     __be32 source_ip, __be32 destination_ip, __be16 source_port,
-    __be16 destination_port, uint8_t ttl, const void *payload,
-    unsigned int payload_length, struct sk_buff **result)
+    __be16 destination_port, uint8_t ttl, const void *options,
+    unsigned int options_length, const void *payload, unsigned int payload_length,
+    struct sk_buff **result)
 {
     if (!context || !source_mac || !destination_mac || !result || !ttl ||
-        (!payload && payload_length))
+        (!options && options_length) || (!payload && payload_length))
         return -EINVAL;
-    if (payload_length > MAX_UDP_PAYLOAD)
+    if (options_length > MAX_IPV4_OPTIONS_LENGTH || (options_length & 3U))
+        return -EINVAL;
+
+    const unsigned int ip_header_length = IPV4_BASE_HEADER_LENGTH + options_length;
+    const uint64_t ip_length_wide = (uint64_t)ip_header_length + UDP_HEADER_LENGTH +
+        payload_length;
+    if (ip_length_wide > UINT16_MAX)
         return -EMSGSIZE;
 
     const unsigned int udp_length = UDP_HEADER_LENGTH + payload_length;
-    const unsigned int ip_length = IPV4_HEADER_LENGTH + udp_length;
+    const unsigned int ip_length = (unsigned int)ip_length_wide;
     const unsigned int frame_length = ETH_HLEN + ip_length;
     struct sk_buff *skb = NULL;
     int error = ker_skb_alloc(context, frame_length, KER_UDP_CREATE_HEADROOM, &skb);
@@ -45,17 +52,19 @@ int ker_udp_ipv4_create(struct ker_skb_context *context,
     memcpy(frame + ETH_ALEN, source_mac, ETH_ALEN);
     put_be16(frame + 12, ETH_P_IP);
     unsigned char *ip = frame + ETH_HLEN;
-    memset(ip, 0, IPV4_HEADER_LENGTH);
-    ip[0] = 0x45;
+    memset(ip, 0, ip_header_length);
+    ip[0] = (unsigned char)(0x40U | (ip_header_length / 4U));
     put_be16(ip + 2, ip_length);
     ip[8] = ttl;
     ip[9] = KER_IPPROTO_UDP;
     memcpy(ip + 12, &source_ip, sizeof(source_ip));
     memcpy(ip + 16, &destination_ip, sizeof(destination_ip));
-    __sum16 ip_checksum = csum_fold(csum_partial(ip, IPV4_HEADER_LENGTH, 0));
+    if (options_length)
+        memcpy(ip + IPV4_BASE_HEADER_LENGTH, options, options_length);
+    __sum16 ip_checksum = csum_fold(csum_partial(ip, (int)ip_header_length, 0));
     memcpy(ip + 10, &ip_checksum, sizeof(ip_checksum));
 
-    unsigned char *udp = ip + IPV4_HEADER_LENGTH;
+    unsigned char *udp = ip + ip_header_length;
     memset(udp, 0, UDP_HEADER_LENGTH);
     memcpy(udp, &source_port, sizeof(source_port));
     memcpy(udp + 2, &destination_port, sizeof(destination_port));
@@ -72,9 +81,20 @@ int ker_udp_ipv4_create(struct ker_skb_context *context,
     skb_reset_mac_header(skb);
     skb_reset_network_header(skb);
     skb->network_header += ETH_HLEN;
-    skb->transport_header = skb_headroom(skb) + ETH_HLEN + IPV4_HEADER_LENGTH;
+    skb->transport_header = skb_headroom(skb) + ETH_HLEN + ip_header_length;
     skb->mac_len = ETH_HLEN;
     skb->protocol = rte_cpu_to_be_16(ETH_P_IP);
     *result = skb;
     return 0;
+}
+
+int ker_udp_ipv4_create(struct ker_skb_context *context,
+    const unsigned char source_mac[ETH_ALEN], const unsigned char destination_mac[ETH_ALEN],
+    __be32 source_ip, __be32 destination_ip, __be16 source_port,
+    __be16 destination_port, uint8_t ttl, const void *payload,
+    unsigned int payload_length, struct sk_buff **result)
+{
+    return ker_udp_ipv4_create_ip_options(context, source_mac, destination_mac,
+        source_ip, destination_ip, source_port, destination_port, ttl, NULL, 0,
+        payload, payload_length, result);
 }
