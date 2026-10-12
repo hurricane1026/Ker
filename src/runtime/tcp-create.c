@@ -17,11 +17,12 @@ static void put_be16(unsigned char *p, unsigned int value)
     p[1] = (unsigned char)value;
 }
 
-int ker_tcp_ipv4_create_headers(struct ker_skb_context *context,
+static int tcp_create_fields(struct ker_skb_context *context,
     const unsigned char source_mac[ETH_ALEN], const unsigned char destination_mac[ETH_ALEN],
     __be32 source_ip, __be32 destination_ip, __be16 source_port,
     __be16 destination_port, __be32 sequence, __be32 acknowledgment,
-    __be16 window, uint8_t flags, uint8_t ttl, const void *ip_options,
+    __be16 window, uint8_t flags, uint8_t ttl, const struct ker_ipv4_header_fields *fields,
+    const void *ip_options,
     unsigned int ip_options_length, const void *tcp_options,
     unsigned int tcp_options_length, const void *payload,
     unsigned int payload_length, struct sk_buff **result)
@@ -39,6 +40,8 @@ int ker_tcp_ipv4_create_headers(struct ker_skb_context *context,
     const uint64_t tcp_length_wide = tcp_header_wide + payload_length;
     const uint64_t ip_length_wide = ip_header_wide + tcp_length_wide;
     if (ip_length_wide > UINT16_MAX) return -EMSGSIZE;
+    int fields_error = ker_ipv4_header_fields_validate(fields);
+    if (fields_error) return fields_error;
     const unsigned int ip_header_length = (unsigned int)ip_header_wide;
     const unsigned int tcp_header_length = (unsigned int)tcp_header_wide;
     const unsigned int tcp_length = (unsigned int)tcp_length_wide;
@@ -60,6 +63,7 @@ int ker_tcp_ipv4_create_headers(struct ker_skb_context *context,
     unsigned char *ip = frame + ETH_HLEN;
     memset(ip, 0, ip_header_length);
     ip[0] = (unsigned char)(0x40U | (ip_header_length / 4U));
+    ker_ipv4_header_fields_apply(ip, fields);
     put_be16(ip + 2, ip_length);
     ip[8] = ttl;
     ip[9] = KER_IPPROTO_TCP;
@@ -96,6 +100,38 @@ int ker_tcp_ipv4_create_headers(struct ker_skb_context *context,
     skb->protocol = rte_cpu_to_be_16(ETH_P_IP);
     *result = skb;
     return 0;
+}
+
+int ker_tcp_ipv4_create_fields(struct ker_skb_context *context,
+    const unsigned char source_mac[ETH_ALEN], const unsigned char destination_mac[ETH_ALEN],
+    __be32 source_ip, __be32 destination_ip, __be16 source_port,
+    __be16 destination_port, __be32 sequence, __be32 acknowledgment,
+    __be16 window, uint8_t flags, uint8_t ttl,
+    const struct ker_ipv4_header_fields *fields, const void *ip_options,
+    unsigned int ip_options_length, const void *tcp_options,
+    unsigned int tcp_options_length, const void *payload,
+    unsigned int payload_length, struct sk_buff **result)
+{
+    return tcp_create_fields(context, source_mac, destination_mac, source_ip,
+        destination_ip, source_port, destination_port, sequence, acknowledgment,
+        window, flags, ttl, fields, ip_options, ip_options_length, tcp_options,
+        tcp_options_length, payload, payload_length, result);
+}
+
+int ker_tcp_ipv4_create_headers(struct ker_skb_context *context,
+    const unsigned char source_mac[ETH_ALEN], const unsigned char destination_mac[ETH_ALEN],
+    __be32 source_ip, __be32 destination_ip, __be16 source_port,
+    __be16 destination_port, __be32 sequence, __be32 acknowledgment,
+    __be16 window, uint8_t flags, uint8_t ttl, const void *ip_options,
+    unsigned int ip_options_length, const void *tcp_options,
+    unsigned int tcp_options_length, const void *payload,
+    unsigned int payload_length, struct sk_buff **result)
+{
+    const struct ker_ipv4_header_fields fields = {0};
+    return tcp_create_fields(context, source_mac, destination_mac, source_ip,
+        destination_ip, source_port, destination_port, sequence, acknowledgment,
+        window, flags, ttl, &fields, ip_options, ip_options_length, tcp_options,
+        tcp_options_length, payload, payload_length, result);
 }
 
 int ker_tcp_ipv4_create_options(struct ker_skb_context *context,

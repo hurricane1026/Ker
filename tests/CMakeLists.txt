@@ -11,6 +11,14 @@ target_link_libraries(ker-refcount-test PRIVATE ker_port_headers ker_linux_port 
 add_test(NAME refcount COMMAND ker-refcount-test)
 
 if(KER_WITH_DPDK)
+    add_executable(ker-ipv4-fields-test ipv4-fields.c)
+    target_include_directories(ker-ipv4-fields-test PRIVATE "${PROJECT_SOURCE_DIR}/src")
+    target_compile_definitions(ker-ipv4-fields-test PRIVATE _GNU_SOURCE)
+    target_link_libraries(ker-ipv4-fields-test PRIVATE ker_skb_headers ker_eth_headers
+        ker_udp_create_port ker_tcp_create_port ker_icmp_echo_create_port
+        ker_linux_port ker_dpdk_port ker_skb_port PkgConfig::DPDK Threads::Threads)
+    add_test(NAME ipv4-fields COMMAND ker-ipv4-fields-test)
+    set_tests_properties(ipv4-fields PROPERTIES TIMEOUT 30)
     add_executable(ker-dpdk-memory-test dpdk-memory.c)
     target_compile_definitions(ker-dpdk-memory-test PRIVATE _GNU_SOURCE)
     target_link_libraries(ker-dpdk-memory-test PRIVATE
@@ -344,6 +352,6 @@ if(KER_WITH_DPDK)
     set_tests_properties(skb PROPERTIES TIMEOUT 30)
     set_tests_properties(dpdk-memory PROPERTIES TIMEOUT 30)
     list(JOIN DPDK_LIBRARY_DIRS ":" ker_dpdk_library_path)
-    set_tests_properties(checksum timer refcount dpdk-memory skb worker ethernet fstack-ipv4-ingress-validation fstack-udp-ingress-validation fstack-udp-minimal-boundaries fstack-tcp-ingress-validation transport-receive icmp-echo fstack-chain-export fstack-chain-checksum udp-create udp-ip-options udp-neighbor-create tcp-create tcp-ip-options tcp-neighbor-create tcp-options napi receive arp ipv4-address neighbor-timer neighbor arp-receive fstack-arp-chain-feedback skb-queue timer-list arp-probe-import neighbor-update-import tx-export tx-export-chain tx-ring rx-ring cross-worker-ring fstack-concurrent-ring ${ker_fstack_tests} PROPERTIES
+    set_tests_properties(checksum timer refcount dpdk-memory skb worker ethernet fstack-ipv4-ingress-validation fstack-udp-ingress-validation fstack-udp-minimal-boundaries fstack-tcp-ingress-validation ipv4-fields transport-receive icmp-echo fstack-chain-export fstack-chain-checksum udp-create udp-ip-options udp-neighbor-create tcp-create tcp-ip-options tcp-neighbor-create tcp-options napi receive arp ipv4-address neighbor-timer neighbor arp-receive fstack-arp-chain-feedback skb-queue timer-list arp-probe-import neighbor-update-import tx-export tx-export-chain tx-ring rx-ring cross-worker-ring fstack-concurrent-ring ${ker_fstack_tests} PROPERTIES
         ENVIRONMENT "LD_LIBRARY_PATH=${ker_dpdk_library_path}:$ENV{LD_LIBRARY_PATH}")
 endif()
