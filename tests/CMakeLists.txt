@@ -106,7 +106,7 @@ if(KER_WITH_DPDK)
         ker_receive_headers ker_eth_headers ker_tx_export_port ker_tx_ring_port
         ker_skb_port ker_eth_port ker_receive_port ker_neighbor_port ker_address_port
         ker_ipv4_view_port ker_udp_view_port ker_tcp_view_port ker_icmp_echo_view_port ker_transport_receive_port
-        ker_udp_create_port ker_tcp_create_port ker_timer_list_port ker_linux_port
+        ker_udp_create_port ker_tcp_create_port ker_icmp_echo_create_port ker_timer_list_port ker_linux_port
         ker_dpdk_port PkgConfig::DPDK Threads::Threads)
     add_test(NAME rx-ring COMMAND ker-rx-ring-test)
     set_tests_properties(rx-ring PROPERTIES TIMEOUT 30)
@@ -127,7 +127,7 @@ if(KER_WITH_DPDK)
     target_link_libraries(ker-fstack-concurrent-ring-test PRIVATE ker_rx_ring_port ker_skb_headers
         ker_neighbor_headers ker_receive_headers ker_eth_headers ker_tx_export_port ker_tx_ring_port
         ker_skb_port ker_eth_port ker_receive_port ker_ipv4_view_port ker_udp_view_port ker_tcp_view_port
-        ker_icmp_echo_view_port ker_transport_receive_port ker_udp_create_port ker_tcp_create_port
+        ker_icmp_echo_view_port ker_icmp_echo_create_port ker_transport_receive_port ker_udp_create_port ker_tcp_create_port
         ker_neighbor_port ker_address_port ker_timer_list_port ker_linux_port ker_dpdk_port
         PkgConfig::DPDK Threads::Threads)
     add_test(NAME fstack-concurrent-ring COMMAND ker-fstack-concurrent-ring-test)
@@ -201,6 +201,7 @@ if(KER_WITH_DPDK)
     add_test(NAME udp-ip-options COMMAND ker-udp-ip-options-test)
     set_tests_properties(udp-ip-options PROPERTIES TIMEOUT 30)
     add_executable(ker-udp-neighbor-create-test udp-neighbor-create.c)
+    target_link_libraries(ker-udp-neighbor-create-test PRIVATE ker_icmp_echo_neighbor_create_port ker_icmp_echo_create_port)
     target_include_directories(ker-udp-neighbor-create-test PRIVATE "${PROJECT_SOURCE_DIR}/src")
     target_compile_definitions(ker-udp-neighbor-create-test PRIVATE _GNU_SOURCE)
     target_link_libraries(ker-udp-neighbor-create-test PRIVATE ker_neighbor_headers ker_address_port ker_neighbor_port

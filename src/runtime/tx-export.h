@@ -10,6 +10,7 @@ enum ker_tx_export_mode {
     KER_TX_EXPORT_SINGLE,
     KER_TX_EXPORT_CHAIN_NONE,
     KER_TX_EXPORT_CHAIN_SOFTWARE_CHECKSUM,
+    KER_TX_EXPORT_CHAIN_SOFTWARE_CHECKSUM_EXACT,
 };
 struct ker_tx_export {
     struct ker_skb_queue queue;
@@ -42,6 +43,12 @@ int ker_tx_export_init_chain(struct ker_tx_export *, struct ker_skb_context *,
  * on every attempt; the original remains unchanged while queued/retried. The
  * sink owns the whole chain only when it returns zero. */
 int ker_tx_export_init_chain_software_checksum(struct ker_tx_export *,
+    struct ker_skb_context *, unsigned int packet_limit, size_t byte_limit,
+    unsigned int segment_payload_limit, ker_tx_export_sink_fn, void *);
+/* Opt-in exact-fold variant. CHECKSUM_NONE packets are copied normally; only
+ * CHECKSUM_PARTIAL completion preserves a folded zero. The caller selects
+ * whether that protocol requires zero mangling. Existing modes are unchanged. */
+int ker_tx_export_init_chain_software_checksum_exact(struct ker_tx_export *,
     struct ker_skb_context *, unsigned int packet_limit, size_t byte_limit,
     unsigned int segment_payload_limit, ker_tx_export_sink_fn, void *);
 int ker_tx_export_enqueue(struct ker_tx_export *, struct sk_buff **);

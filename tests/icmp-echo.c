@@ -136,6 +136,31 @@ static void checksum_zero_and_view(void)
     memcpy(&found_id, skb->data + ETH_HLEN + 20 + 4, sizeof(found_id));
     verify_wire(skb, 8, NULL, 0, payload, sizeof(payload),
         found_id, rte_cpu_to_be_16(0));
+    skb->ip_summed = CHECKSUM_PARTIAL;
+    skb->csum_start = skb_headroom(skb) + ETH_HLEN + 20;
+    skb->csum_offset = 2;
+    unsigned char original[128];
+    CHECK(skb->len <= sizeof(original));
+    memcpy(original, skb->data, skb->len);
+    unsigned char original_summed = skb->ip_summed;
+    uint16_t original_start = skb->csum_start, original_offset = skb->csum_offset;
+    struct rte_mbuf *legacy = NULL;
+    CHECK(ker_skb_to_mbuf_chain_software_checksum(skb, 1, &legacy) == 0);
+    unsigned char checksum_bytes[2];
+    CHECK(rte_pktmbuf_read(legacy, ETH_HLEN + 20 + 2, 2, checksum_bytes));
+    CHECK(checksum_bytes[0] == 0xff && checksum_bytes[1] == 0xff);
+    CHECK(!memcmp(original, skb->data, skb->len) && skb->ip_summed == original_summed &&
+        skb->csum_start == original_start && skb->csum_offset == original_offset);
+    ker_packet_free(legacy);
+    struct rte_mbuf *exact = NULL;
+    CHECK(ker_skb_to_mbuf_chain_software_checksum_exact(skb, 1, &exact) == 0);
+    CHECK(rte_pktmbuf_read(exact, ETH_HLEN + 20 + 2, 2, checksum_bytes));
+    CHECK(checksum_bytes[0] == 0 && checksum_bytes[1] == 0);
+    CHECK(!memcmp(original, skb->data, skb->len) && skb->ip_summed == original_summed &&
+        skb->csum_start == original_start && skb->csum_offset == original_offset);
+    CHECK(skb->data[ETH_HLEN + 20 + 2] == 0 && skb->data[ETH_HLEN + 20 + 3] == 0);
+    ker_packet_free(exact);
+    skb->ip_summed = CHECKSUM_NONE;
     struct rte_mbuf *mbuf = NULL;
     CHECK(ker_skb_to_mbuf(skb, &mbuf) == 0);
     CHECK(ker_skb_free(skb) == 0);

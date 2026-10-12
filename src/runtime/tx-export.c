@@ -16,7 +16,7 @@ static int init(struct ker_tx_export *tx, struct ker_skb_context *ctx,
     enum ker_tx_export_mode mode, ker_tx_export_sink_fn sink, void *arg)
 {
     if (!tx || !ctx || !sink || !packets || !bytes) return -EINVAL;
-    if (mode < KER_TX_EXPORT_SINGLE || mode > KER_TX_EXPORT_CHAIN_SOFTWARE_CHECKSUM)
+    if (mode < KER_TX_EXPORT_SINGLE || mode > KER_TX_EXPORT_CHAIN_SOFTWARE_CHECKSUM_EXACT)
         return -EINVAL;
     bool chain_mode = mode != KER_TX_EXPORT_SINGLE;
     if (chain_mode && !segment_limit) return -EINVAL;
@@ -50,6 +50,14 @@ int ker_tx_export_init_chain_software_checksum(struct ker_tx_export *tx,
 {
     return init(tx, ctx, packets, bytes, segment_limit,
         KER_TX_EXPORT_CHAIN_SOFTWARE_CHECKSUM, sink, arg);
+}
+
+int ker_tx_export_init_chain_software_checksum_exact(struct ker_tx_export *tx,
+    struct ker_skb_context *ctx, unsigned int packets, size_t bytes,
+    unsigned int segment_limit, ker_tx_export_sink_fn sink, void *arg)
+{
+    return init(tx, ctx, packets, bytes, segment_limit,
+        KER_TX_EXPORT_CHAIN_SOFTWARE_CHECKSUM_EXACT, sink, arg);
 }
 
 static int exportable(struct sk_buff *skb, struct ker_skb_context *ctx,
@@ -114,10 +122,15 @@ int ker_tx_export_enqueue(struct ker_tx_export *tx, struct sk_buff **packet)
 
 static int make_copy(struct ker_tx_export *tx, struct sk_buff *skb, struct rte_mbuf **out)
 {
-    if (tx->mode == KER_TX_EXPORT_CHAIN_SOFTWARE_CHECKSUM &&
-        skb->ip_summed == CHECKSUM_PARTIAL)
+    if ((tx->mode == KER_TX_EXPORT_CHAIN_SOFTWARE_CHECKSUM ||
+         tx->mode == KER_TX_EXPORT_CHAIN_SOFTWARE_CHECKSUM_EXACT) &&
+        skb->ip_summed == CHECKSUM_PARTIAL) {
+        if (tx->mode == KER_TX_EXPORT_CHAIN_SOFTWARE_CHECKSUM_EXACT)
+            return ker_skb_to_mbuf_chain_software_checksum_exact(skb,
+                tx->segment_payload_limit, out);
         return ker_skb_to_mbuf_chain_software_checksum(skb,
             tx->segment_payload_limit, out);
+    }
     if (tx->mode != KER_TX_EXPORT_SINGLE)
         return ker_skb_to_mbuf_chain_copy(skb, tx->segment_payload_limit, out);
     if (skb->ip_summed == CHECKSUM_PARTIAL)

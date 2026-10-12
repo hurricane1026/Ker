@@ -2,6 +2,7 @@
 #include "eal.h"
 #include "runtime/buffer.h"
 #include "runtime/ethernet.h"
+#include "runtime/icmp-echo-create.h"
 #include "runtime/memory.h"
 #include "runtime/rx-ring.h"
 #include "runtime/skb.h"
@@ -25,7 +26,7 @@
 #define POOL_SIZE 127U
 #define PAYLOAD_MAX 32U
 struct record {
-    bool tcp;
+    uint8_t protocol;
     unsigned int length, ip_options_length, tcp_options_length;
     uint8_t ip_options[8], tcp_options[8], payload[PAYLOAD_MAX];
 };
@@ -104,20 +105,25 @@ static int checksum_ring_sink(struct rte_mbuf *chain, void *arg)
     size_t ip_length = ((size_t)ip[2] << 8) | ip[3];
     CHECK(ip_length >= ihl && ETH_HLEN + ip_length == copied);
     CHECK(checksum(ip, ihl) == 0);
-    bool tcp = ip[9] == IPPROTO_TCP;
-    CHECK(tcp || ip[9] == IPPROTO_UDP);
+    uint8_t protocol = ip[9];
+    CHECK(protocol == IPPROTO_TCP || protocol == IPPROTO_UDP || protocol == IPPROTO_ICMP);
     size_t l4_length = ip_length - ihl;
-    uint8_t pseudo[12];
-    memcpy(pseudo, ip + 12, 8);
-    pseudo[8] = 0;
-    pseudo[9] = ip[9];
-    pseudo[10] = (uint8_t)(l4_length >> 8);
-    pseudo[11] = (uint8_t)l4_length;
-    uint8_t checksum_input[112];
-    CHECK(sizeof(pseudo) + l4_length <= sizeof(checksum_input));
-    memcpy(checksum_input, pseudo, sizeof(pseudo));
-    memcpy(checksum_input + sizeof(pseudo), ip + ihl, l4_length);
-    CHECK(checksum(checksum_input, sizeof(pseudo) + l4_length) == 0);
+    if (protocol == IPPROTO_ICMP) {
+        CHECK(l4_length >= 8 && ip[ihl] == 8 && ip[ihl + 1] == 0);
+        CHECK(checksum(ip + ihl, l4_length) == 0);
+    } else {
+        uint8_t pseudo[12];
+        memcpy(pseudo, ip + 12, 8);
+        pseudo[8] = 0;
+        pseudo[9] = protocol;
+        pseudo[10] = (uint8_t)(l4_length >> 8);
+        pseudo[11] = (uint8_t)l4_length;
+        uint8_t checksum_input[112];
+        CHECK(sizeof(pseudo) + l4_length <= sizeof(checksum_input));
+        memcpy(checksum_input, pseudo, sizeof(pseudo));
+        memcpy(checksum_input + sizeof(pseudo), ip + ihl, l4_length);
+        CHECK(checksum(checksum_input, sizeof(pseudo) + l4_length) == 0);
+    }
     return ker_tx_ring_sink(chain, ring);
 }
 
@@ -125,7 +131,7 @@ static struct sk_buff *make_packet(unsigned int index)
 {
     const struct record *record = &f.expected[index];
     struct sk_buff *skb = NULL;
-    if (record->tcp) {
+    if (record->protocol == IPPROTO_TCP) {
         CHECK(ker_tcp_ipv4_create_headers(&f.producer_context, source_mac, destination_mac,
             source_ip, destination_ip, source_port, destination_port,
             (__be32)(UINT32_C(0x10000000) + index), (__be32)0,
@@ -141,6 +147,17 @@ static struct sk_buff *make_packet(unsigned int index)
         skb->ip_summed = CHECKSUM_PARTIAL;
         skb->csum_start = (uint16_t)(skb_headroom(skb) + start);
         skb->csum_offset = 16;
+    } else if (record->protocol == IPPROTO_ICMP) {
+        CHECK(ker_icmp_echo_ipv4_create_ip_options(&f.producer_context, source_mac,
+            destination_mac, source_ip, destination_ip, rte_cpu_to_be_16((uint16_t)(0x1000U + index)),
+            rte_cpu_to_be_16((uint16_t)index), 8, 61, record->ip_options, record->ip_options_length,
+            record->payload, record->length, &skb) == 0);
+        unsigned int start = ETH_HLEN + 20 + record->ip_options_length;
+        const __be16 zero = 0;
+        memcpy(skb->data + start + 2, &zero, sizeof(zero));
+        skb->ip_summed = CHECKSUM_PARTIAL;
+        skb->csum_start = (uint16_t)(skb_headroom(skb) + start);
+        skb->csum_offset = 2;
     } else {
         CHECK(ker_udp_ipv4_create_ip_options(&f.producer_context, source_mac,
             destination_mac, source_ip, destination_ip, source_port,
@@ -156,14 +173,15 @@ static int receive_message(const struct ker_transport_message *message, void *ar
     unsigned int index = atomic_load_explicit(&f.received, memory_order_relaxed);
     CHECK(index < COUNT);
     const struct record *record = &f.expected[index];
-    CHECK(message->protocol == (record->tcp ? KER_TRANSPORT_TCP : KER_TRANSPORT_UDP));
+    CHECK(message->protocol == (record->protocol == IPPROTO_TCP ? KER_TRANSPORT_TCP :
+        record->protocol == IPPROTO_ICMP ? KER_TRANSPORT_ICMP_ECHO : KER_TRANSPORT_UDP));
     CHECK(message->ipv4.header_length == 20 + record->ip_options_length);
     if (record->ip_options_length)
         CHECK(!memcmp(message->ipv4.header + 20, record->ip_options,
             record->ip_options_length));
     const uint8_t *payload;
     size_t length;
-    if (record->tcp) {
+    if (record->protocol == IPPROTO_TCP) {
         CHECK(message->packet.tcp.tcp_header_length == 20 + record->tcp_options_length);
         if (record->tcp_options_length)
             CHECK(!memcmp(message->packet.tcp.header + 20, record->tcp_options,
@@ -172,6 +190,12 @@ static int receive_message(const struct ker_transport_message *message, void *ar
             message->packet.tcp.destination_port == destination_port);
         payload = message->packet.tcp.payload;
         length = message->packet.tcp.payload_length;
+    } else if (record->protocol == IPPROTO_ICMP) {
+        CHECK(message->packet.icmp_echo.type == 8 && message->packet.icmp_echo.code == 0 &&
+            message->packet.icmp_echo.identifier == rte_cpu_to_be_16((uint16_t)(0x1000U + index)) &&
+            message->packet.icmp_echo.sequence == rte_cpu_to_be_16((uint16_t)index));
+        payload = message->packet.icmp_echo.payload;
+        length = message->packet.icmp_echo.payload_length;
     } else {
         CHECK(message->packet.udp.source_port == source_port &&
             message->packet.udp.destination_port == destination_port);
@@ -252,10 +276,11 @@ static void fill_records(void)
 {
     for (unsigned int i = 0; i < COUNT; ++i) {
         struct record *record = &f.expected[i];
-        record->tcp = (i & 1U) != 0;
+        record->protocol = (i % 3U == 0) ? IPPROTO_UDP :
+            (i % 3U == 1) ? IPPROTO_TCP : IPPROTO_ICMP;
         record->length = 11U + (i % 20U);
         record->ip_options_length = (i % 3U) * 4U;
-        record->tcp_options_length = record->tcp ? ((i / 3U) % 3U) * 4U : 0;
+        record->tcp_options_length = record->protocol == IPPROTO_TCP ? ((i / 3U) % 3U) * 4U : 0;
         for (unsigned int j = 0; j < record->ip_options_length; ++j)
             record->ip_options[j] = (uint8_t)(i * 11U + j * 7U + 1U);
         for (unsigned int j = 0; j < record->tcp_options_length; ++j)
@@ -296,7 +321,7 @@ int main(void)
         "concurrent_ring_a_skb") == 0);
     CHECK(ker_tx_ring_init(&f.ring, "ker_cwring1", 1,
         SOCKET_ID_ANY) == 0);
-    CHECK(ker_tx_export_init_chain_software_checksum(&f.tx, &f.producer_context,
+    CHECK(ker_tx_export_init_chain_software_checksum_exact(&f.tx, &f.producer_context,
         4, 65536, 16, checksum_ring_sink, &f.ring) == 0);
 
     pthread_t consumer;
