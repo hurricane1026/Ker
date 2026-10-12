@@ -186,6 +186,11 @@
       "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
       "source_case": "test_ff_dpdk_if_send_multiseg",
       "adaptation": "Ker-specific same-process SP/SC worker extension motivated by the pinned multisegment TX case. Worker A exports UDP/TCP chains to a DPDK ring; a distinct EAL worker B uses its own packet pool, skb context, device, and actual worker RX poll to classify and validate the packets. Pool pressure retains the FIFO head for retry. Lifecycle changes require external quiescence. The upstream case exercises F-Stack TX; this does not claim RSS steering, multiprocess rings, NIC I/O, or F-Stack RX."
+    },
+    "fstack-concurrent-ring": {
+      "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
+      "source_case": ["test_ff_dpdk_if_send_multiseg", "test_ff_dpdk_if_send_udp_csum", "test_ff_dpdk_if_send_tcp_csum"],
+      "adaptation": "Ker-specific concurrent same-process SP/SC extension motivated by pinned F-Stack segmented TX and UDP/TCP checksum TX cases. A registered EAL producer and distinct registered EAL consumer overlap across 192 alternating UDP/TCP chains using a capacity-one DPDK ring; an independent wire-byte checksum oracle runs before enqueue and the actual consumer worker validates dispatch order and payloads. Initial backpressure is deterministic. This does not claim MPMC, multiprocess/RSS, NIC I/O, F-Stack RX, or upstream concurrency coverage."
     }
   }
 }
