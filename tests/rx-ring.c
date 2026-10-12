@@ -158,6 +158,70 @@ static void release_mbuf_pool(struct rte_mbuf **held, unsigned int *count)
     while (*count) ker_packet_free(held[--*count]);
 }
 
+static void single_segment_copy_ownership(void)
+{
+    static const uint8_t bytes[] = {0x81, 0x00, 0x7f, 0x22, 0xaa};
+    struct rte_mbuf *source = ker_packet_alloc(&pool);
+    CHECK(source);
+    source->data_off = 192;
+    uint8_t *source_bytes = (uint8_t *)rte_pktmbuf_append(source, sizeof(bytes));
+    CHECK(source_bytes);
+    memcpy(source_bytes, bytes, sizeof(bytes));
+    uint16_t old_off = source->data_off;
+    uint16_t old_len = source->data_len;
+    uint32_t old_pkt_len = source->pkt_len;
+    uint16_t old_segments = source->nb_segs;
+    uint64_t old_flags = source->ol_flags;
+    struct sk_buff *copy = (void *)(uintptr_t)1;
+    CHECK(ker_skb_copy_from_mbuf_chain(&context, source, 128, &copy) == 0);
+    CHECK(copy && skb_headroom(copy) == 128 && copy->len == sizeof(bytes) &&
+        !memcmp(copy->data, bytes, sizeof(bytes)));
+    CHECK(source->data_off == old_off && source->data_len == old_len &&
+        source->pkt_len == old_pkt_len && source->nb_segs == old_segments &&
+        source->ol_flags == old_flags && rte_mbuf_refcnt_read(source) == 1 &&
+        !memcmp(rte_pktmbuf_mtod(source, const void *), bytes, sizeof(bytes)));
+    struct sk_buff *sentinel = (void *)(uintptr_t)1;
+    source->pkt_len++;
+    CHECK(ker_skb_copy_from_mbuf_chain(&context, source, 128, &sentinel) == -EINVAL &&
+        sentinel == (void *)(uintptr_t)1);
+    source->pkt_len = old_pkt_len;
+    source->data_off = source->buf_len;
+    CHECK(ker_skb_copy_from_mbuf_chain(&context, source, 128, &sentinel) == -EINVAL &&
+        sentinel == (void *)(uintptr_t)1);
+    source->data_off = old_off;
+    source->ol_flags |= RTE_MBUF_F_RX_VLAN_STRIPPED;
+    CHECK(ker_skb_copy_from_mbuf_chain(&context, source, 128, &sentinel) == -ENOTSUP &&
+        sentinel == (void *)(uintptr_t)1);
+    source->ol_flags = old_flags;
+    CHECK(ker_skb_free(copy) == 0);
+    CHECK(!memcmp(rte_pktmbuf_mtod(source, const void *), bytes, sizeof(bytes)));
+    ker_packet_free(source);
+
+    source = ker_packet_alloc(&pool);
+    CHECK(source);
+    source_bytes = (uint8_t *)rte_pktmbuf_append(source, sizeof(bytes));
+    CHECK(source_bytes);
+    memcpy(source_bytes, bytes, sizeof(bytes));
+    copy = NULL;
+    CHECK(ker_skb_copy_from_mbuf_chain(&context, source, 64, &copy) == 0);
+    ker_packet_free(source);
+    CHECK(copy && skb_headroom(copy) == 64 && copy->len == sizeof(bytes) &&
+        !memcmp(copy->data, bytes, sizeof(bytes)));
+    CHECK(ker_skb_free(copy) == 0);
+
+    struct rte_mbuf *head = ker_packet_alloc(&pool);
+    struct rte_mbuf *tail = ker_packet_alloc(&pool);
+    CHECK(head && tail);
+    CHECK(rte_pktmbuf_append(head, 1) && rte_pktmbuf_append(tail, 1));
+    head->next = tail;
+    sentinel = (void *)(uintptr_t)1;
+    CHECK(ker_skb_copy_from_mbuf_chain(&context, head, 128, &sentinel) == -EINVAL &&
+        sentinel == (void *)(uintptr_t)1);
+    head->next = NULL;
+    ker_packet_free(head);
+    ker_packet_free(tail);
+}
+
 static void receive_flow_and_guards(void)
 {
     static const uint8_t udp_bytes[] = {0x10, 0x11, 0x12, 0x13, 0x14};
@@ -351,8 +415,11 @@ int main(void)
     CHECK(ker_eth_device_cleanup(&device) == -EBUSY);
     CHECK(ker_receive_runtime_cleanup(&runtime) == -EBUSY);
 
+    /* These packets fit in one output segment; RX must accept the valid
+     * nb_segs == 1 representation as well as longer chains. */
     CHECK(ker_tx_export_init_chain_software_checksum(&tx, &context, 8,
-        SIZE_MAX, 16, ker_tx_ring_sink, &ring) == 0);
+        SIZE_MAX, 4096, ker_tx_ring_sink, &ring) == 0);
+    single_segment_copy_ownership();
     receive_flow_and_guards();
     allocation_retry_and_cancel();
     permanent_drop();
