@@ -19,8 +19,12 @@ struct ker_rx_ring {
 /* Stable zero-initialized storage. Attaches as the sole consumer and pins the
  * ring, device, and selected receive runtime until cleanup, reserving the
  * device/runtime binding even before protocol handlers register. A conflicting
- * bound handler is rejected while attached. headroom must be even and fit the
- * packet backing data room. Manual ring_take is blocked while attached. */
+ * bound handler is rejected while attached. The ring's single producer may be
+ * on another worker; attach/detach and producer/consumer shutdown require
+ * external quiescence and ordering. The consumer must own the selected device,
+ * runtime, and packet context. This is a same-process DPDK SP/SC ring contract.
+ * headroom must be even and fit the packet backing data room. Manual ring_take
+ * is blocked while attached. */
 int ker_rx_ring_init(struct ker_rx_ring *, struct ker_tx_ring *,
     struct ker_eth_device *, struct ker_receive_runtime *, unsigned int headroom);
 /* Worker RX callback: positive count includes consumed drops; last_dropped
