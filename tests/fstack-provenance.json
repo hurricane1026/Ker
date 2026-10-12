@@ -119,6 +119,11 @@
       "source_case": ["test_ff_dpdk_if_send_udp_csum", "test_ff_dpdk_if_send_tcp_csum"],
       "adaptation": "Ker-specific worker RX integration extension motivated by upstream UDP/TCP TX checksum-offload cases; neither upstream case tests ingress. A registered ETH_P_IP handler validates and synchronously exposes existing immutable UDP/TCP packet views, consumes its skb reference on every path, and fails closed when protocol fanout shares the skb descriptor reference. This is not socket delivery, routing, fragment reassembly, TCP state or NIC receive support."
     },
+    "icmp-echo": {
+      "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
+      "source_case": ["test_ff_dpdk_if_send_udp_csum", "test_ff_dpdk_if_send_tcp_csum"],
+      "adaptation": "Ker-specific ICMPv4 echo constructor and worker-ingress extension. The pinned F-Stack cases cover UDP/TCP TX checksum offload, not ICMP. Ker constructs explicit-address echo request/reply frames with opaque IPv4 options and validates the complete ICMP checksum in an immutable worker callback view; it does not implement automatic replies, ICMP errors, routing, reassembly, sockets, ping or NIC support."
+    },
     "udp-create": {
       "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
       "source_case": "test_ff_dpdk_if_send_udp_csum",
