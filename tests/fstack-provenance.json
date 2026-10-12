@@ -140,6 +140,11 @@
       "source_case": "test_ff_dpdk_if_send_udp_csum",
       "adaptation": "Ker-specific explicit-address constructor extension motivated by the pinned F-Stack UDP checksum TX case; upstream does not test configured address snapshots. Source IPv4/MAC come from the one live configured Ethernet IPv4 address, while destination MAC/IP are caller literals. Independent wire oracles cover opaque IPv4 options and zero/DF field profiles, allocation rollback, and raw-constructor byte equivalence. No neighbor lookup, route/FIB selection, socket delivery, NIC/offload, or source-address-selection policy is implied."
     },
+    "tcp-configured-create": {
+      "source_file": "tests/tcp-configured-create.c",
+      "source_case": "test_ff_dpdk_if_send_tcp_csum",
+      "adaptation": "Ker-specific configured-source TCP/IPv4 constructor extension motivated by the pinned F-Stack TCP checksum TX case; upstream does not test configured address snapshots. Source IPv4/MAC come from one live configured Ethernet IPv4 address and destination MAC/IP are caller literals. Independent wire checks cover both opaque option areas, TCP checksum semantics including a zero checksum result, allocation rollback and raw-constructor byte equivalence. No neighbor lookup, route/FIB selection, TCP state, socket delivery, NIC or hardware offload is implied."
+    },
     "udp-neighbor-create": {
       "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
       "source_case": "test_ff_dpdk_if_send_udp_csum",
