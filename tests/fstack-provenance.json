@@ -199,6 +199,14 @@
         "test_ff_dpdk_if_send_multiseg"
       ],
       "adaptation": "Ker-specific extension: construct explicit Ethernet/IPv4/UDP packets with opaque copied IPv4 options, validate the variable-IHL IPv4 and UDP checksums, then export a segmented copy through the actual worker receive path. The pinned cases motivate checksum and segmented-buffer coverage; they do not test IPv4 options semantics. No routing, source-route processing, socket delivery or NIC transmission is claimed."
+    },
+    "tcp-ip-options": {
+      "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
+      "source_case": [
+        "test_ff_dpdk_if_send_tcp_csum",
+        "test_ff_dpdk_if_send_multiseg"
+      ],
+      "adaptation": "Ker-specific extension constructs Ethernet/IPv4/TCP packets with independently supplied opaque IPv4 and TCP option bytes, verifies both checksums with independent wire-byte oracles, and sends a segmented copy through the actual worker receive path. Existing constructors remain zero-IP-options wrappers. The pinned F-Stack cases motivate checksum and segmented-buffer coverage, not IPv4/TCP option semantics; no routing, source-route processing, TCP state, sockets or NIC transmission is claimed."
     }
   }
 }
