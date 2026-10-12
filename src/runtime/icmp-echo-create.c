@@ -34,6 +34,7 @@ static int icmp_echo_create_fields(struct ker_skb_context *context,
     int fields_error = ker_ipv4_header_fields_validate(fields);
     if (fields_error)
         return fields_error;
+    const struct ker_ipv4_header_fields field_snapshot = *fields;
     unsigned int ip_header_length = IP_BASE + ip_options_length;
     unsigned int icmp_length = (unsigned int)icmp_length_wide;
     unsigned int ip_length = (unsigned int)ip_length_wide;
@@ -54,7 +55,7 @@ static int icmp_echo_create_fields(struct ker_skb_context *context,
     unsigned char *ip = frame + ETH_HLEN;
     memset(ip, 0, ip_header_length);
     ip[0] = (unsigned char)(0x40U | (ip_header_length / 4U));
-    ker_ipv4_header_fields_apply(ip, fields);
+    ker_ipv4_header_fields_apply(ip, &field_snapshot);
     put_be16(ip + 2, ip_length);
     ip[8] = ttl;
     ip[9] = 1;

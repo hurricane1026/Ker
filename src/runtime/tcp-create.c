@@ -42,6 +42,7 @@ static int tcp_create_fields(struct ker_skb_context *context,
     if (ip_length_wide > UINT16_MAX) return -EMSGSIZE;
     int fields_error = ker_ipv4_header_fields_validate(fields);
     if (fields_error) return fields_error;
+    const struct ker_ipv4_header_fields field_snapshot = *fields;
     const unsigned int ip_header_length = (unsigned int)ip_header_wide;
     const unsigned int tcp_header_length = (unsigned int)tcp_header_wide;
     const unsigned int tcp_length = (unsigned int)tcp_length_wide;
@@ -63,7 +64,7 @@ static int tcp_create_fields(struct ker_skb_context *context,
     unsigned char *ip = frame + ETH_HLEN;
     memset(ip, 0, ip_header_length);
     ip[0] = (unsigned char)(0x40U | (ip_header_length / 4U));
-    ker_ipv4_header_fields_apply(ip, fields);
+    ker_ipv4_header_fields_apply(ip, &field_snapshot);
     put_be16(ip + 2, ip_length);
     ip[8] = ttl;
     ip[9] = KER_IPPROTO_TCP;
