@@ -287,6 +287,15 @@
       "source_file": "tests/arp-concurrent-ring.c",
       "source_case": "test_ff_dpdk_if_send_multiseg",
       "adaptation": "Ker-specific same-process SP/SC extension motivated by the pinned F-Stack segmented-ring TX case; upstream has no ARP test. Distinct configured request/reply frames cross a capacity-one ring between separate EAL workers; the consumer uses its own packet pool/context/device and actual worker RX dispatcher to verify all 192 records in FIFO order. This does not claim MPMC, multiprocess/RSS, NIC I/O, or a general ARP protocol stack."
+    },
+    "configured-ring": {
+      "source_file": "tests/configured-ring.c",
+      "source_case": [
+        "test_ff_dpdk_if_send_multiseg",
+        "test_ff_dpdk_if_send_udp_csum",
+        "test_ff_dpdk_if_send_tcp_csum"
+      ],
+      "adaptation": "Ker-specific configured-source integration extension. Configured UDP, TCP and ICMP echo constructors pass through software checksum export, a real bounded DPDK ring, Ethernet classification and the actual worker transport receiver; independent corruption cases cover bad IPv4/UDP checksums, fragments and unsupported protocols. A pool-pressure case cancels the exact pending chain and resumes the later FIFO entry, and ARP plus IPv4 handlers share one configured device/runtime with cleanup pins checked. The pinned F-Stack cases motivate checksum and segmented TX coverage, not configured-source selection, ARP, or ingress. No routing, automatic ARP, sockets, NIC I/O, or F-Stack RX is claimed."
     }
   }
 }
