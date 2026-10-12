@@ -2,9 +2,9 @@
 #define KER_RUNTIME_UDP_CREATE_H
 #include "runtime/skb.h"
 
-/* Construct a caller-owned Ethernet + IPv4 + UDP packet. Addresses and ports
- * are in wire order; payload is copied and borrowed only for this call. A
- * fixed 128-byte headroom is retained. TTL must be nonzero. DSCP/ECN, IP ID,
+/* Construct a caller-owned Ethernet + fixed 20-byte IPv4 + UDP packet.
+ * Addresses and ports are in wire order; payload is copied and borrowed only for this call.
+ * A fixed 128-byte headroom is retained. TTL must be nonzero. DSCP/ECN, IP ID,
  * and fragment fields are zero. The constructor sets no TX offload metadata
  * and performs no address policy or routing. */
 int ker_udp_ipv4_create(struct ker_skb_context *context,
@@ -12,4 +12,13 @@ int ker_udp_ipv4_create(struct ker_skb_context *context,
     __be32 source_ip, __be32 destination_ip, __be16 source_port,
     __be16 destination_port, uint8_t ttl, const void *payload,
     unsigned int payload_length, struct sk_buff **result);
+/* As above with a 20..60-byte IPv4 header. The optional 0..40-byte option area
+ * is copied byte-for-byte but is not interpreted, normalized, or executed;
+ * its length must be a multiple of four and a nonzero length requires options. */
+int ker_udp_ipv4_create_ip_options(struct ker_skb_context *context,
+    const unsigned char source_mac[6], const unsigned char destination_mac[6],
+    __be32 source_ip, __be32 destination_ip, __be16 source_port,
+    __be16 destination_port, uint8_t ttl, const void *options,
+    unsigned int options_length, const void *payload, unsigned int payload_length,
+    struct sk_buff **result);
 #endif
