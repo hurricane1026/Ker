@@ -29,6 +29,8 @@ static struct rte_mbuf *accepted;
 static int block_sink = 1;
 static unsigned char expected_payload[PAYLOAD_MAX];
 static unsigned int expected_length, delivered;
+static unsigned char expected_ip_options[40];
+static unsigned int expected_ip_options_length;
 static const unsigned char source_mac[ETH_ALEN] = {2, 1, 2, 3, 4, 5};
 static const unsigned char destination_mac[ETH_ALEN] = {2, 6, 7, 8, 9, 10};
 static __be32 source_ip, destination_ip;
@@ -44,10 +46,11 @@ static uint16_t oracle_sum(const unsigned char *p, unsigned int n)
     return (uint16_t)sum;
 }
 
-static uint16_t udp_oracle(const unsigned char *frame, unsigned int payload_length)
+static uint16_t udp_oracle(const unsigned char *frame, unsigned int ihl,
+    unsigned int payload_length)
 {
     const unsigned char *ip = frame + ETH_HLEN;
-    const unsigned char *udp = ip + 20;
+    const unsigned char *udp = ip + ihl;
     unsigned int udp_length = 8 + payload_length;
     unsigned char pseudo[12];
     memcpy(pseudo, ip + 12, 8); pseudo[8] = 0; pseudo[9] = UDP_PROTOCOL;
@@ -70,6 +73,10 @@ static int receive_message(const struct ker_transport_message *message, void *ar
 {
     CHECK(arg == &receiver && worker.polling && !worker.timers.polling);
     CHECK(message->protocol == KER_TRANSPORT_UDP);
+    CHECK(message->ipv4.header_length == 20 + expected_ip_options_length);
+    CHECK(message->ipv4.packet_length == 20 + expected_ip_options_length + 8 + expected_length);
+    if (expected_ip_options_length)
+        CHECK(!memcmp(message->ipv4.header + 20, expected_ip_options, expected_ip_options_length));
     CHECK(message->packet.udp.source_port == source_port &&
         message->packet.udp.destination_port == destination_port);
     CHECK(message->packet.udp.payload_length == expected_length);
@@ -120,33 +127,77 @@ static struct rte_mbuf *split_chain(const struct rte_mbuf *source)
     return head;
 }
 
+static void verify_packet_options(struct sk_buff *skb, const unsigned char *options,
+    unsigned int options_length, const unsigned char *payload, unsigned int length);
+
 static void verify_packet(struct sk_buff *skb, const unsigned char *payload, unsigned int length)
 {
+    verify_packet_options(skb, NULL, 0, payload, length);
+}
+
+static void verify_packet_options(struct sk_buff *skb, const unsigned char *options,
+    unsigned int options_length, const unsigned char *payload, unsigned int length)
+{
     const unsigned char *frame = skb->data;
-    CHECK(skb->len == ETH_HLEN + 28 + length);
+    unsigned int ihl = 20 + options_length;
+    CHECK(skb->len == ETH_HLEN + ihl + 8 + length);
     CHECK(skb_headroom(skb) == 128 && skb->mac_header == skb_headroom(skb));
     CHECK(skb->network_header == skb_headroom(skb) + ETH_HLEN);
-    CHECK(skb->transport_header == skb_headroom(skb) + ETH_HLEN + 20);
+    CHECK(skb->transport_header == skb_headroom(skb) + ETH_HLEN + ihl);
     CHECK(!memcmp(frame, destination_mac, ETH_ALEN));
     CHECK(!memcmp(frame + 6, source_mac, ETH_ALEN));
     CHECK(frame[12] == 0x08 && frame[13] == 0x00);
     const unsigned char *ip = frame + ETH_HLEN;
-    CHECK(ip[0] == 0x45 && ip[1] == 0 && ip[4] == 0 && ip[5] == 0);
+    CHECK(ip[0] == (unsigned char)(0x40U | ihl / 4U) && ip[1] == 0 && ip[4] == 0 && ip[5] == 0);
     CHECK(ip[6] == 0 && ip[7] == 0 && ip[8] == 64 && ip[9] == UDP_PROTOCOL);
-    CHECK(ip[2] == 0 && ip[3] == 28 + length);
+    CHECK(ip[2] == (unsigned char)((ihl + 8 + length) >> 8) && ip[3] == (unsigned char)(ihl + 8 + length));
     CHECK(!memcmp(ip + 12, &source_ip, 4) && !memcmp(ip + 16, &destination_ip, 4));
-    CHECK(oracle_sum(ip, 20) == 0xffff);
-    const unsigned char *udp = ip + 20;
+    CHECK(oracle_sum(ip, ihl) == 0xffff);
+    if (options_length) CHECK(!memcmp(ip + 20, options, options_length));
+    const unsigned char *udp = ip + ihl;
     CHECK(!memcmp(udp, &source_port, 2) && !memcmp(udp + 2, &destination_port, 2));
     CHECK(udp[4] == (unsigned char)((8 + length) >> 8) && udp[5] == (unsigned char)(8 + length));
-    CHECK(udp_oracle(frame, length) == 0xffff);
-    CHECK(!memcmp(udp + 8, payload, length));
+    CHECK(udp_oracle(frame, ihl, length) == 0xffff);
+    if (length) CHECK(!memcmp(udp + 8, payload, length));
+}
+
+static void one_packet_ip_options(unsigned char *options, unsigned int options_length,
+    unsigned char *payload, unsigned int length)
+{
+    unsigned char options_copy[40], payload_snapshot[PAYLOAD_MAX];
+    if (options_length) memcpy(options_copy, options, options_length);
+    if (length) memcpy(payload_snapshot, payload, length);
+    if (options_length) memcpy(expected_ip_options, options_copy, options_length);
+    expected_ip_options_length = options_length;
+    memcpy(expected_payload, payload_snapshot, length); expected_length = length;
+    struct neighbour *held = NULL;
+    CHECK(ker_neighbor_lookup(&table, destination_ip, &held) == 0);
+    CHECK(refcount_read(&held->refcnt) == 2);
+    struct sk_buff *skb = NULL;
+    block_sink = 1;
+    CHECK(ker_udp_ipv4_create_neighbor_ip_options(&table, destination_ip,
+        source_port, destination_port, 64, options, options_length, payload,
+        length, &skb) == 0 && skb);
+    CHECK(refcount_read(&held->refcnt) == 2);
+    if (options_length) CHECK(!memcmp(options, options_copy, options_length));
+    if (length) CHECK(!memcmp(payload, payload_snapshot, length));
+    verify_packet_options(skb, options_copy, options_length, payload_snapshot, length);
+    if (options_length) memset(options, 0xea, options_length);
+    if (length) memset(payload, 0xeb, length);
+    CHECK(ker_tx_export_enqueue(&tx, &skb) == 0 && !skb);
+    struct ker_worker_result progress = {0};
+    CHECK(ker_worker_poll(&worker, worker.timers.now_ns, &progress) == -EAGAIN);
+    CHECK(tx.pending && context.live == 1);
+    CHECK(ker_worker_poll(&worker, worker.timers.now_ns, &progress) == 0);
+    CHECK(progress.tx == 1 && progress.rx == 1 && context.live == 0);
+    CHECK(ker_neighbor_release(&table, held) == 0);
 }
 
 static void one_packet(unsigned char *payload, unsigned int length)
 {
     unsigned char payload_snapshot[PAYLOAD_MAX];
     memcpy(payload_snapshot, payload, length);
+    expected_ip_options_length = 0;
     memcpy(expected_payload, payload_snapshot, length); expected_length = length;
     struct sk_buff *skb = NULL;
     block_sink = 1;
@@ -177,6 +228,30 @@ static void transactional_failures(void)
     struct neighbour *held_entry = NULL;
     CHECK(ker_neighbor_lookup(&table, destination_ip, &held_entry) == 0);
     CHECK(refcount_read(&held_entry->refcnt) == 2);
+    unsigned char options[40];
+    for (unsigned int i = 0; i < sizeof(options); ++i) options[i] = (unsigned char)(i * 7U + 3U);
+    unsigned char options_copy[sizeof(options)]; memcpy(options_copy, options, sizeof(options));
+    CHECK(ker_udp_ipv4_create_neighbor_ip_options(&table, destination_ip, source_port,
+        destination_port, 64, NULL, 4, payload, sizeof(payload), &sentinel) == -EINVAL);
+    CHECK(ker_udp_ipv4_create_neighbor_ip_options(&table, destination_ip, source_port,
+        destination_port, 64, options, 3, payload, sizeof(payload), &sentinel) == -EINVAL);
+    CHECK(ker_udp_ipv4_create_neighbor_ip_options(&table, destination_ip, source_port,
+        destination_port, 64, options, UINT_MAX, payload, sizeof(payload), &sentinel) == -EINVAL);
+    CHECK(ker_udp_ipv4_create_neighbor_ip_options(&table, destination_ip, source_port,
+        destination_port, 64, options, 40, payload, UINT_MAX, &sentinel) == -EMSGSIZE);
+    CHECK(ker_udp_ipv4_create_neighbor_ip_options(&table, destination_ip, source_port,
+        destination_port, 64, options, 40, payload, UINT16_MAX - 20U - 40U - 8U,
+        &sentinel) == -ENOSPC);
+    const __be32 absent_options = rte_cpu_to_be_32(0xc6336403);
+    CHECK(ker_udp_ipv4_create_neighbor_ip_options(&table, absent_options, source_port,
+        destination_port, 64, options, 4, payload, sizeof(payload), &sentinel) == -ENOENT);
+    CHECK(refcount_read(&held_entry->refcnt) == 2 && sentinel == (void *)(uintptr_t)0x1234);
+    held_entry->nud_state = NUD_STALE;
+    CHECK(ker_udp_ipv4_create_neighbor_ip_options(&table, destination_ip, source_port,
+        destination_port, 64, options, 40, payload, sizeof(payload), &sentinel) == -ENOTSUP);
+    held_entry->nud_state = NUD_PERMANENT;
+    CHECK(refcount_read(&held_entry->refcnt) == 2 && sentinel == (void *)(uintptr_t)0x1234);
+    CHECK(!memcmp(options, options_copy, sizeof(options)) && context.live == 0);
     CHECK(ker_udp_ipv4_create_neighbor(&table, destination_ip, source_port, destination_port, 0, payload, sizeof(payload), &sentinel) == -EINVAL);
     CHECK(sentinel == (void *)(uintptr_t)0x1234);
     CHECK(ker_udp_ipv4_create_neighbor(&table, destination_ip, source_port, destination_port, 64, NULL, 1, &sentinel) == -EINVAL);
@@ -203,6 +278,10 @@ static void transactional_failures(void)
     held_entry->nud_state = NUD_PERMANENT;
 
     ker_memory_fail_after(0);
+    CHECK(ker_udp_ipv4_create_neighbor_ip_options(&table, destination_ip,
+        source_port, destination_port, 64, options, 40, payload, sizeof(payload),
+        &sentinel) == -ENOMEM);
+    CHECK(refcount_read(&held_entry->refcnt) == 2 && sentinel == (void *)(uintptr_t)0x1234);
     CHECK(ker_udp_ipv4_create_neighbor(&table, destination_ip, source_port, destination_port,
         64, payload, sizeof(payload), &sentinel) == -ENOMEM);
     ker_memory_fail_after(-1);
@@ -218,6 +297,10 @@ static void transactional_failures(void)
     unsigned int n = 0;
     while (n < 63 && (held[n] = ker_packet_alloc(&pool))) ++n;
     CHECK(n == 63);
+    CHECK(ker_udp_ipv4_create_neighbor_ip_options(&table, destination_ip, source_port,
+        destination_port, 64, options, 40, payload, sizeof(payload), &sentinel) == -ENOMEM);
+    CHECK(sentinel == (void *)(uintptr_t)0x1234 && context.live == 0 &&
+        refcount_read(&held_entry->refcnt) == 2);
     CHECK(ker_udp_ipv4_create_neighbor(&table, destination_ip, source_port, destination_port, 64, payload, sizeof(payload), &sentinel) == -ENOMEM);
     CHECK(sentinel == (void *)(uintptr_t)0x1234 && context.live == 0);
     CHECK(refcount_read(&held_entry->refcnt) == 2);
@@ -266,6 +349,9 @@ static void *foreign_create(void *arg)
     CHECK(ker_udp_ipv4_create_neighbor(&table, destination_ip, source_port, destination_port,
         64, NULL, 0, result) == -EXDEV);
     CHECK(*result == (void *)(uintptr_t)0x1234);
+    CHECK(ker_udp_ipv4_create_neighbor_ip_options(&table, destination_ip,
+        source_port, destination_port, 64, NULL, 0, NULL, 0, result) == -EXDEV);
+    CHECK(*result == (void *)(uintptr_t)0x1234);
     return NULL;
 }
 
@@ -292,13 +378,18 @@ int main(void)
 
     unsigned char odd[5] = {0x12, 0x34, 0x56, 0x78, 0x9a};
     unsigned char even[4] = {0xab, 0xcd, 0xef, 0x01};
+    unsigned char ip4[4] = {1, 1, 0x94, 4}, ip40[40];
+    for (unsigned int i = 0; i < sizeof(ip40); ++i) ip40[i] = (unsigned char)(i * 7U + 3U);
     one_packet(odd, sizeof(odd));
     one_packet(even, sizeof(even));
     one_packet(even, 0);
+    one_packet_ip_options(NULL, 0, odd, sizeof(odd));
+    one_packet_ip_options(ip4, sizeof(ip4), odd, sizeof(odd));
+    one_packet_ip_options(ip40, sizeof(ip40), even, sizeof(even));
     checksum_zero_mangling();
     transactional_failures();
 
-    CHECK(delivered == 3 && context.live == 0);
+    CHECK(delivered == 6 && context.live == 0);
     CHECK(ker_worker_cleanup(&worker) == 0);
     CHECK(ker_tx_export_cleanup(&tx) == 0);
     CHECK(ker_transport_receiver_unregister(&receiver) == 0);

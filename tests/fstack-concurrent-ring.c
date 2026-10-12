@@ -24,7 +24,11 @@
 #define COUNT 192U
 #define POOL_SIZE 127U
 #define PAYLOAD_MAX 32U
-struct record { bool tcp; unsigned int length; uint8_t payload[PAYLOAD_MAX]; };
+struct record {
+    bool tcp;
+    unsigned int length, ip_options_length, tcp_options_length;
+    uint8_t ip_options[8], tcp_options[8], payload[PAYLOAD_MAX];
+};
 struct fixture {
     struct ker_tx_ring ring;
     struct ker_rx_ring rx;
@@ -96,7 +100,7 @@ static int checksum_ring_sink(struct rte_mbuf *chain, void *arg)
     CHECK(copied >= ETH_HLEN + 20 && frame[12] == 0x08 && frame[13] == 0x00);
     uint8_t *ip = frame + ETH_HLEN;
     size_t ihl = (size_t)(ip[0] & 0x0fU) * 4;
-    CHECK((ip[0] >> 4) == 4 && ihl == 20);
+    CHECK((ip[0] >> 4) == 4 && ihl >= 20 && ihl <= 60);
     size_t ip_length = ((size_t)ip[2] << 8) | ip[3];
     CHECK(ip_length >= ihl && ETH_HLEN + ip_length == copied);
     CHECK(checksum(ip, ihl) == 0);
@@ -122,11 +126,13 @@ static struct sk_buff *make_packet(unsigned int index)
     const struct record *record = &f.expected[index];
     struct sk_buff *skb = NULL;
     if (record->tcp) {
-        CHECK(ker_tcp_ipv4_create(&f.producer_context, source_mac, destination_mac,
+        CHECK(ker_tcp_ipv4_create_headers(&f.producer_context, source_mac, destination_mac,
             source_ip, destination_ip, source_port, destination_port,
             (__be32)(UINT32_C(0x10000000) + index), (__be32)0,
-            (__be16)2048, 0x18, 63, record->payload, record->length, &skb) == 0);
-        unsigned int start = ETH_HLEN + 20;
+            (__be16)2048, 0x18, 63, record->ip_options,
+            record->ip_options_length, record->tcp_options,
+            record->tcp_options_length, record->payload, record->length, &skb) == 0);
+        unsigned int start = ETH_HLEN + 20 + record->ip_options_length;
         unsigned int l4_length = skb->len - start;
         __wsum pseudo = csum_tcpudp_nofold(source_ip, destination_ip, l4_length,
             IPPROTO_TCP, 0);
@@ -136,9 +142,10 @@ static struct sk_buff *make_packet(unsigned int index)
         skb->csum_start = (uint16_t)(skb_headroom(skb) + start);
         skb->csum_offset = 16;
     } else {
-        CHECK(ker_udp_ipv4_create(&f.producer_context, source_mac, destination_mac,
-            source_ip, destination_ip, source_port, destination_port, 61,
-            record->payload, record->length, &skb) == 0);
+        CHECK(ker_udp_ipv4_create_ip_options(&f.producer_context, source_mac,
+            destination_mac, source_ip, destination_ip, source_port,
+            destination_port, 61, record->ip_options,
+            record->ip_options_length, record->payload, record->length, &skb) == 0);
     }
     return skb;
 }
@@ -150,9 +157,17 @@ static int receive_message(const struct ker_transport_message *message, void *ar
     CHECK(index < COUNT);
     const struct record *record = &f.expected[index];
     CHECK(message->protocol == (record->tcp ? KER_TRANSPORT_TCP : KER_TRANSPORT_UDP));
+    CHECK(message->ipv4.header_length == 20 + record->ip_options_length);
+    if (record->ip_options_length)
+        CHECK(!memcmp(message->ipv4.header + 20, record->ip_options,
+            record->ip_options_length));
     const uint8_t *payload;
     size_t length;
     if (record->tcp) {
+        CHECK(message->packet.tcp.tcp_header_length == 20 + record->tcp_options_length);
+        if (record->tcp_options_length)
+            CHECK(!memcmp(message->packet.tcp.header + 20, record->tcp_options,
+                record->tcp_options_length));
         CHECK(message->packet.tcp.source_port == source_port &&
             message->packet.tcp.destination_port == destination_port);
         payload = message->packet.tcp.payload;
@@ -239,6 +254,12 @@ static void fill_records(void)
         struct record *record = &f.expected[i];
         record->tcp = (i & 1U) != 0;
         record->length = 11U + (i % 20U);
+        record->ip_options_length = (i % 3U) * 4U;
+        record->tcp_options_length = record->tcp ? ((i / 3U) % 3U) * 4U : 0;
+        for (unsigned int j = 0; j < record->ip_options_length; ++j)
+            record->ip_options[j] = (uint8_t)(i * 11U + j * 7U + 1U);
+        for (unsigned int j = 0; j < record->tcp_options_length; ++j)
+            record->tcp_options[j] = (uint8_t)(i * 13U + j * 5U + 2U);
         for (unsigned int j = 0; j < record->length; ++j)
             record->payload[j] = (uint8_t)(i * 37U + j * 19U + 3U);
         record->payload[0] = (uint8_t)(i >> 8);
@@ -294,8 +315,10 @@ int main(void)
     CHECK(ker_tx_export_enqueue(&f.tx, &second) == 0 && !second);
     CHECK(retained && ker_tx_export_poll(&f.tx, 1) == -EAGAIN);
     CHECK(f.tx.last_error == -EAGAIN && f.tx.pending == retained && f.tx.packets == 1);
-    CHECK(retained->len == ETH_HLEN + 20 + 20 + f.expected[1].length &&
-        !memcmp(retained->data + ETH_HLEN + 20 + 20,
+    unsigned int retained_ihl = (retained->data[ETH_HLEN] & 0x0fU) * 4U;
+    unsigned int retained_thl = (retained->data[ETH_HLEN + retained_ihl + 12] >> 4) * 4U;
+    CHECK(retained->len == ETH_HLEN + retained_ihl + retained_thl + f.expected[1].length &&
+        !memcmp(retained->data + ETH_HLEN + retained_ihl + retained_thl,
             f.expected[1].payload, f.expected[1].length));
     CHECK(ker_packet_pool_cleanup(&f.producer_pool) == -EBUSY);
     atomic_store_explicit(&f.consumer_start, true, memory_order_release);

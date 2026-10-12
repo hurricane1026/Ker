@@ -13,4 +13,10 @@
 int ker_udp_ipv4_create_neighbor(struct ker_neighbor_table *table, __be32 destination_ip,
     __be16 source_port, __be16 destination_port, uint8_t ttl, const void *payload,
     unsigned int payload_length, struct sk_buff **result);
+/* As above with a 20..60-byte IPv4 header. Options are opaque and copied
+ * unchanged; a nonzero length requires a pointer and lengths are 4-byte aligned. */
+int ker_udp_ipv4_create_neighbor_ip_options(struct ker_neighbor_table *table,
+    __be32 destination_ip, __be16 source_port, __be16 destination_port, uint8_t ttl,
+    const void *ip_options, unsigned int ip_options_length, const void *payload,
+    unsigned int payload_length, struct sk_buff **result);
 #endif

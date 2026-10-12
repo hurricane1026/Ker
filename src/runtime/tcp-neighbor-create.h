@@ -15,4 +15,14 @@ int ker_tcp_ipv4_create_neighbor(struct ker_neighbor_table *table, __be32 destin
     __be16 window, uint8_t flags, uint8_t ttl, const void *options,
     unsigned int options_length, const void *payload, unsigned int payload_length,
     struct sk_buff **result);
+/* New combined-options variant. It validates both opaque option areas and
+ * packet length before neighbor lookup; then snapshots the configured local
+ * address/device and permanent destination MAC, releasing the entry reference
+ * before allocation. Each option area is 0..40 bytes and four-byte aligned. */
+int ker_tcp_ipv4_create_neighbor_headers(struct ker_neighbor_table *table,
+    __be32 destination_ip, __be16 source_port, __be16 destination_port,
+    __be32 sequence, __be32 acknowledgment, __be16 window, uint8_t flags,
+    uint8_t ttl, const void *ip_options, unsigned int ip_options_length,
+    const void *tcp_options, unsigned int tcp_options_length, const void *payload,
+    unsigned int payload_length, struct sk_buff **result);
 #endif

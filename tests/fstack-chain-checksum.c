@@ -141,8 +141,10 @@ static void verify_ipv4_transport_checksum(const struct rte_mbuf *chain, bool tc
     }
     CHECK(offset == chain->pkt_len);
     uint8_t *ip = frame + ETH_HLEN;
-    uint8_t *l4 = ip + 20;
-    unsigned int l4len = (unsigned int)(chain->pkt_len - ETH_HLEN - 20);
+    unsigned int ihl = (unsigned int)(ip[0] & 0x0fU) * 4U;
+    CHECK((ip[0] >> 4) == 4 && ihl >= 20 && ihl <= 60);
+    uint8_t *l4 = ip + ihl;
+    unsigned int l4len = (unsigned int)(chain->pkt_len - ETH_HLEN - ihl);
     unsigned int field = tcp ? 16 : 6;
     uint8_t pseudo[12];
     memcpy(pseudo, ip + 12, 8);
@@ -159,6 +161,57 @@ static void verify_ipv4_transport_checksum(const struct rte_mbuf *chain, bool tc
     uint16_t expected = oracle_checksum(full, sizeof(pseudo) + l4len, 0);
     if (!tcp && !expected) expected = UINT16_MAX;
     CHECK(l4[field] == (uint8_t)(expected >> 8) && l4[field + 1] == (uint8_t)expected);
+}
+
+static void variable_ihl_checksum_roundtrip(void)
+{
+    static const uint8_t ip_options[4] = {1, 1, 0, 0};
+    static const uint8_t tcp_options[4] = {2, 4, 5, 0xb4};
+    static const uint8_t payload[] = {0x23, 0x45, 0x67, 0x89, 0xab};
+    for (unsigned int type = 0; type < 2; ++type) {
+        bool tcp = type != 0;
+        struct sk_buff *skb = NULL;
+        if (tcp) {
+            CHECK(ker_tcp_ipv4_create_headers(&context, source_mac, destination_mac,
+                source_ip, destination_ip, source_port, destination_port,
+                (__be32)0x11223344, (__be32)0x55667788, (__be16)4096, 0x18,
+                63, ip_options, sizeof(ip_options), tcp_options, sizeof(tcp_options),
+                payload, sizeof(payload), &skb) == 0);
+        } else {
+            CHECK(ker_udp_ipv4_create_ip_options(&context, source_mac, destination_mac,
+                source_ip, destination_ip, source_port, destination_port, 61,
+                ip_options, sizeof(ip_options), payload, sizeof(payload), &skb) == 0);
+        }
+        unsigned int ihl = ETH_HLEN + 20 + sizeof(ip_options);
+        unsigned int start = ihl;
+        unsigned int field = tcp ? 16 : 6;
+        unsigned int l4len = skb->len - start;
+        __wsum pseudo = csum_tcpudp_nofold(source_ip, destination_ip, l4len,
+            tcp ? TEST_IPPROTO_TCP : TEST_IPPROTO_UDP, 0);
+        __sum16 seed = (__sum16)~csum_fold(pseudo);
+        CHECK(seed != 0);
+        memcpy(skb->data + start + field, &seed, sizeof(seed));
+        skb->ip_summed = CHECKSUM_PARTIAL;
+        skb->csum_start = (uint16_t)(skb_headroom(skb) + start);
+        skb->csum_offset = (uint16_t)field;
+        CHECK(skb->csum_start == (uint16_t)(skb_headroom(skb) + ETH_HLEN + 24));
+        uint8_t source_copy[160]; CHECK(skb->len <= sizeof(source_copy));
+        memcpy(source_copy, skb->data, skb->len);
+        expected_protocol = tcp ? KER_TRANSPORT_TCP : KER_TRANSPORT_UDP;
+        memcpy(expected_payload, payload, sizeof(payload));
+        expected_payload_length = sizeof(payload);
+        struct rte_mbuf *chain = NULL;
+        CHECK(ker_skb_to_mbuf_chain_software_checksum(skb, 1, &chain) == 0);
+        CHECK(chain->nb_segs > 1 && !memcmp(skb->data, source_copy, skb->len));
+        verify_ipv4_transport_checksum(chain, tcp);
+        CHECK(ker_skb_free(skb) == 0);
+        pending_chain = chain;
+        struct ker_worker_result progress = {0};
+        unsigned int before = received;
+        CHECK(ker_worker_poll(&worker, worker.timers.now_ns, &progress) == 0);
+        CHECK(progress.rx == 1 && received == before + 1 && !pending_chain);
+        CHECK(context.live == 0);
+    }
 }
 
 static int tx_sink(struct rte_mbuf *chain, void *arg)
@@ -447,6 +500,7 @@ int main(void)
     CHECK(ker_worker_init(&worker, &pool, &config, &ops) == 0);
     rollback_and_synthetic();
     actual_udp_tcp_roundtrip();
+    variable_ihl_checksum_roundtrip();
     tx_chain_checksum_retry();
     tx_chain_tcp_checksum_cancel();
     CHECK(ker_worker_cleanup(&worker) == 0);
