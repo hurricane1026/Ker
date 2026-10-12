@@ -135,6 +135,11 @@
       "source_case": "test_ff_dpdk_if_send_udp_csum",
       "adaptation": "Ker-specific software packet-construction and receive-roundtrip extension motivated by the upstream UDP TX checksum-offload case, which is not an explicit-address UDP constructor or ingress scenario. Ker builds a fixed Ethernet/IPv4/UDP packet with Linux software checksum primitives, copies it through the existing export and segmented ingress adapters, then validates it in the worker-scoped transport receiver. No routing, address policy, socket, automatic TX offload or NIC transmission is claimed."
     },
+    "udp-configured-create": {
+      "source_file": "tests/udp-configured-create.c",
+      "source_case": "test_ff_dpdk_if_send_udp_csum",
+      "adaptation": "Ker-specific explicit-address constructor extension motivated by the pinned F-Stack UDP checksum TX case; upstream does not test configured address snapshots. Source IPv4/MAC come from the one live configured Ethernet IPv4 address, while destination MAC/IP are caller literals. Independent wire oracles cover opaque IPv4 options and zero/DF field profiles, allocation rollback, and raw-constructor byte equivalence. No neighbor lookup, route/FIB selection, socket delivery, NIC/offload, or source-address-selection policy is implied."
+    },
     "udp-neighbor-create": {
       "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
       "source_case": "test_ff_dpdk_if_send_udp_csum",
