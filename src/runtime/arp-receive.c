@@ -22,6 +22,20 @@ int ker_arp_rx_feedback_scope(struct ker_arp_receiver *receiver, const struct ke
         memcmp(message->target_mac, active_message_copy.target_mac, ETH_ALEN)) return -ESTALE;
     return 0;
 }
+int ker_arp_rx_responder_scope(struct ker_arp_receiver *receiver,
+    const struct ker_arp_message *message)
+{
+    if (!receiver || !message) return -EINVAL;
+    if (receiver->handler.runtime && rte_lcore_id() != receiver->handler.runtime->lcore) return -EXDEV;
+    if (active != receiver || active_message != message) return -EPERM;
+    if (!receiver->handler.runtime) return -EPERM;
+    if (active_packet_type != PACKET_HOST && active_packet_type != PACKET_BROADCAST) return -ENOTSUP;
+    if (message->sender_ip != active_message_copy.sender_ip || message->target_ip != active_message_copy.target_ip ||
+        message->operation != active_message_copy.operation || message->target_local != active_message_copy.target_local ||
+        memcmp(message->sender_mac, active_message_copy.sender_mac, ETH_ALEN) ||
+        memcmp(message->target_mac, active_message_copy.target_mac, ETH_ALEN)) return -ESTALE;
+    return 0;
+}
 struct sk_buff *ker_arp_rx_clone(struct sk_buff *skb, gfp_t flags)
 {
     BUG_ON(!active || flags != GFP_ATOMIC);

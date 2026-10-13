@@ -13,7 +13,8 @@ initialization does not take over permanent entries or another monitor. Failed
 initialization rolls back its entry and lifetime references.
 
 The application still constructs and submits ARP from the probe callback with
-`ker_arp_probe_create`. A valid reply processed by the existing worker ARP
+`ker_arp_probe_create`. A peer can use the opt-in
+[local responder](linux-arp-responder.md) to answer these requests automatically. A valid reply processed by the existing worker ARP
 receiver can update the INCOMPLETE entry and drain its native queue using the
 learned MAC. Native retry exhaustion leaves FAILED; a later output can retry
 through the same bounded resolver. Admission errors retain caller ownership,
