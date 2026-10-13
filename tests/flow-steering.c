@@ -262,9 +262,33 @@ static void run_multicore_traffic(struct harness *h,unsigned worker)
     for(unsigned v=0;v<VARIANTS;v++) {
         pthread_barrier_wait(&h->start); /* begin this fixture/direction epoch */
         struct timespec start; CHECK(clock_gettime(CLOCK_MONOTONIC,&start)==0);
-        for(unsigned pass=0;pass<PASSES;pass++) {
+        unsigned owner=fixtures[fixture_index(v)].owner;
+        struct rte_mbuf *retained=NULL;
+        if(worker!=owner) {
+            for(unsigned pass=0;pass<4;pass++) {
+                unsigned id=(worker*VARIANTS+v)*PASSES+pass;
+                struct rte_mbuf *m=packet_for(h,v,id);
+                CHECK(ker_flow_submit(&h->contexts[worker],DOMAIN,
+                    egress_variant(v)?KER_FLOW_EGRESS:KER_FLOW_INGRESS,&m)==0 && m==NULL);
+                atomic_fetch_add(&h->epoch_success[v][worker],1);
+            }
+        }
+        pthread_barrier_wait(&h->start); /* owner stays idle until both remote inbox producers fill it */
+        if(worker!=owner) {
+            unsigned id=(worker*VARIANTS+v)*PASSES+4;
+            retained=packet_for(h,v,id);
+            struct rte_mbuf *original=retained;
+            int rc=ker_flow_submit(&h->contexts[worker],DOMAIN,
+                egress_variant(v)?KER_FLOW_EGRESS:KER_FLOW_INGRESS,&retained);
+            CHECK(rc==-ENOBUFS && retained==original);
+            atomic_fetch_add(&h->retries[worker],1);
+        }
+        pthread_barrier_wait(&h->start); /* release the owner only after both full-ring checks */
+        if(worker==owner) CHECK(poll_worker(h,worker)>=0);
+        unsigned first_pass=worker==owner?0U:4U;
+        for(unsigned pass=first_pass;pass<PASSES;pass++) {
             unsigned id=(worker*VARIANTS+v)*PASSES+pass;
-            struct rte_mbuf *m=packet_for(h,v,id); int rc;
+            struct rte_mbuf *m=pass==4U && retained?retained:packet_for(h,v,id); int rc;
             do {
                 struct rte_mbuf *original=m;
                 rc=ker_flow_submit(&h->contexts[worker],DOMAIN,
@@ -275,8 +299,9 @@ static void run_multicore_traffic(struct harness *h,unsigned worker)
                 }
             } while(rc==-ENOBUFS);
             CHECK(rc==0 && m==NULL);
+            if(pass==4U) retained=NULL;
             atomic_fetch_add(&h->epoch_success[v][worker],1);
-            if(pass==0) pthread_barrier_wait(&h->start); /* all owners/senders made progress */
+            if(pass==first_pass) pthread_barrier_wait(&h->start); /* all owners/senders made progress */
             CHECK(poll_worker(h,worker)>=0);
             CHECK(before_deadline(&start));
         }
@@ -318,6 +343,12 @@ static int multicore(void)
     CHECK(ker_memory_shutdown()==0);
     for(unsigned i=0;i<2;i++) CHECK(pthread_join(threads[i],NULL)==0);
     CHECK(atomic_load(&h.producer_done)==3);
+    for(unsigned w=0;w<PRODUCERS;w++) {
+        unsigned expected_retries=0;
+        for(unsigned v=0;v<VARIANTS;v++)
+            if(fixtures[fixture_index(v)].owner!=w) expected_retries++;
+        CHECK(atomic_load(&h.retries[w])>=expected_retries);
+    }
     for(unsigned v=0;v<VARIANTS;v++) CHECK(atomic_load(&h.epoch_overlap[v])>0);
     verify_seen(&h,true);
     CHECK(ker_flow_fabric_cleanup(&h.fabric)==0); CHECK(ker_packet_pool_cleanup(&h.pool)==0);
