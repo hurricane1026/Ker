@@ -25,6 +25,7 @@ struct ker_neighbor_monitor {
     int event_send_result;
     bool busy, notification, probe_callback;
     bool resolution_enabled;
+    unsigned int echo_service_refs;
     bool owns_entry;
     size_t resolution_queue_bytes;
     size_t unresolved_bytes;

@@ -334,6 +334,14 @@
         "test_ff_dpdk_if_send_multiseg"
       ],
       "adaptation": "Ker-specific responder and two-peer discovery integration extension: the production responder builds a local ARP reply with the native constructor, actual application rings/worker RX deliver it to the discovery peer, and native neighbor output releases queued UDP for transport validation. Tests bounded failures, reply selection and ownership. These upstream cases motivate packet output/segmentation, not an F-Stack ARP responder; full arp_process, general learning, routing and NIC transmission are not claimed."
+    },
+    "icmp-echo-service": {
+      "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
+      "source_case": [
+        "test_ff_dpdk_if_send_basic",
+        "test_ff_dpdk_if_send_multiseg"
+      ],
+      "adaptation": "Ker-specific first-contact echo-service integration extension. Two independent skb pools and real SP/SC rings carry a validated echo request, native neighbor resolution emits an ARP probe through the existing responder and scoped feedback path, and the returned echo reply is checked by the peer transport callback. This is not the F-Stack socket, ping, full ICMP input/reply path, routing, or NIC delivery."
     }
   }
 }

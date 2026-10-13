@@ -4,6 +4,7 @@
 #include "runtime/udp-packet-view.h"
 #include "runtime/tcp-packet-view.h"
 #include "runtime/icmp-echo-packet-view.h"
+struct ker_icmp_echo_service;
 
 enum ker_transport_protocol { KER_TRANSPORT_ICMP_ECHO = 1, KER_TRANSPORT_UDP = 17, KER_TRANSPORT_TCP = 6 };
 struct ker_transport_message {
@@ -20,11 +21,15 @@ struct ker_transport_message {
  * not use any view after return. The callback never owns an skb reference and
  * may return only NET_RX_SUCCESS or NET_RX_DROP. */
 typedef int (*ker_transport_receive_fn)(const struct ker_transport_message *, void *);
+typedef int (*ker_transport_service_receive_fn)(void *, struct sk_buff *,
+    const struct ker_transport_message *);
 struct ker_transport_receiver {
     struct ker_protocol_handler handler;
     ker_transport_receive_fn receive;
     void *arg;
     int validation_error; /* Last worker-local decode/admission error, or 0. */
+    struct ker_icmp_echo_service *echo_service;
+    ker_transport_service_receive_fn echo_service_receive;
 };
 /* Stable zero-initialized storage; pins device while registered. Only IPv4
  * UDP/TCP and ICMP echo request/reply views are delivered. A descriptor

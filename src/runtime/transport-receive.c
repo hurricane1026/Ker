@@ -19,6 +19,7 @@ static int transport_receive(struct sk_buff *skb, struct ker_protocol_handler *h
     error = ker_ipv4_packet_view_init(context, skb, &ip);
     if (error)
         goto reject;
+
     message.ipv4 = ip;
     switch (ip.header[9]) {
     case KER_TRANSPORT_ICMP_ECHO:
@@ -39,6 +40,18 @@ static int transport_receive(struct sk_buff *skb, struct ker_protocol_handler *h
     }
     if (error)
         goto reject;
+
+    if (receiver->echo_service && message.protocol == KER_TRANSPORT_ICMP_ECHO &&
+        message.packet.icmp_echo.type == 8) {
+        if (!receiver->echo_service_receive) {
+            error = -EOPNOTSUPP;
+            goto reject;
+        }
+        error = receiver->echo_service_receive(receiver->echo_service, skb, &message);
+        receiver->validation_error = error;
+        BUG_ON(ker_skb_free(skb));
+        return error ? NET_RX_DROP : NET_RX_SUCCESS;
+    }
 
     receiver->validation_error = 0;
     int status = receiver->receive(&message, receiver->arg);
@@ -75,6 +88,8 @@ int ker_transport_receiver_unregister(struct ker_transport_receiver *receiver)
 {
     if (!receiver || !receiver->handler.registered)
         return -EINVAL;
+    if (receiver->echo_service)
+        return -EBUSY;
     int error = ker_protocol_unregister(&receiver->handler);
     if (error)
         return error;
