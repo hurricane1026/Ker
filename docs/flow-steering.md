@@ -75,9 +75,18 @@ attaching thread's DPDK allocation socket.
 
 ## Flow steering verification
 
-The DPDK test suite includes two focused regressions in addition to the parser
+The DPDK test suite includes three focused regressions in addition to the parser
 and lifecycle checks in `flow`:
 
+- `flow-buckets` runs on one CPU with 1 through 64 logical workers. For each
+  worker count it visits all 256 buckets using fixed, offline-generated UDP
+  port/hash vectors, checks resolution from every context, and delivers packets
+  in both directions through local and remote paths. It covers rotated
+  distribution, every bucket assigned to the highest worker ID, and a 255:1
+  skewed map, including workers with no assigned buckets. It also checks copied
+  configuration ownership by overwriting the input table before attachment,
+  rejects worker counts 0 and 65, and rejects an out-of-range owner at every
+  table position. This exercises logical mapping limits, not 64 physical CPUs.
 - `flow-matrix` runs on a single CPU. It checks independent IPv4/IPv6 TCP/UDP
   golden tuples with a nonuniform `bucket % 3` owner map, both packet
   directions, and every logical sender-to-owner local/remote path. Its expected
@@ -90,8 +99,8 @@ and lifecycle checks in `flow`:
   callback owner thread, and exactly-once delivery. CTest marks this test
   skipped (return code 77) only when fewer than three CPUs are available.
 
-Run both with:
+Run these tests with:
 
 ```sh
-ctest --test-dir build -R '^flow-(matrix|multicore)$' --output-on-failure
+ctest --test-dir build -R '^flow-(buckets|matrix|multicore)$' --output-on-failure
 ```
