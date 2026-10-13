@@ -2,6 +2,7 @@
 #define KER_RUNTIME_UDP_CREATE_H
 #include "runtime/skb.h"
 #include "runtime/ipv4-fields.h"
+struct ker_ipv4_address;
 
 /* Construct a caller-owned Ethernet + fixed 20-byte IPv4 + UDP packet.
  * Addresses and ports are in wire order; payload is copied and borrowed only for this call.
@@ -30,4 +31,21 @@ int ker_udp_ipv4_create_fields(struct ker_skb_context *context,
     __be16 destination_port, uint8_t ttl, const struct ker_ipv4_header_fields *fields,
     const void *ip_options, unsigned int ip_options_length, const void *payload,
     unsigned int payload_length, struct sk_buff **result);
+
+/* Build with one live configured static IPv4 address on an Ethernet device.
+ * Source IP/MAC are snapshotted from that association; destination MAC/IP and
+ * ports are copied literally, with no neighbor lookup, subnet decision, FIB or
+ * routing. The 0..40-byte IPv4 option area is opaque and copied as supplied.
+ * A fixed 128-byte headroom is retained. Failure leaves result unchanged. */
+int ker_udp_ipv4_create_configured(struct ker_ipv4_address *address,
+    const unsigned char destination_mac[6], __be32 destination_ip,
+    __be16 source_port, __be16 destination_port, uint8_t ttl,
+    const void *ip_options, unsigned int ip_options_length,
+    const void *payload, unsigned int payload_length, struct sk_buff **result);
+int ker_udp_ipv4_create_configured_fields(struct ker_ipv4_address *address,
+    const unsigned char destination_mac[6], __be32 destination_ip,
+    __be16 source_port, __be16 destination_port, uint8_t ttl,
+    const struct ker_ipv4_header_fields *fields,
+    const void *ip_options, unsigned int ip_options_length,
+    const void *payload, unsigned int payload_length, struct sk_buff **result);
 #endif

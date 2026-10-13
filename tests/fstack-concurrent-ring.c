@@ -4,6 +4,7 @@
 #include "runtime/ethernet.h"
 #include "runtime/icmp-echo-create.h"
 #include "runtime/ipv4-fields.h"
+#include "runtime/ipv4-address.h"
 #include "runtime/memory.h"
 #include "runtime/rx-ring.h"
 #include "runtime/skb.h"
@@ -26,19 +27,23 @@
 #define COUNT 192U
 #define POOL_SIZE 127U
 #define PAYLOAD_MAX 32U
+#define FRAME_MAX (ETH_HLEN + 60U + 60U + PAYLOAD_MAX)
 struct record {
     uint8_t protocol;
     struct ker_ipv4_header_fields ipv4_fields;
     unsigned int length, ip_options_length, tcp_options_length;
     uint8_t ip_options[8], tcp_options[8], payload[PAYLOAD_MAX];
+    unsigned int wire_length;
+    uint8_t wire[FRAME_MAX];
 };
 struct fixture {
     struct ker_tx_ring ring;
     struct ker_rx_ring rx;
     struct ker_packet_pool producer_pool, consumer_pool;
     struct ker_skb_context producer_context, consumer_context;
-    struct ker_tx_export tx;
-    struct ker_eth_device device;
+    struct ker_tx_export tx, tx_exact;
+    struct ker_eth_device producer_device, device;
+    struct ker_ipv4_address producer_address, consumer_address;
     struct ker_receive_runtime runtime;
     struct ker_transport_receiver receiver;
     struct ker_worker worker;
@@ -49,6 +54,7 @@ struct fixture {
     int consumer_result;
 };
 static struct fixture f;
+static unsigned int sink_accepted;
 static const uint8_t source_mac[ETH_ALEN] = {2, 0x10, 0x11, 0x12, 0x13, 0x14};
 static const uint8_t destination_mac[ETH_ALEN] = {2, 0x20, 0x21, 0x22, 0x23, 0x24};
 static const __be32 source_ip = (__be32)0x010200c0;
@@ -101,9 +107,13 @@ static int checksum_ring_sink(struct rte_mbuf *chain, void *arg)
     }
     CHECK(copied == chain->pkt_len && segments == chain->nb_segs);
     CHECK(copied >= ETH_HLEN + 20 && frame[12] == 0x08 && frame[13] == 0x00);
+    CHECK(!memcmp(frame, destination_mac, ETH_ALEN) &&
+        !memcmp(frame + ETH_ALEN, source_mac, ETH_ALEN));
     uint8_t *ip = frame + ETH_HLEN;
     size_t ihl = (size_t)(ip[0] & 0x0fU) * 4;
     CHECK((ip[0] >> 4) == 4 && ihl >= 20 && ihl <= 60);
+    CHECK(!memcmp(ip + 12, &source_ip, sizeof(source_ip)) &&
+        !memcmp(ip + 16, &destination_ip, sizeof(destination_ip)));
     size_t ip_length = ((size_t)ip[2] << 8) | ip[3];
     CHECK(ip_length >= ihl && ETH_HLEN + ip_length == copied);
     CHECK(checksum(ip, ihl) == 0);
@@ -126,7 +136,11 @@ static int checksum_ring_sink(struct rte_mbuf *chain, void *arg)
         memcpy(checksum_input + sizeof(pseudo), ip + ihl, l4_length);
         CHECK(checksum(checksum_input, sizeof(pseudo) + l4_length) == 0);
     }
-    return ker_tx_ring_sink(chain, ring);
+    CHECK(sink_accepted < COUNT && copied == f.expected[sink_accepted].wire_length &&
+        !memcmp(frame, f.expected[sink_accepted].wire, copied));
+    int rc = ker_tx_ring_sink(chain, ring);
+    if (!rc) ++sink_accepted;
+    return rc;
 }
 
 static struct sk_buff *make_packet(unsigned int index)
@@ -134,8 +148,8 @@ static struct sk_buff *make_packet(unsigned int index)
     const struct record *record = &f.expected[index];
     struct sk_buff *skb = NULL;
     if (record->protocol == IPPROTO_TCP) {
-        CHECK(ker_tcp_ipv4_create_fields(&f.producer_context, source_mac, destination_mac,
-            source_ip, destination_ip, source_port, destination_port,
+        CHECK(ker_tcp_ipv4_create_configured_fields(&f.producer_address, destination_mac,
+            destination_ip, source_port, destination_port,
             (__be32)(UINT32_C(0x10000000) + index), (__be32)0,
             (__be16)2048, 0x18, 63, &record->ipv4_fields, record->ip_options,
             record->ip_options_length, record->tcp_options,
@@ -150,8 +164,8 @@ static struct sk_buff *make_packet(unsigned int index)
         skb->csum_start = (uint16_t)(skb_headroom(skb) + start);
         skb->csum_offset = 16;
     } else if (record->protocol == IPPROTO_ICMP) {
-        CHECK(ker_icmp_echo_ipv4_create_fields(&f.producer_context, source_mac,
-            destination_mac, source_ip, destination_ip, rte_cpu_to_be_16((uint16_t)(0x1000U + index)),
+        CHECK(ker_icmp_echo_ipv4_create_configured_fields(&f.producer_address,
+            destination_mac, destination_ip, rte_cpu_to_be_16((uint16_t)(0x1000U + index)),
             rte_cpu_to_be_16((uint16_t)index), 8, 61, &record->ipv4_fields,
             record->ip_options, record->ip_options_length,
             record->payload, record->length, &skb) == 0);
@@ -162,12 +176,37 @@ static struct sk_buff *make_packet(unsigned int index)
         skb->csum_start = (uint16_t)(skb_headroom(skb) + start);
         skb->csum_offset = 2;
     } else {
-        CHECK(ker_udp_ipv4_create_fields(&f.producer_context, source_mac,
-            destination_mac, source_ip, destination_ip, source_port,
+        CHECK(ker_udp_ipv4_create_configured_fields(&f.producer_address,
+            destination_mac, destination_ip, source_port,
             destination_port, 61, &record->ipv4_fields, record->ip_options,
             record->ip_options_length, record->payload, record->length, &skb) == 0);
     }
     return skb;
+}
+
+static void precompute_expected_frames(void)
+{
+    for (unsigned int i = 0; i < COUNT; ++i) {
+        struct record *record = &f.expected[i];
+        struct sk_buff *skb = make_packet(i);
+        struct rte_mbuf *chain = NULL;
+        int rc = record->protocol == IPPROTO_ICMP ?
+            ker_skb_to_mbuf_chain_software_checksum_exact(skb, 16, &chain) :
+            (record->protocol == IPPROTO_TCP ?
+                ker_skb_to_mbuf_chain_software_checksum(skb, 16, &chain) :
+                ker_skb_to_mbuf_chain_copy(skb, 16, &chain));
+        CHECK(rc == 0 && chain && chain->pkt_len <= sizeof(record->wire));
+        record->wire_length = chain->pkt_len;
+        size_t copied = 0;
+        for (struct rte_mbuf *part = chain; part; part = part->next) {
+            CHECK(copied + part->data_len <= sizeof(record->wire));
+            memcpy(record->wire + copied, rte_pktmbuf_mtod(part, const void *), part->data_len);
+            copied += part->data_len;
+        }
+        CHECK(copied == record->wire_length);
+        ker_packet_free(chain);
+        CHECK(ker_skb_free(skb) == 0);
+    }
 }
 
 static int receive_message(const struct ker_transport_message *message, void *arg)
@@ -179,6 +218,8 @@ static int receive_message(const struct ker_transport_message *message, void *ar
     CHECK(message->protocol == (record->protocol == IPPROTO_TCP ? KER_TRANSPORT_TCP :
         record->protocol == IPPROTO_ICMP ? KER_TRANSPORT_ICMP_ECHO : KER_TRANSPORT_UDP));
     CHECK(message->ipv4.header_length == 20 + record->ip_options_length);
+    CHECK(!memcmp(message->ipv4.header + 12, &source_ip, sizeof(source_ip)) &&
+        !memcmp(message->ipv4.header + 16, &destination_ip, sizeof(destination_ip)));
     CHECK(message->ipv4.header[1] == record->ipv4_fields.ds_field &&
         !memcmp(message->ipv4.header + 4, &record->ipv4_fields.identification, 2) &&
         !memcmp(message->ipv4.header + 6, &record->ipv4_fields.frag_off, 2));
@@ -230,6 +271,8 @@ static void *consumer_main(void *arg)
         "concurrent_ring_b_skb") == 0);
     CHECK(ker_eth_device_init(&fixture->device, &fixture->consumer_context,
         "concurrent-b", 19, mac) == 0);
+    CHECK(ker_ipv4_address_init(&fixture->consumer_address, &fixture->device,
+        destination_ip, 24) == 0);
     CHECK(ker_receive_runtime_init(&fixture->runtime, &fixture->consumer_context) == 0);
     CHECK(ker_rx_ring_init(&fixture->rx, &fixture->ring, &fixture->device,
         &fixture->runtime, 128) == 0);
@@ -265,6 +308,7 @@ static void *consumer_main(void *arg)
     CHECK(ker_worker_cleanup(&fixture->worker) == 0);
     CHECK(ker_transport_receiver_unregister(&fixture->receiver) == 0);
     CHECK(ker_receive_runtime_cleanup(&fixture->runtime) == 0);
+    CHECK(ker_ipv4_address_cleanup(&fixture->consumer_address) == 0);
     CHECK(ker_eth_device_cleanup(&fixture->device) == 0);
     CHECK(ker_skb_context_cleanup(&fixture->consumer_context) == 0);
     CHECK(ker_packet_pool_cleanup(&fixture->consumer_pool) == 0);
@@ -309,10 +353,10 @@ static void wait_for_consumer(uint64_t deadline)
     }
 }
 
-static void retry_export_until_accepted(uint64_t deadline)
+static void retry_export_until_accepted(struct ker_tx_export *tx, uint64_t deadline)
 {
-    while (f.tx.packets) {
-        int rc = ker_tx_export_poll(&f.tx, 1);
+    while (tx->packets) {
+        int rc = ker_tx_export_poll(tx, 1);
         CHECK(rc == 1 || rc == -EAGAIN);
         if (rc == -EAGAIN) sched_yield();
         check_before_deadline(deadline);
@@ -328,10 +372,17 @@ int main(void)
         POOL_SIZE, 0, 4096, SOCKET_ID_ANY) == 0);
     CHECK(ker_skb_context_init(&f.producer_context, &f.producer_pool,
         "concurrent_ring_a_skb") == 0);
+    CHECK(ker_eth_device_init(&f.producer_device, &f.producer_context,
+        "concurrent-a", 18, source_mac) == 0);
+    CHECK(ker_ipv4_address_init(&f.producer_address, &f.producer_device,
+        source_ip, 24) == 0);
     CHECK(ker_tx_ring_init(&f.ring, "ker_cwring1", 1,
         SOCKET_ID_ANY) == 0);
-    CHECK(ker_tx_export_init_chain_software_checksum_exact(&f.tx, &f.producer_context,
+    CHECK(ker_tx_export_init_chain_software_checksum(&f.tx, &f.producer_context,
         4, 65536, 16, checksum_ring_sink, &f.ring) == 0);
+    CHECK(ker_tx_export_init_chain_software_checksum_exact(&f.tx_exact,
+        &f.producer_context, 4, 65536, 16, checksum_ring_sink, &f.ring) == 0);
+    precompute_expected_frames();
 
     pthread_t consumer;
     CHECK(pthread_create(&consumer, NULL, consumer_main, &f) == 0);
@@ -357,23 +408,27 @@ int main(void)
     CHECK(ker_packet_pool_cleanup(&f.producer_pool) == -EBUSY);
     atomic_store_explicit(&f.consumer_start, true, memory_order_release);
 
+    retry_export_until_accepted(&f.tx, deadline);
     for (unsigned int i = 2; i < COUNT; ++i) {
         struct sk_buff *skb = make_packet(i);
-        int enqueued = ker_tx_export_enqueue(&f.tx, &skb);
+        struct ker_tx_export *tx = f.expected[i].protocol == IPPROTO_ICMP ?
+            &f.tx_exact : &f.tx;
+        int enqueued = ker_tx_export_enqueue(tx, &skb);
         while (enqueued == -ENOSPC) {
             CHECK(skb != NULL);
-            int rc = ker_tx_export_poll(&f.tx, 1);
+            int rc = ker_tx_export_poll(tx, 1);
             CHECK(rc == 1 || rc == -EAGAIN);
             if (rc == -EAGAIN) sched_yield();
             check_before_deadline(deadline);
-            enqueued = ker_tx_export_enqueue(&f.tx, &skb);
+            enqueued = ker_tx_export_enqueue(tx, &skb);
         }
         CHECK(enqueued == 0 && !skb);
-        (void)ker_tx_export_poll(&f.tx, 1);
-        CHECK(f.tx.last_error == 0 || f.tx.last_error == -EAGAIN);
+        retry_export_until_accepted(tx, deadline);
+        CHECK(tx->last_error == 0 || tx->last_error == -EAGAIN);
         check_before_deadline(deadline);
     }
-    retry_export_until_accepted(deadline);
+    retry_export_until_accepted(&f.tx, deadline);
+    retry_export_until_accepted(&f.tx_exact, deadline);
     atomic_store_explicit(&f.producer_done, true, memory_order_release);
 
     while (!atomic_load_explicit(&f.consumer_cleaned, memory_order_acquire)) {
@@ -382,8 +437,11 @@ int main(void)
     }
     CHECK(f.consumer_result == (int)COUNT &&
         atomic_load_explicit(&f.received, memory_order_acquire) == COUNT);
-    CHECK(rte_ring_empty(f.ring.ring) && !f.tx.pending && f.tx.packets == 0);
-    CHECK(ker_tx_export_cleanup(&f.tx) == 0);
+    CHECK(rte_ring_empty(f.ring.ring) && !f.tx.pending && f.tx.packets == 0 &&
+        !f.tx_exact.pending && f.tx_exact.packets == 0);
+    CHECK(ker_tx_export_cleanup(&f.tx_exact) == 0 && ker_tx_export_cleanup(&f.tx) == 0);
+    CHECK(ker_ipv4_address_cleanup(&f.producer_address) == 0);
+    CHECK(ker_eth_device_cleanup(&f.producer_device) == 0);
     CHECK(ker_skb_context_cleanup(&f.producer_context) == 0);
     CHECK(ker_packet_pool_cleanup(&f.producer_pool) == 0);
     CHECK(ker_memory_shutdown() == 0);

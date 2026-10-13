@@ -130,12 +130,13 @@ if(KER_WITH_DPDK)
     add_test(NAME cross-worker-ring COMMAND ker-cross-worker-ring-test)
     set_tests_properties(cross-worker-ring PROPERTIES TIMEOUT 30)
     add_executable(ker-fstack-concurrent-ring-test fstack-concurrent-ring.c)
-    target_include_directories(ker-fstack-concurrent-ring-test PRIVATE "${PROJECT_SOURCE_DIR}/src")
+    target_include_directories(ker-fstack-concurrent-ring-test PRIVATE "${PROJECT_SOURCE_DIR}/src" "${KER_ADDR_IMPORT}")
     target_compile_definitions(ker-fstack-concurrent-ring-test PRIVATE _GNU_SOURCE)
     target_link_libraries(ker-fstack-concurrent-ring-test PRIVATE ker_rx_ring_port ker_skb_headers
         ker_neighbor_headers ker_receive_headers ker_eth_headers ker_tx_export_port ker_tx_ring_port
         ker_skb_port ker_eth_port ker_receive_port ker_ipv4_view_port ker_udp_view_port ker_tcp_view_port
         ker_icmp_echo_view_port ker_icmp_echo_create_port ker_transport_receive_port ker_udp_create_port ker_tcp_create_port
+        ker_udp_configured_create_port ker_tcp_configured_create_port ker_icmp_echo_configured_create_port
         ker_neighbor_port ker_address_port ker_timer_list_port ker_linux_port ker_dpdk_port
         PkgConfig::DPDK Threads::Threads)
     add_test(NAME fstack-concurrent-ring COMMAND ker-fstack-concurrent-ring-test)
@@ -198,6 +199,31 @@ if(KER_WITH_DPDK)
         ker_eth_port ker_linux_port ker_dpdk_port ker_skb_port Threads::Threads)
     add_test(NAME udp-create COMMAND ker-udp-create-test)
     set_tests_properties(udp-create PROPERTIES TIMEOUT 30)
+    add_executable(ker-udp-configured-create-test udp-configured-create.c)
+    target_include_directories(ker-udp-configured-create-test PRIVATE "${PROJECT_SOURCE_DIR}/src" "${KER_ADDR_IMPORT}")
+    target_compile_definitions(ker-udp-configured-create-test PRIVATE _GNU_SOURCE)
+    target_link_libraries(ker-udp-configured-create-test PRIVATE ker_skb_headers ker_address_headers
+        ker_udp_configured_create_port ker_udp_create_port ker_address_port
+        ker_eth_port ker_linux_port ker_dpdk_port ker_skb_port Threads::Threads)
+    add_test(NAME udp-configured-create COMMAND ker-udp-configured-create-test)
+    set_tests_properties(udp-configured-create PROPERTIES TIMEOUT 30)
+    add_executable(ker-tcp-configured-create-test tcp-configured-create.c)
+    target_include_directories(ker-tcp-configured-create-test PRIVATE "${PROJECT_SOURCE_DIR}/src" "${KER_ADDR_IMPORT}")
+    target_compile_definitions(ker-tcp-configured-create-test PRIVATE _GNU_SOURCE)
+    target_link_libraries(ker-tcp-configured-create-test PRIVATE ker_skb_headers ker_address_headers
+        ker_tcp_configured_create_port ker_tcp_create_port ker_address_port
+        ker_eth_port ker_linux_port ker_dpdk_port ker_skb_port Threads::Threads)
+    add_test(NAME tcp-configured-create COMMAND ker-tcp-configured-create-test)
+    set_tests_properties(tcp-configured-create PROPERTIES TIMEOUT 30)
+    add_executable(ker-icmp-echo-configured-create-test icmp-echo-configured-create.c)
+    target_include_directories(ker-icmp-echo-configured-create-test PRIVATE "${PROJECT_SOURCE_DIR}/src" "${KER_ADDR_IMPORT}")
+    target_compile_definitions(ker-icmp-echo-configured-create-test PRIVATE _GNU_SOURCE)
+    target_link_libraries(ker-icmp-echo-configured-create-test PRIVATE ker_skb_headers ker_address_headers
+        ker_icmp_echo_configured_create_port ker_icmp_echo_create_port ker_udp_configured_create_port
+        ker_udp_create_port ker_tcp_configured_create_port ker_tcp_create_port ker_address_port
+        ker_eth_port ker_linux_port ker_dpdk_port ker_skb_port Threads::Threads)
+    add_test(NAME icmp-echo-configured-create COMMAND ker-icmp-echo-configured-create-test)
+    set_tests_properties(icmp-echo-configured-create PROPERTIES TIMEOUT 30)
     add_executable(ker-udp-ip-options-test udp-ip-options.c)
     target_include_directories(ker-udp-ip-options-test PRIVATE "${PROJECT_SOURCE_DIR}/src")
     target_compile_definitions(ker-udp-ip-options-test PRIVATE _GNU_SOURCE)
@@ -345,6 +371,20 @@ if(KER_WITH_DPDK)
         Threads::Threads)
     add_test(NAME arp-concurrent-ring COMMAND ker-arp-concurrent-ring-test)
     set_tests_properties(arp-concurrent-ring PROPERTIES TIMEOUT 30)
+    add_executable(ker-configured-ring-test configured-ring.c)
+    target_include_directories(ker-configured-ring-test PRIVATE "${PROJECT_SOURCE_DIR}/src"
+        "${KER_ADDR_IMPORT}" "${KER_NEIGH_UPDATE_IMPORT}")
+    target_compile_definitions(ker-configured-ring-test PRIVATE _GNU_SOURCE)
+    target_link_libraries(ker-configured-ring-test PRIVATE ker_arp_rx_headers ker_arp_rx_port
+        ker_address_headers ker_address_port ker_arp_port ker_receive_headers ker_receive_port
+        ker_eth_headers ker_neighbor_headers ker_neighbor_port ker_timer_list_port
+        ker_eth_port ker_rx_ring_port ker_tx_export_port ker_tx_ring_port
+        ker_udp_configured_create_port ker_tcp_configured_create_port ker_icmp_echo_configured_create_port
+        ker_udp_create_port ker_tcp_create_port ker_icmp_echo_create_port ker_transport_receive_port
+        ker_ipv4_view_port ker_udp_view_port ker_tcp_view_port ker_icmp_echo_view_port
+        ker_linux_port ker_dpdk_port ker_skb_port PkgConfig::DPDK Threads::Threads)
+    add_test(NAME configured-ring COMMAND ker-configured-ring-test)
+    set_tests_properties(configured-ring PROPERTIES TIMEOUT 30)
     add_executable(ker-timer-list-test timer-list.c)
     target_compile_definitions(ker-timer-list-test PRIVATE _GNU_SOURCE)
     target_link_libraries(ker-timer-list-test PRIVATE ker_timer_list_headers ker_timer_list_port
@@ -380,6 +420,6 @@ if(KER_WITH_DPDK)
     set_tests_properties(skb PROPERTIES TIMEOUT 30)
     set_tests_properties(dpdk-memory PROPERTIES TIMEOUT 30)
     list(JOIN DPDK_LIBRARY_DIRS ":" ker_dpdk_library_path)
-    set_tests_properties(checksum timer refcount dpdk-memory skb worker ethernet fstack-ipv4-ingress-validation fstack-udp-ingress-validation fstack-udp-minimal-boundaries fstack-tcp-ingress-validation ipv4-fields transport-receive icmp-echo fstack-chain-export fstack-chain-checksum udp-create udp-ip-options udp-neighbor-create tcp-create tcp-ip-options tcp-neighbor-create tcp-options napi receive arp arp-configured arp-ring arp-concurrent-ring ipv4-address neighbor-timer neighbor arp-receive fstack-arp-chain-feedback skb-queue timer-list arp-probe-import neighbor-update-import tx-export tx-export-chain tx-ring rx-ring cross-worker-ring fstack-concurrent-ring ${ker_fstack_tests} PROPERTIES
+    set_tests_properties(checksum timer refcount dpdk-memory skb worker ethernet fstack-ipv4-ingress-validation fstack-udp-ingress-validation fstack-udp-minimal-boundaries fstack-tcp-ingress-validation ipv4-fields transport-receive icmp-echo icmp-echo-configured-create fstack-chain-export fstack-chain-checksum udp-create udp-configured-create tcp-configured-create udp-ip-options udp-neighbor-create tcp-create tcp-ip-options tcp-neighbor-create tcp-options napi receive arp arp-configured arp-ring arp-concurrent-ring configured-ring ipv4-address neighbor-timer neighbor arp-receive fstack-arp-chain-feedback skb-queue timer-list arp-probe-import neighbor-update-import tx-export tx-export-chain tx-ring rx-ring cross-worker-ring fstack-concurrent-ring ${ker_fstack_tests} PROPERTIES
         ENVIRONMENT "LD_LIBRARY_PATH=${ker_dpdk_library_path}:$ENV{LD_LIBRARY_PATH}")
 endif()
