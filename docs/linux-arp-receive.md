@@ -42,7 +42,9 @@ multicast/class-E IPv4 地址；源 MAC 必须非零单播。源 IP 为零仅接
 
 回调可使用已有原始 arp_create 构造应答并放入自身有界发送队列；构造失败和
 背压由调用方处理。本阶段测试完成 request→门控→复制消息→原始 reply 构造，
-不包含生产自动应答、PMD 或重试发送。同步 handoff 使用线程作用域；嵌套 ARP
+基础 receiver 不包含自动应答。独立、显式注册的
+[本地 responder](linux-arp-responder.md) 可在此回调边界生成回复并交给有界
+TX exporter；它仍不提供完整 arp_process 或 PMD。同步 handoff 使用线程作用域；嵌套 ARP
 接收拒绝并消费自己的引用，不替换正在处理的 scope。
 
 ## Explicit feedback for monitored neighbors

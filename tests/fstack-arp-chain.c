@@ -10,6 +10,7 @@
 #include "runtime/udp-create.h"
 #include "ker/linux_neighbor_update.h"
 #include <errno.h>
+#include <linux/neighbour.h>
 
 static struct ker_packet_pool pool;
 static struct ker_skb_context context;
@@ -33,6 +34,10 @@ static unsigned int notification_expected_state;
 static __be32 expected_sender_ip, expected_target_ip;
 static bool expected_target_local;
 static unsigned int expected_packet_type = PACKET_HOST;
+
+static void test_header_cache_update(struct hh_cache *hh, const struct net_device *dev,
+    const unsigned char *mac)
+{ (void)hh; (void)dev; (void)mac; }
 
 static int tx_sink(struct rte_mbuf *packet, void *arg)
 {
@@ -58,7 +63,9 @@ static int receive_arp(const struct ker_arp_message *message, void *arg)
 static void monitor_notify(const struct ker_neighbor_event *event, void *arg)
 {
     (void)arg;
-    CHECK(event->ip == peer_ip);
+    __be32 monitored_ip;
+    memcpy(&monitored_ip, monitor.entry->primary_key, sizeof(monitored_ip));
+    CHECK(event->ip == monitored_ip);
     if (notification_expected_state)
         CHECK(event->state == notification_expected_state);
     ++notifications;
@@ -372,6 +379,133 @@ int main(void)
     CHECK(ker_neighbor_mac(&neighbors, entry, restored) == 0 && !memcmp(restored, original_peer, ETH_ALEN));
     CHECK(ker_neighbor_release(&neighbors, entry) == 0);
     CHECK(ker_neighbor_remove(&neighbors, peer_ip) == 0);
+
+    /* First contact owns a genuine NUD_NONE entry, queues data behind the
+     * native ARP probe, and learns the mapping through worker RX feedback. */
+    CHECK(ker_tx_export_init(&tx, &context, 8, SIZE_MAX, tx_sink, &tx) == 0);
+    CHECK(ker_neighbor_add(&neighbors, peer_ip, original_peer) == 0);
+    CHECK(ker_neighbor_monitor_discovery_init(&monitor, &neighbors, &worker.timers, &tx,
+        peer_ip, monitor_probe, monitor_notify, NULL) == -EEXIST);
+    CHECK(tx.resolver_refs == 0 && worker.timers.native_live == 0);
+    CHECK(ker_neighbor_lookup(&neighbors, peer_ip, &entry) == 0);
+    unsigned char duplicate_mac[ETH_ALEN];
+    CHECK(entry->nud_state == NUD_PERMANENT &&
+        ker_neighbor_mac(&neighbors, entry, duplicate_mac) == 0 &&
+        !memcmp(duplicate_mac, original_peer, ETH_ALEN));
+    CHECK(ker_neighbor_release(&neighbors, entry) == 0);
+    CHECK(ker_neighbor_remove(&neighbors, peer_ip) == 0);
+    struct ker_skb_context wrong_context = {.lcore = rte_lcore_id()};
+    struct ker_skb_context *tx_context = tx.queue.context;
+    tx.queue.context = &wrong_context;
+    CHECK(ker_neighbor_monitor_discovery_init(&monitor, &neighbors, &worker.timers, &tx,
+        peer_ip, monitor_probe, monitor_notify, NULL) == -EXDEV);
+    tx.queue.context = tx_context;
+    CHECK(ker_neighbor_lookup(&neighbors, peer_ip, &entry) == -ENOENT && tx.resolver_refs == 0);
+    int64_t clock_now = worker.timers.now_ns;
+    ker_memory_fail_after(0);
+    CHECK(ker_neighbor_monitor_discovery_init(&monitor, &neighbors, &worker.timers, &tx,
+        peer_ip, monitor_probe, monitor_notify, NULL) == -ENOMEM);
+    ker_memory_fail_after(-1);
+    CHECK(!monitor.entry && !monitor.table && tx.resolver_refs == 0 &&
+        worker.timers.now_ns == clock_now && worker.timers.native_live == 0);
+    CHECK(ker_neighbor_lookup(&neighbors, peer_ip, &entry) == -ENOENT);
+    bool clock_owned = worker.timers.native_owned;
+    unsigned int clock_owner = worker.timers.native_lcore;
+    worker.timers.native_owned = true;
+    worker.timers.native_lcore = rte_lcore_id() + 1;
+    CHECK(ker_neighbor_monitor_discovery_init(&monitor, &neighbors, &worker.timers, &tx,
+        peer_ip, monitor_probe, monitor_notify, NULL) == -EXDEV);
+    worker.timers.native_owned = clock_owned;
+    worker.timers.native_lcore = clock_owner;
+    CHECK(!monitor.entry && !monitor.table && tx.resolver_refs == 0 &&
+        worker.timers.native_live == 0);
+    CHECK(ker_neighbor_lookup(&neighbors, peer_ip, &entry) == -ENOENT);
+    const struct header_ops *saved_header_ops = device.native->header_ops;
+    struct header_ops unsupported_header_ops = *saved_header_ops;
+    unsupported_header_ops.cache_update = test_header_cache_update;
+    device.native->header_ops = &unsupported_header_ops;
+    CHECK(ker_neighbor_monitor_discovery_init(&monitor, &neighbors, &worker.timers, &tx,
+        peer_ip, monitor_probe, monitor_notify, NULL) == -ENOTSUP);
+    device.native->header_ops = saved_header_ops;
+    CHECK(!monitor.entry && !monitor.table && tx.resolver_refs == 0 &&
+        worker.timers.native_live == 0);
+    CHECK(ker_neighbor_lookup(&neighbors, peer_ip, &entry) == -ENOENT);
+    CHECK(ker_neighbor_monitor_discovery_init(&monitor, &neighbors, &worker.timers, &tx,
+        foreign_ip, monitor_probe, monitor_notify, NULL) == 0);
+    CHECK(monitor_state() == NUD_NONE && ker_neighbor_monitor_cleanup(&monitor) == 0 &&
+        tx.resolver_refs == 0);
+    CHECK(ker_neighbor_lookup(&neighbors, foreign_ip, &entry) == -ENOENT);
+    CHECK(ker_neighbor_monitor_discovery_init(&monitor, &neighbors, &worker.timers, &tx,
+        peer_ip, monitor_probe, monitor_notify, NULL) == 0);
+    CHECK(monitor.owns_entry && monitor_state() == NUD_NONE && tx.resolver_refs == 1 &&
+        refcount_read(&monitor.entry->refcnt) == 2 && !timer_pending(&monitor.entry->timer));
+    CHECK(ker_neighbor_lookup(&neighbors, peer_ip, &entry) == 0);
+    unsigned int clock_live_before_cleanup = worker.timers.native_live;
+    CHECK(ker_neighbor_monitor_cleanup(&monitor) == -EBUSY && monitor.owns_entry && tx.resolver_refs == 1 &&
+        worker.timers.native_live == clock_live_before_cleanup);
+    CHECK(ker_neighbor_release(&neighbors, entry) == 0);
+    static const unsigned char unknown_mac[ETH_ALEN] = {0};
+    static const unsigned char first_data[] = {'a'}, second_data[] = {'b'};
+    struct sk_buff *first = NULL, *second = NULL;
+    CHECK(ker_udp_ipv4_create_configured(&address, unknown_mac, peer_ip,
+        rte_cpu_to_be_16(1111), rte_cpu_to_be_16(2222), 64, NULL, 0,
+        first_data, sizeof(first_data), &first) == 0);
+    CHECK(ker_udp_ipv4_create_configured(&address, unknown_mac, peer_ip,
+        rte_cpu_to_be_16(1111), rte_cpu_to_be_16(2222), 64, NULL, 0,
+        second_data, sizeof(second_data), &second) == 0);
+    unsigned int probes_before_discovery = probe_callbacks;
+    CHECK(ker_neighbor_monitor_resolve_output(&monitor, &first) == 0 && !first);
+    CHECK(monitor_state() == NUD_INCOMPLETE && monitor.entry->arp_queue.qlen == 1 &&
+        tx.packets == 1 && probe_callbacks == probes_before_discovery + 1);
+    CHECK(ker_neighbor_monitor_resolve_output(&monitor, &second) == 0 && !second);
+    CHECK(monitor.entry->arp_queue.qlen == 2 && tx.packets == 1);
+    notification_expected_state = NUD_REACHABLE;
+    expected_sender_ip = peer_ip; expected_target_ip = local_ip;
+    expected_target_local = true; expected_packet_type = PACKET_HOST;
+    feedback_result = -EFAULT;
+    poll_one(arp_reply_chain(local_mac, peer_ip, local_ip, true));
+    CHECK(feedback_result == 0 && monitor_state() == NUD_REACHABLE &&
+        monitor.entry->arp_queue.qlen == 0 && monitor.entry->arp_queue_len_bytes == 0 && tx.packets == 3);
+    notification_expected_state = 0;
+    CHECK(ker_tx_export_poll(&tx, 1) == 1 && tx_packet && tx_packet->pkt_len == 42);
+    ker_packet_free(tx_packet); tx_packet = NULL;
+    CHECK(ker_tx_export_poll(&tx, 1) == 1 && tx_packet && tx_packet->pkt_len == 43);
+    CHECK(!memcmp(rte_pktmbuf_mtod(tx_packet, const unsigned char *), learned_peer, ETH_ALEN));
+    CHECK(rte_pktmbuf_mtod(tx_packet, const unsigned char *)[ETH_HLEN + 20 + 8] == 'a');
+    ker_packet_free(tx_packet); tx_packet = NULL;
+    CHECK(ker_tx_export_poll(&tx, 1) == 1 && tx_packet && tx_packet->pkt_len == 43);
+    CHECK(!memcmp(rte_pktmbuf_mtod(tx_packet, const unsigned char *), learned_peer, ETH_ALEN));
+    CHECK(rte_pktmbuf_mtod(tx_packet, const unsigned char *)[ETH_HLEN + 20 + 8] == 'b');
+    ker_packet_free(tx_packet); tx_packet = NULL;
+    CHECK(ker_neighbor_monitor_cleanup(&monitor) == 0 && tx.resolver_refs == 0);
+    CHECK(ker_neighbor_lookup(&neighbors, peer_ip, &entry) == -ENOENT);
+
+    /* Cancellation releases a queued packet before native retries eventually
+     * purge a later unresolved packet when NUD_FAILED is reached. */
+    CHECK(ker_neighbor_monitor_discovery_init(&monitor, &neighbors, &worker.timers, &tx,
+        foreign_ip, monitor_probe, monitor_notify, NULL) == 0);
+    struct sk_buff *timed_out = NULL;
+    CHECK(ker_udp_ipv4_create_configured(&address, unknown_mac, foreign_ip,
+        rte_cpu_to_be_16(1111), rte_cpu_to_be_16(2222), 64, NULL, 0,
+        first_data, sizeof(first_data), &timed_out) == 0);
+    CHECK(ker_neighbor_monitor_resolve_output(&monitor, &timed_out) == 0 && !timed_out);
+    CHECK(ker_neighbor_monitor_resolution_cancel(&monitor, &timed_out) == 1 && timed_out);
+    CHECK(ker_skb_free(timed_out) == 0 && monitor.entry->arp_queue.qlen == 0);
+    CHECK(ker_udp_ipv4_create_configured(&address, unknown_mac, foreign_ip,
+        rte_cpu_to_be_16(1111), rte_cpu_to_be_16(2222), 64, NULL, 0,
+        second_data, sizeof(second_data), &timed_out) == 0);
+    CHECK(ker_neighbor_monitor_resolve_output(&monitor, &timed_out) == 0 && !timed_out);
+    for (unsigned int i = 0; i < 8 && monitor_state() != NUD_FAILED; ++i) {
+        int64_t deadline; struct ker_worker_result result;
+        CHECK(ker_runtime_next_deadline(&worker.timers, &deadline) == 1);
+        CHECK(ker_worker_poll(&worker, deadline, &result) == 0 && result.rx == 0);
+    }
+    CHECK(monitor_state() == NUD_FAILED && monitor.entry->arp_queue.qlen == 0);
+    struct sk_buff *probe_packet = NULL;
+    while (ker_tx_export_cancel(&tx, &probe_packet) == 1) CHECK(ker_skb_free(probe_packet) == 0);
+    CHECK(ker_neighbor_monitor_cleanup(&monitor) == 0 && tx.resolver_refs == 0);
+    CHECK(ker_neighbor_lookup(&neighbors, foreign_ip, &entry) == -ENOENT);
+    CHECK(ker_tx_export_cleanup(&tx) == 0);
     CHECK(ker_worker_cleanup(&worker) == 0);
     CHECK(ker_arp_receiver_unregister(&receiver) == 0);
     CHECK(ker_neighbor_table_cleanup(&neighbors) == 0);

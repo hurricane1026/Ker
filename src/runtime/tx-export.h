@@ -23,6 +23,7 @@ struct ker_tx_export {
     unsigned int segment_payload_limit;
     unsigned int last_completed;
     unsigned int resolver_refs;
+    unsigned int responder_refs;
     int last_error;
     bool polling;
     enum ker_tx_export_mode mode;
