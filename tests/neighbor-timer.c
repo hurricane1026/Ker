@@ -3,6 +3,8 @@
 #include "runtime/neighbor-timer.h"
 #include "ker/linux_neighbor_update.h"
 #include "runtime/arp.h"
+#include "runtime/udp-create.h"
+#include "runtime/tx-export.h"
 #include "runtime/memory.h"
 #include "runtime/arp-probe-port.h"
 #include <linux/irqflags.h>
@@ -17,6 +19,9 @@ static struct ker_ipv4_address address;
 static struct ker_neighbor_table table;
 static struct ker_runtime runtime_clock;
 static struct ker_neighbor_monitor monitor;
+static struct ker_tx_export output_tx;
+static struct rte_mbuf *output_packet;
+static int output_sink_error;
 static unsigned int probes, notifications, last_state;
 static bool build_probes;
 static struct ker_neighbor_event saved_event;
@@ -28,6 +33,146 @@ static const unsigned char changed_peer[6] = {2,10,9,8,7,6};
 static struct neighbour *seq_entry;
 static atomic_int seq_stress_error;
 static __be32 ip(unsigned int n) { return rte_cpu_to_be_32(0xc0000200U+n); }
+static unsigned int state(void);
+static int output_sink(struct rte_mbuf *packet, void *arg)
+{
+    CHECK(arg == &output_tx && !output_packet);
+    if (output_sink_error) return output_sink_error;
+    output_packet = packet;
+    return 0;
+}
+static void resolved_output(unsigned int expected_state, const unsigned char expected_mac[ETH_ALEN])
+{
+    static const unsigned char old_mac[ETH_ALEN] = {2, 90, 91, 92, 93, 94};
+    static const unsigned char payload[] = {0x31, 0x41, 0x59, 0x26};
+    CHECK(ker_tx_export_init(&output_tx, &context, 2, SIZE_MAX, output_sink, &output_tx) == 0);
+    struct sk_buff *skb = NULL;
+    CHECK(ker_udp_ipv4_create_configured(&address, old_mac, ip(2),
+        rte_cpu_to_be_16(1234), rte_cpu_to_be_16(4321), 64, NULL, 0,
+        payload, sizeof(payload), &skb) == 0);
+    unsigned char original[ETH_HLEN + 20 + 8 + sizeof(payload)];
+    CHECK(skb->len == sizeof(original));
+    memcpy(original, skb->data, sizeof(original));
+    struct sk_buff *rejected = NULL;
+    CHECK(ker_udp_ipv4_create_configured(&address, old_mac, ip(2),
+        rte_cpu_to_be_16(1234), rte_cpu_to_be_16(4321), 64, NULL, 0,
+        payload, sizeof(payload), &rejected) == 0);
+    rejected->data[12] = 0x86;
+    unsigned char rejected_wire[ETH_HLEN + 20 + 8 + sizeof(payload)];
+    memcpy(rejected_wire, rejected->data, sizeof(rejected_wire));
+    CHECK(ker_neighbor_monitor_output(&monitor, &output_tx, &rejected) == -EINVAL && rejected &&
+        !memcmp(rejected->data, rejected_wire, sizeof(rejected_wire)));
+    CHECK(ker_skb_free(rejected) == 0);
+    unsigned int before_state = state();
+    CHECK(before_state == expected_state);
+    unsigned long used = monitor.entry->used;
+    runtime_clock.now_ns += INT64_C(7000000);
+    unsigned long now;
+    CHECK(ker_timer_list_now(&monitor.timer, &now) == 0 && now > used);
+    unsigned long event_trace = monitor.event_send_events;
+    CHECK(ker_neighbor_monitor_output(&monitor, &output_tx, &skb) == 0 && !skb);
+    bool stale = before_state == NUD_STALE;
+    CHECK(monitor.entry->used == now && monitor.event_send_events == event_trace + (stale ? 1U : 0U));
+    if (stale) CHECK(state() == NUD_DELAY && timer_pending(&monitor.entry->timer) &&
+        refcount_read(&monitor.entry->refcnt) == 3 && monitor.event_send_events == event_trace + 1);
+    else CHECK(state() == before_state);
+    CHECK(ker_tx_export_poll(&output_tx, 1) == 1 && output_packet);
+    CHECK(output_packet->pkt_len == sizeof(original));
+    const unsigned char *wire = rte_pktmbuf_mtod(output_packet, const unsigned char *);
+    CHECK(!memcmp(wire, expected_mac, ETH_ALEN) && !memcmp(wire + ETH_ALEN, original + ETH_ALEN,
+        sizeof(original) - ETH_ALEN));
+    CHECK(memcmp(wire, original, ETH_ALEN) != 0 && used < monitor.entry->used);
+    ker_packet_free(output_packet); output_packet = NULL;
+    CHECK(ker_tx_export_cleanup(&output_tx) == 0);
+}
+static void output_admission_rejections(void)
+{
+    static const unsigned char old_mac[ETH_ALEN] = {2, 90, 91, 92, 93, 94};
+    struct sk_buff *skb = NULL, *clone = NULL;
+    CHECK(ker_tx_export_init(&output_tx, &context, 4, SIZE_MAX, output_sink, &output_tx) == 0);
+    CHECK(ker_udp_ipv4_create_configured(&address, old_mac, ip(2),
+        rte_cpu_to_be_16(1), rte_cpu_to_be_16(2), 64, NULL, 0, "x", 1, &skb) == 0);
+    CHECK(ker_skb_clone(skb, &clone) == 0);
+    CHECK(ker_neighbor_monitor_output(&monitor, &output_tx, &clone) == -ENOTSUP && clone);
+    CHECK(ker_skb_free(clone) == 0);
+    int original_offset = skb->network_header;
+    skb->network_header++;
+    CHECK(ker_neighbor_monitor_output(&monitor, &output_tx, &skb) == -EINVAL && skb);
+    skb->network_header = original_offset;
+    unsigned char original_wire[ETH_HLEN + 20 + 8 + 1];
+    memcpy(original_wire, skb->data, sizeof(original_wire));
+    skb->data[ETH_HLEN + 12] ^= 1;
+    CHECK(ker_neighbor_monitor_output(&monitor, &output_tx, &skb) == -EINVAL && skb);
+    memcpy(skb->data, original_wire, sizeof(original_wire));
+    skb->data[ETH_HLEN + 16] ^= 1;
+    CHECK(ker_neighbor_monitor_output(&monitor, &output_tx, &skb) == -EINVAL && skb);
+    memcpy(skb->data, original_wire, sizeof(original_wire));
+    unsigned int original_state = monitor.entry->nud_state;
+    const unsigned int unresolved_states[] = {NUD_INCOMPLETE, NUD_FAILED};
+    for (unsigned int i = 0; i < sizeof(unresolved_states) / sizeof(unresolved_states[0]); ++i) {
+        monitor.entry->nud_state = unresolved_states[i];
+        CHECK(ker_neighbor_monitor_output(&monitor, &output_tx, &skb) == -ENOTSUP && skb);
+    }
+    monitor.entry->nud_state = original_state;
+    unsigned short old_hh = monitor.entry->hh.hh_len;
+    monitor.entry->hh.hh_len = 1;
+    CHECK(ker_neighbor_monitor_output(&monitor, &output_tx, &skb) == -ENOTSUP && skb);
+    monitor.entry->hh.hh_len = old_hh;
+    unsigned long flags = ker_local_irq_save();
+    CHECK(ker_neighbor_monitor_output(&monitor, &output_tx, &skb) == -EBUSY && skb);
+    ker_local_irq_restore(flags);
+    bool was_polling = runtime_clock.polling;
+    runtime_clock.polling = true;
+    CHECK(ker_neighbor_monitor_output(&monitor, &output_tx, &skb) == -EBUSY && skb);
+    runtime_clock.polling = was_polling;
+    unsigned int timer_flags = monitor.timer.native->flags;
+    monitor.timer.native->flags |= 0x80000000U;
+    size_t live_before_scope_error = context.live;
+    CHECK(ker_neighbor_monitor_output(&monitor, &output_tx, &skb) == -EINVAL && skb &&
+        context.live == live_before_scope_error && state() == original_state &&
+        !memcmp(skb->data, original_wire, sizeof(original_wire)));
+    monitor.timer.native->flags = timer_flags;
+    CHECK(ker_skb_free(skb) == 0 && ker_tx_export_cleanup(&output_tx) == 0);
+}
+static void output_sink_retry(void)
+{
+    static const unsigned char old_mac[ETH_ALEN] = {2, 90, 91, 92, 93, 94};
+    struct sk_buff *first = NULL, *second = NULL;
+    CHECK(ker_tx_export_init(&output_tx, &context, 2, SIZE_MAX, output_sink, &output_tx) == 0);
+    CHECK(ker_udp_ipv4_create_configured(&address, old_mac, ip(2),
+        rte_cpu_to_be_16(1111), rte_cpu_to_be_16(2222), 64, NULL, 0, "a", 1, &first) == 0);
+    CHECK(ker_udp_ipv4_create_configured(&address, old_mac, ip(2),
+        rte_cpu_to_be_16(1111), rte_cpu_to_be_16(2222), 64, NULL, 0, "b", 1, &second) == 0);
+    CHECK(ker_neighbor_monitor_output(&monitor, &output_tx, &first) == 0 && !first);
+    CHECK(ker_neighbor_monitor_output(&monitor, &output_tx, &second) == 0 && !second);
+    output_sink_error = -EAGAIN;
+    CHECK(ker_tx_export_poll(&output_tx, 1) == -EAGAIN && !output_packet && output_tx.pending && output_tx.packets == 2);
+    output_sink_error = 0;
+    CHECK(ker_tx_export_poll(&output_tx, 1) == 1 && output_packet);
+    CHECK(rte_pktmbuf_mtod(output_packet, const unsigned char *)[ETH_HLEN + 20 + 8] == 'a');
+    ker_packet_free(output_packet); output_packet = NULL;
+    CHECK(ker_tx_export_poll(&output_tx, 1) == 1 && output_packet);
+    CHECK(rte_pktmbuf_mtod(output_packet, const unsigned char *)[ETH_HLEN + 20 + 8] == 'b');
+    ker_packet_free(output_packet); output_packet = NULL;
+    CHECK(ker_tx_export_cleanup(&output_tx) == 0);
+}
+static void output_backpressure(void)
+{
+    static const unsigned char old_mac[ETH_ALEN] = {2, 90, 91, 92, 93, 94};
+    struct sk_buff *first = NULL, *second = NULL;
+    CHECK(ker_tx_export_init(&output_tx, &context, 1, SIZE_MAX, output_sink, &output_tx) == 0);
+    CHECK(ker_udp_ipv4_create_configured(&address, old_mac, ip(2),
+        rte_cpu_to_be_16(1111), rte_cpu_to_be_16(2222), 64, NULL, 0, "a", 1, &first) == 0);
+    CHECK(ker_udp_ipv4_create_configured(&address, old_mac, ip(2),
+        rte_cpu_to_be_16(1111), rte_cpu_to_be_16(2222), 64, NULL, 0, "b", 1, &second) == 0);
+    CHECK(ker_neighbor_monitor_output(&monitor, &output_tx, &first) == 0 && !first && output_tx.packets == 1);
+    size_t before_drop = context.live;
+    CHECK(ker_neighbor_monitor_output(&monitor, &output_tx, &second) == -ENOSPC && !second &&
+        output_tx.packets == 1 && context.live + 1 == before_drop);
+    CHECK(ker_tx_export_poll(&output_tx, 1) == 1 && output_packet);
+    ker_packet_free(output_packet); output_packet = NULL;
+    CHECK(ker_tx_export_cleanup(&output_tx) == 0);
+}
 static void guarded(const struct ker_neighbor_event *e)
 {
     CHECK(e->ip == ip(2) && (memcmp(e->mac,peer,6)==0 || memcmp(e->mac,changed_peer,6)==0));
@@ -245,6 +390,15 @@ int main(void)
     CHECK(!monitor.entry && !monitor.table && runtime_clock.native_live==0);
     ker_runtime_init(&runtime_clock);
     init();
+    resolved_output(NUD_REACHABLE, peer);
+    output_backpressure();
+    output_admission_rejections();
+    output_sink_retry();
+    CHECK(ker_neighbor_monitor_cleanup(&monitor) == 0);
+    init(); stale();
+    resolved_output(NUD_STALE, peer);
+    CHECK(ker_neighbor_monitor_cleanup(&monitor) == 0);
+    init();
     int64_t equality;
     CHECK(ker_runtime_next_deadline(&runtime_clock,&equality)==1);
     CHECK(ker_runtime_poll(&runtime_clock,equality,8)==1);
@@ -295,10 +449,12 @@ int main(void)
           monitor.entry->used==stale_used && monitor.entry->updated>=stale_updated &&
           timer_pending(&monitor.entry->timer) && refcount_read(&monitor.entry->refcnt)==3);
     event_send_early(NUD_DELAY);
+    resolved_output(NUD_DELAY, peer);
     CHECK(ker_neighbor_monitor_probe(&monitor)==-EALREADY);
     CHECK(ker_neighbor_monitor_event_send(&monitor)==0 && state()==NUD_DELAY);
     build_probes=true; built_probes=0;
     next(); CHECK(state()==NUD_PROBE && probes==1 && last_state==NUD_PROBE);
+    resolved_output(NUD_PROBE, peer);
     event_send_early(NUD_PROBE);
     next(); next(); CHECK(probes==3 && state()==NUD_PROBE && built_probes==3);
     build_probes=false;
@@ -374,6 +530,7 @@ int main(void)
     CHECK(state()==NUD_REACHABLE && memcmp(monitor.entry->ha,changed_peer,ETH_ALEN)==0);
     CHECK(monitor.entry->output==monitor.ops.connected_output && timer_pending(&monitor.entry->timer));
     CHECK(refcount_read(&monitor.entry->refcnt)==3 && notifications==before_notifications+1 && last_state==NUD_REACHABLE);
+    resolved_output(NUD_REACHABLE, changed_peer);
     CHECK(ker_neighbor_monitor_cleanup(&monitor)==0);
     CHECK(ker_neighbor_lookup(&table,ip(2),&extra_reference)==0);
     unsigned char restored[ETH_ALEN];

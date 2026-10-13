@@ -1,0 +1,20 @@
+set(KER_NEIGH_OUTPUT_IMPORT "${PROJECT_BINARY_DIR}/linux-neighbor-output")
+set(KER_NEIGH_OUTPUT_MANIFEST "${PROJECT_SOURCE_DIR}/src/compat/linux-neighbor-output-manifest.json")
+execute_process(COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tools/import-linux-neighbor-output.py"
+    --linux "${KER_LINUX_DIR}" --manifest "${KER_NEIGH_OUTPUT_MANIFEST}" --out "${KER_NEIGH_OUTPUT_IMPORT}"
+    RESULT_VARIABLE ker_neighbor_output_result ERROR_VARIABLE ker_neighbor_output_error)
+if(NOT ker_neighbor_output_result EQUAL 0)
+    message(FATAL_ERROR "Linux neighbor output import failed: ${ker_neighbor_output_error}")
+endif()
+file(READ "${KER_NEIGH_OUTPUT_MANIFEST}" ker_neighbor_output_manifest_json)
+string(JSON ker_neighbor_output_files LENGTH "${ker_neighbor_output_manifest_json}" files)
+math(EXPR ker_neighbor_output_last "${ker_neighbor_output_files} - 1")
+foreach(ker_neighbor_output_index RANGE ${ker_neighbor_output_last})
+    string(JSON ker_neighbor_output_file MEMBER "${ker_neighbor_output_manifest_json}" files ${ker_neighbor_output_index})
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${KER_LINUX_DIR}/${ker_neighbor_output_file}")
+endforeach()
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${KER_NEIGH_OUTPUT_MANIFEST}"
+    "${PROJECT_SOURCE_DIR}/tools/import-linux-neighbor-output.py" "${PROJECT_SOURCE_DIR}/tools/import-linux-skb.py")
+target_include_directories(ker_neighbor_timer_port PRIVATE "${KER_NEIGH_OUTPUT_IMPORT}")
+target_sources(ker_neighbor_timer_port PRIVATE "${KER_NEIGH_OUTPUT_IMPORT}/linux_neighbor_output.c")
+target_link_libraries(ker_neighbor_timer_port PRIVATE ker_tx_export_port ker_arp_headers)

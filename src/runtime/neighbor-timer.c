@@ -1,9 +1,16 @@
 #include "runtime/neighbor-timer.h"
 #include "compat/neighbor-timer-port.h"
 #include "compat/neighbor-event-send-port.h"
+#include "compat/neighbor-output-port.h"
 #include "ker/linux_neighbor_update.h"
+#include "runtime/tx-export.h"
+#include "runtime/skb.h"
+#include "runtime/arp.h"
+#include <linux/if_ether.h>
 #include <rte_lcore.h>
 #include <errno.h>
+#include <string.h>
+#include <linux/bug.h>
 static _Thread_local struct ker_neighbor_monitor *active;
 static _Thread_local unsigned long bh_saved_flags;
 static _Thread_local bool bh_active;
@@ -215,6 +222,88 @@ int ker_neighbor_monitor_event_send(struct ker_neighbor_monitor *m)
         if(error)return error;
     }
     int result=call_arg(m,event_send_native,m);
+    BUG_ON(bh_active || ker_local_irq_disabled());
+    return result;
+}
+struct output_args { struct ker_neighbor_monitor *monitor; struct sk_buff **packet; };
+static int output_native(void *arg)
+{
+    struct output_args *a=arg;
+    struct sk_buff *skb=*a->packet;
+    /* This is the ownership boundary: timer-scope setup can fail before this
+     * callback, while every native output path consumes the skb. */
+    *a->packet=NULL;
+    if (!skb->dev) skb->dev=a->monitor->entry->dev;
+    return ker_linux_neigh_resolve_output(a->monitor->entry,skb);
+}
+void ker_neighbor_output_free(struct sk_buff *skb)
+{
+    BUG_ON(!active || !active->busy || !skb || ker_skb_free(skb));
+}
+int ker_neighbor_output_xmit(struct sk_buff *skb)
+{
+    BUG_ON(!active || !active->busy || !active->output_tx || !skb);
+    struct sk_buff *owned=skb;
+    int error=ker_tx_export_enqueue(active->output_tx,&owned);
+    if(error) BUG_ON(ker_skb_free(skb));
+    return error;
+}
+void ker_neighbor_output_unsupported_hh(void) { BUG_ON(true); }
+int ker_neighbor_monitor_output(struct ker_neighbor_monitor *m, struct ker_tx_export *tx,
+    struct sk_buff **packet)
+{
+    int error=valid(m); if(error)return error;
+    if(!tx || !packet || !*packet)return -EINVAL;
+    if(m->error)return m->error;
+    if(m->timer.runtime->polling || ker_local_irq_disabled())return -EBUSY;
+    struct neighbour *entry=m->entry;
+    unsigned int state=entry->nud_state;
+    if(state!=NUD_REACHABLE && state!=NUD_STALE && state!=NUD_DELAY && state!=NUD_PROBE)
+        return -ENOTSUP;
+    struct net_device *dev=entry->dev;
+    if(!dev || dev->type!=ARPHRD_ETHER || dev->addr_len!=ETH_ALEN ||
+       dev->hard_header_len!=ETH_HLEN || dev->needed_headroom || dev->needed_tailroom ||
+       !dev->header_ops || dev->header_ops->create!=eth_header || dev->header_ops->cache ||
+       dev->header_ops->cache_update || entry->hh.hh_len || entry->arp_queue.qlen ||
+       entry->arp_queue_len_bytes || !m->table->address || !m->table->address->device ||
+       !m->table->address->native || !m->table->address->native->ifa_list ||
+       m->table->address->device->native!=dev || NEIGH_VAR(entry->parms,APP_PROBES)!=0)
+        return -ENOTSUP;
+    bool pending=timer_pending(&entry->timer);
+    if(pending != (state!=NUD_STALE))return -ENOTSUP;
+    if((unsigned int)refcount_read(&entry->refcnt)!=2U+(unsigned int)pending)return -EBUSY;
+    if(tx->queue.context!=m->table->address->device->context || !tx->sink || tx->polling)
+        return -EXDEV;
+    struct sk_buff *skb=*packet;
+    error=ker_skb_validate(skb,tx->queue.context); if(error)return error;
+    if(skb->next || skb->prev)return -EBUSY;
+    if((uintptr_t)skb->data & 1U)return -EINVAL;
+    struct skb_shared_info *info=skb_shinfo(skb);
+    if(skb_shared(skb) || skb_cloned(skb) || skb->nohdr || skb->data_len ||
+       info->nr_frags || info->frag_list || info->flags || info->gso_size || info->gso_type ||
+       info->tx_flags || info->destructor_arg || skb->head_frag || skb->pp_recycle || skb->fclone ||
+       skb->ip_summed!=CHECKSUM_NONE)return -ENOTSUP;
+    if(skb->dev && skb->dev!=dev)return -EXDEV;
+    if(skb->protocol!=rte_cpu_to_be_16(ETH_P_IP) || skb->len<ETH_HLEN+20 ||
+       skb->mac_len!=ETH_HLEN || skb->mac_header!=skb_headroom(skb) ||
+       skb->network_header!=skb->mac_header+ETH_HLEN)return -EINVAL;
+    const unsigned char *frame=skb->data;
+    const unsigned char *ip_header=frame+ETH_HLEN;
+    unsigned int ihl=(ip_header[0]&0x0fU)*4U;
+    unsigned int total=((unsigned int)ip_header[2]<<8)|ip_header[3];
+    if(frame[12]!=0x08 || frame[13]!=0x00 || (ip_header[0]>>4)!=4 ||
+       ihl<20 || ihl>60 || total<ihl || total!=skb->len-ETH_HLEN ||
+       skb->transport_header!=skb->network_header+ihl ||
+       total>dev->mtu || memcmp(ip_header+12,&m->table->address->native->ifa_list->ifa_local,4) ||
+       memcmp(ip_header+16,entry->primary_key,4))return -EINVAL;
+    if(state==NUD_STALE) {
+        error=horizon(m->timer.runtime,(unsigned long)NEIGH_VAR(entry->parms,DELAY_PROBE_TIME));
+        if(error)return error;
+    }
+    struct output_args args={m,packet};
+    m->output_tx=tx;
+    int result=call_arg(m,output_native,&args);
+    m->output_tx=NULL;
     BUG_ON(bh_active || ker_local_irq_disabled());
     return result;
 }
