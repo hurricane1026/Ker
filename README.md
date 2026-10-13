@@ -75,4 +75,6 @@ native probe callback, the bounded [ARP probe adapter](docs/linux-arp-probes.md)
 can return Linux's constructed packet as a caller-owned skb. NIC transmission,
 ARP learning and unresolved packet queues remain unsupported.
 
+ICMPv4 的通用报文、控制服务、错误事件和实际 PMTU 输出限制见 [ICMPv4 控制层](docs/linux-icmpv4-control.md)。该文档也列出尚待 socket、路由与 IPv4 重组接入的部分；本轮不包含 IPv6。
+
 F-Stack 外部测试场景的适配范围与追溯见 [测试迁移](docs/fstack-tests.md)，每个适配场景独立运行真实 DPDK 回归测试。
