@@ -227,11 +227,14 @@ gated by the worker's RX admission policy.
 
 The local ring has an exact configured capacity. A chain popped for copying is
 retained as the RX adapter's single pending item on `-ENOMEM`, ahead of all
-later queued chains. Storage is bounded by that capacity plus one pending chain
-and the existing flow inbox. A full local ring consumes and frees the newly
-delivered chain and records an overflow drop: the existing void flow callback
-cannot return backpressure to the submitting worker. Successful flow submission
-therefore means ownership transfer, not guaranteed protocol delivery.
+later queued chains. The service callback returns zero for this retained
+allocation pressure and preserves `rx.last_error`, allowing the worker to run
+TX and release buffers; the next service poll retries the same chain. Other
+errors still propagate. Storage is bounded by that capacity plus one pending
+chain and the existing flow inbox. A full local ring consumes and frees the
+newly delivered chain and records an overflow drop: the existing void flow
+callback cannot return backpressure to the submitting worker. Successful flow
+submission therefore means ownership transfer, not guaranteed protocol delivery.
 
 The adapter owns its flow attachment and reserves the device/runtime binding
 through the RX adapter's existing pins. Initialization and cleanup belong to

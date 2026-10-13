@@ -72,7 +72,12 @@ int ker_flow_receive_poll(void *arg, unsigned int budget)
 {
     struct ker_flow_receive *receive = arg;
     if (!receive || !receive->initialized) return -EINVAL;
-    return ker_rx_ring_poll(&receive->rx, budget);
+    int result = ker_rx_ring_poll(&receive->rx, budget);
+    /* A retained chain is retryable service work. Let the worker continue to
+     * TX so it can release buffers needed by the next service poll. The RX
+     * adapter keeps the allocation failure visible in last_error. */
+    if (result == -ENOMEM && receive->rx.pending) return 0;
+    return result;
 }
 
 int ker_flow_receive_cancel(struct ker_flow_receive *receive,

@@ -33,7 +33,10 @@ int ker_flow_receive_init(struct ker_flow_receive *, struct ker_flow_fabric *,
 /* Borrowed attached context for producers such as ker_flow_ring. Do not detach
  * it or operate on the adapter's embedded queue/RX adapter directly. */
 struct ker_flow_context *ker_flow_receive_context(struct ker_flow_receive *);
-/* Worker service callback. RX diagnostics are available through receive->rx.
+/* Worker service callback. A retained RX allocation failure returns zero so
+ * later worker stages, including TX, can run; receive->rx.last_error preserves
+ * the diagnostic. Other errors propagate. RX diagnostics are available
+ * through receive->rx.
  * The queue holds capacity chains plus one pending chain retained on ENOMEM;
  * a new chain that cannot enter the full queue is explicitly freed and counted. */
 int ker_flow_receive_poll(void *, unsigned int budget);

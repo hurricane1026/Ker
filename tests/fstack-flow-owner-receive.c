@@ -24,6 +24,9 @@ struct endpoint {
     uint8_t ids[16];
     unsigned int count;
     unsigned int rx_calls;
+    struct rte_mbuf *held[127];
+    unsigned int held_count;
+    bool release_held_on_tx;
     bool reenter;
     int reenter_cleanup, reenter_cancel, reenter_detach;
 };
@@ -116,6 +119,16 @@ static struct rte_mbuf *packet(struct ker_packet_pool *pool, uint8_t id, bool co
 { return packet_variant(pool, id, IPPROTO_UDP, 0, corrupt); }
 static int service_poll(void *arg, unsigned int budget)
 { struct endpoint *e = arg; return ker_flow_receive_poll(&e->receive, budget); }
+static int tx_poll(void *arg, unsigned int budget)
+{
+    struct endpoint *e = arg;
+    CHECK(budget == 1);
+    if (e->release_held_on_tx) {
+        e->release_held_on_tx = false;
+        while (e->held_count) ker_packet_free(e->held[--e->held_count]);
+    }
+    return 0;
+}
 static int rx_probe(void *arg, unsigned int budget)
 { struct endpoint *e = arg; CHECK(budget <= 1); e->rx_calls++; return 0; }
 struct foreign_calls {
@@ -153,8 +166,8 @@ static void init_endpoint(struct endpoint *e, unsigned int id,
     CHECK(ker_transport_receiver_register(&e->receiver, &e->runtime, &e->device,
         message, e) == 0);
     struct ker_worker_config wc = {.timer_budget=1, .service_budget=2,
-        .handoff_budget=2, .rx_budget=1, .packet_low=8, .packet_high=16};
-    struct ker_worker_ops ops = {.service=service_poll, .rx=rx_probe, .arg=e};
+        .handoff_budget=2, .tx_budget=1, .rx_budget=1, .packet_low=8, .packet_high=16};
+    struct ker_worker_ops ops = {.service=service_poll, .tx=tx_poll, .rx=rx_probe, .arg=e};
     CHECK(ker_worker_init(&e->worker, &e->pool, &wc, &ops) == 0);
     struct ker_flow_receive_config rc = {.name=id ? "fo_rx_queue1" : "fo_rx_queue0",
         .capacity=1, .socket_id=SOCKET_ID_ANY, .headroom=128};
@@ -211,9 +224,9 @@ int main(void)
 
     /* Establish packet pressure, then hand off a valid segmented datagram. The
      * owner retains it on ENOMEM and services retries despite RX pressure. */
-    struct rte_mbuf *held[127]; unsigned int held_count = 0;
-    while (held_count < 127 && (held[held_count] = ker_packet_alloc(&e[1].pool))) ++held_count;
-    CHECK(held_count == 127);
+    while (e[1].held_count < 127 &&
+        (e[1].held[e[1].held_count] = ker_packet_alloc(&e[1].pool))) e[1].held_count++;
+    CHECK(e[1].held_count == 127);
     unsigned int rx_calls_before_pressure = e[1].rx_calls;
     CHECK(poll_worker(&e[1], &handoff, &service) == 0 && !handoff && !service);
     CHECK(e[1].worker.packet_pressure && e[1].rx_calls == rx_calls_before_pressure);
@@ -221,8 +234,9 @@ int main(void)
     struct rte_mbuf *original = m;
     CHECK(ker_flow_submit(source, 7, KER_FLOW_INGRESS, &m) == 0 && !m);
     CHECK(ker_flow_receive_cleanup(&e[1].receive) == -EBUSY);
-    CHECK(poll_worker(&e[1], &handoff, &service) == -ENOMEM && handoff == 1 && !service);
+    CHECK(poll_worker(&e[1], &handoff, &service) == 0 && handoff == 1 && !service);
     CHECK(e[1].receive.rx.pending && e[1].receive.rx.last_error == -ENOMEM);
+    CHECK(e[1].held_count == 127);
     CHECK(e[1].receive.rx.pending == original && original->nb_segs == 4 && original->pkt_len == 43);
     for (struct rte_mbuf *seg = original; seg; seg = seg->next)
         CHECK(rte_mbuf_refcnt_read(seg) == 1);
@@ -232,21 +246,29 @@ int main(void)
     CHECK(read && memcmp(read, expected, sizeof(scratch)) == 0);
     m = packet(&e[0].pool, 3, false);
     CHECK(ker_flow_submit(source, 7, KER_FLOW_INGRESS, &m) == 0 && !m);
-    CHECK(poll_worker(&e[1], &handoff, &service) == -ENOMEM && handoff == 1 && !service);
-    CHECK(e[1].receive.rx.pending == original && original->nb_segs == 4 && original->pkt_len == 43);
+    CHECK(poll_worker(&e[1], &handoff, &service) == 0 && handoff == 1 && !service);
+    CHECK(e[1].receive.rx.pending == original && e[1].receive.rx.last_error == -ENOMEM);
+    CHECK(original->nb_segs == 4 && original->pkt_len == 43);
     for (struct rte_mbuf *seg = original; seg; seg = seg->next)
         CHECK(rte_mbuf_refcnt_read(seg) == 1);
     read = rte_pktmbuf_read(original, 0, sizeof(scratch), scratch);
     CHECK(read && memcmp(read, expected, sizeof(scratch)) == 0);
     m = packet(&e[0].pool, 4, false);
     CHECK(ker_flow_submit(source, 7, KER_FLOW_INGRESS, &m) == 0 && !m);
-    CHECK(poll_worker(&e[1], &handoff, &service) == -ENOMEM && handoff == 1 && !service);
+    e[1].release_held_on_tx = true;
+    CHECK(poll_worker(&e[1], &handoff, &service) == 0 && handoff == 1 && !service);
     CHECK(e[1].receive.overflow_dropped == 1 && e[1].receive.last_enqueue_error == -EAGAIN);
-    for (unsigned int i = 0; i < held_count; ++i) ker_packet_free(held[i]);
+    CHECK(!e[1].release_held_on_tx && !e[1].held_count &&
+        e[1].receive.rx.pending == original && e[1].receive.rx.last_error == -ENOMEM);
+    CHECK(original->nb_segs == 4 && original->pkt_len == 43);
+    for (struct rte_mbuf *seg = original; seg; seg = seg->next)
+        CHECK(rte_mbuf_refcnt_read(seg) == 1);
+    read = rte_pktmbuf_read(original, 0, sizeof(scratch), scratch);
+    CHECK(read && memcmp(read, expected, sizeof(scratch)) == 0);
     CHECK(poll_worker(&e[1], &handoff, &service) == 0 && !handoff && service == 2);
     CHECK(e[1].count == 3 && e[1].ids[1] == 2 && e[1].ids[2] == 3);
-    CHECK(!e[1].receive.rx.pending && !e[1].worker.packet_pressure &&
-        e[1].rx_calls == rx_calls_before_pressure + 1);
+    CHECK(!e[1].receive.rx.pending && !e[1].worker.packet_pressure);
+    CHECK(e[1].rx_calls == rx_calls_before_pressure + 2);
 
     /* Bad transport checksum is consumed as a receive drop. */
     m = packet(&e[0].pool, 6, true);
@@ -262,21 +284,23 @@ int main(void)
     CHECK(e[1].count == 4 && e[1].ids[3] == 8 && e[1].receiver.validation_error == 0);
 
     /* Pending-only cancellation returns the whole original chain. */
-    held_count = 0;
-    while (held_count < 127 && (held[held_count] = ker_packet_alloc(&e[1].pool))) ++held_count;
-    CHECK(held_count == 127);
+    while (e[1].held_count < 127 &&
+        (e[1].held[e[1].held_count] = ker_packet_alloc(&e[1].pool))) e[1].held_count++;
+    CHECK(e[1].held_count == 127);
     m = packet(&e[0].pool, 7, false);
     CHECK(ker_flow_submit(source, 7, KER_FLOW_INGRESS, &m) == 0 && !m);
-    CHECK(poll_worker(&e[1], &handoff, &service) == -ENOMEM && handoff == 1 && !service);
+    CHECK(poll_worker(&e[1], &handoff, &service) == 0 && handoff == 1 && !service);
+    CHECK(e[1].receive.rx.pending && e[1].receive.rx.last_error == -ENOMEM);
     m = packet(&e[0].pool, 9, false);
     CHECK(ker_flow_submit(source, 7, KER_FLOW_INGRESS, &m) == 0 && !m);
-    CHECK(poll_worker(&e[1], &handoff, &service) == -ENOMEM && handoff == 1 && !service);
+    CHECK(poll_worker(&e[1], &handoff, &service) == 0 && handoff == 1 && !service);
+    CHECK(e[1].receive.rx.last_error == -ENOMEM);
     CHECK(ker_flow_receive_cleanup(&e[1].receive) == -EBUSY);
     struct rte_mbuf *cancelled = NULL;
     CHECK(ker_flow_receive_cancel(&e[1].receive, &cancelled) == 1 && cancelled);
     CHECK(cancelled->nb_segs == 4 && cancelled->pkt_len == 43);
     ker_packet_free(cancelled);
-    for (unsigned int i = 0; i < held_count; ++i) ker_packet_free(held[i]);
+    while (e[1].held_count) ker_packet_free(e[1].held[--e[1].held_count]);
     CHECK(poll_worker(&e[1], &handoff, &service) == 0 && !handoff && service == 1);
     CHECK(e[1].count == 5 && e[1].ids[4] == 9);
 
