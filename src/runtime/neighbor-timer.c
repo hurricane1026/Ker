@@ -524,7 +524,7 @@ int ker_neighbor_monitor_resolution_disable(struct ker_neighbor_monitor *m)
 {
     int error=valid(m); if(error)return error;
     if (!m->resolution_enabled) return -EALREADY;
-    if (m->busy || m->timer.runtime->polling) return -EBUSY;
+    if (m->busy || m->timer.runtime->polling || m->echo_service_refs) return -EBUSY;
     if ((m->entry->nud_state == NUD_INCOMPLETE && !(m->error && !timer_pending(&m->entry->timer))) ||
         m->entry->arp_queue.qlen || m->unresolved_bytes)
         return -EBUSY;
@@ -591,7 +591,7 @@ int ker_neighbor_monitor_probe_scope(struct ker_neighbor_monitor *m, const struc
 int ker_neighbor_monitor_cleanup(struct ker_neighbor_monitor *m)
 {
     int error=valid(m); if(error)return error;
-    if (m->busy || m->timer.runtime->polling || ker_local_irq_disabled()) return -EBUSY;
+    if (m->busy || m->timer.runtime->polling || ker_local_irq_disabled() || m->echo_service_refs) return -EBUSY;
     if ((m->entry->nud_state == NUD_INCOMPLETE && !(m->error && !timer_pending(&m->entry->timer))) ||
         m->entry->arp_queue.qlen || m->unresolved_bytes)
         return -EBUSY;
