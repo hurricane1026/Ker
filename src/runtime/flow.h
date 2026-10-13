@@ -61,6 +61,7 @@ struct ker_flow_context {
     ker_flow_receive_fn receive;
     void *arg;
     bool delivering;
+    unsigned int flow_ring_live;
     bool attached;
 };
 

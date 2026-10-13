@@ -150,3 +150,45 @@ IPv4 header checksum and the transport checksum; corrupting an options byte
 passes structural steering but is dropped by protocol validation. The callback
 compares accepted option bytes and header length after copying to the owner's
 skb. These tests add no option interpretation, routing or source-route policy.
+
+## Ring ingress to flow ownership
+
+`ker_flow_ring` attaches a `ker_tx_ring` as the sole source of a flow context's
+input stream. The adapter runs on that context's lcore; the source ring's sole
+producer may run on another registered lcore. Domain and ingress/egress
+interpretation are fixed at initialization. It can be installed as the worker's
+RX callback, or explicitly polled with a bounded budget. Source producers supply
+valid, normally freeable mbuf chains; malformed packet bytes are supported as
+rejected input, but corrupt or cyclic mbuf ownership metadata is outside this
+ring adapter's contract.
+
+The source ring owns each accepted chain. Polling moves one chain into a single
+pending slot, then submits it through normal hash/map owner selection. Successful
+submission transfers ownership to the local callback or remote inbox. A full
+owner inbox (`-ENOBUFS`), unattached owner (`-ESHUTDOWN`), or other operational
+error leaves pending intact. The next poll retries it before dequeuing another
+chain. This preserves this source's submission order; it does not impose a
+global order across sources or destinations. Storage remains bounded by source
+ring capacity, one pending chain, and the existing destination inbox capacity.
+
+Recognized packet parse errors consume the chain and increment `last_dropped`.
+`last_completed` counts accepted submissions plus consumed drops, not unsuccessful
+retries. A poll with progress returns that count and records an error separately
+in `last_error`; with no progress it returns the error. Zero budget preserves the
+previous diagnostics. Dropping after owner-side protocol validation or allocation
+failure remains the receive callback's policy, outside ingress statistics.
+
+Attachment prevents manual source-ring reads, source-ring destruction, and flow
+context detach. Initialization and cleanup require quiescent worker execution;
+recursive polling/cancellation/cleanup during synchronous delivery is rejected.
+Cancel transfers only the pending chain back to the caller. Cleanup requires no
+pending chain and leaves unread source-ring entries untouched. Producers must be
+externally quiesced before lifecycle changes. Multiple distinct source rings may
+pin the same flow context; each ring has only one consumer.
+
+`flow-ring` exercises admission, backpressure, cancellation and lifecycle rules.
+The `fstack-flow-receive` integration now enqueues segmented IPv4 TCP/UDP packets
+into a real source ring, polls the ingress worker, then polls the selected owner
+for checksum validation. It retains the full options-length, checksum rejection,
+full-inbox retry, and destination allocation-drop recovery matrix. This remains a
+same-process software-ring path, not ethdev/NIC reception or a socket stack.
