@@ -28,6 +28,8 @@ retain FIFO ownership independently of the neighbor monitor.
 
 This is an explicit output operation on a known peer. It does not install a
 route, choose a next hop, create or resolve an unknown neighbor, provide an
-INCOMPLETE queue, or transmit to a NIC. FAILED/INCOMPLETE states remain unsupported.
+INCOMPLETE queue, or transmit to a NIC. FAILED/INCOMPLETE states remain unsupported
+by this API; the separate opt-in [known-peer resolver](linux-neighbor-resolution.md)
+provides bounded re-resolution for an existing monitored entry.
 Monitor cleanup still restores the administrator's original permanent mapping.
 Public socket and network capability claims are unchanged.

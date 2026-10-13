@@ -53,7 +53,15 @@ def main():
 #define KER_IMPORTED_NEIGHBOR_UPDATE_H
 #include "runtime/neighbor-timer.h"
 #include "ker/linux_arp.h"
+struct net;
+struct sock;
+struct dst_ops;
+struct lwtunnel_state;
+struct uncached_list;
 '''
+    header += emit('include/linux/types.h', 'typedef struct {\n\tatomic_t refcnt;', declaration=True)
+    header += emit('include/net/dst.h', 'struct dst_entry {', declaration=True)
+    header += '\n'
     for macro in ('NEIGH_UPDATE_F_OVERRIDE', 'NEIGH_UPDATE_F_WEAK_OVERRIDE',
                   'NEIGH_UPDATE_F_OVERRIDE_ISROUTER', 'NEIGH_UPDATE_F_USE',
                   'NEIGH_UPDATE_F_MANAGED', 'NEIGH_UPDATE_F_EXT_LEARNED',
@@ -69,6 +77,10 @@ def main():
 void ker_neighbor_update_seq_write_lock(seqlock_t *);
 void ker_neighbor_update_seq_write_unlock(seqlock_t *);
 int ker_linux_neigh_update(struct neighbour *, const unsigned char *, u8, u32);
+void ker_neigh_resolution_rcu_lock(void);
+void ker_neigh_resolution_rcu_unlock(void);
+struct neighbour *ker_neigh_resolution_dst_lookup(struct dst_entry *, struct sk_buff *);
+struct dst_entry *ker_neigh_resolution_skb_dst(struct sk_buff *);
 #endif
 '''
     source = '''/* SPDX-License-Identifier: GPL-2.0 */
@@ -80,7 +92,11 @@ int ker_linux_neigh_update(struct neighbour *, const unsigned char *, u8, u32);
 #define neigh_update_gc_list(n) ker_neighbor_update_unsupported()
 #define neigh_update_managed_list(n) ker_neighbor_update_unsupported()
 #define neigh_invalidate(n) ker_neighbor_update_unsupported()
-#define neigh_update_process_arp_queue(n) ker_neighbor_update_unsupported()
+#define neigh_update_process_arp_queue(n) neigh_update_process_arp_queue_native(n)
+#define rcu_read_lock() ker_neigh_resolution_rcu_lock()
+#define rcu_read_unlock() ker_neigh_resolution_rcu_unlock()
+#define dst_neigh_lookup_skb(d, s) ker_neigh_resolution_dst_lookup((d), (s))
+#define skb_dst(s) ker_neigh_resolution_skb_dst(s)
 #define neigh_update_is_router(n, f, p) ker_neighbor_update_unsupported()
 #define write_lock_bh(l) ker_neigh_write_lock(l)
 #define write_unlock_bh(l) ker_neigh_write_unlock(l)
@@ -97,6 +113,7 @@ static void ker_neighbor_update_unsupported(void) { BUG_ON(true); }
     nc = 'net/core/neighbour.c'
     for anchor in ('static void neigh_update_flags(', 'static void neigh_update_hhs(',
                    'static void neigh_suspect(', 'static void neigh_connect(',
+                   'static void neigh_update_process_arp_queue(',
                    'static int __neigh_update(', 'int neigh_update('):
         source += emit(nc, anchor)
     source += '''

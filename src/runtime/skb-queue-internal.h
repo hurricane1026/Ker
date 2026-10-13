@@ -6,4 +6,7 @@ struct ker_skb_queue;
  * validation and immediately before linking/after native unlinking. */
 void ker_skb_queue_claim(struct sk_buff *, const struct ker_skb_queue *);
 unsigned int ker_skb_queue_release(struct sk_buff *, const struct ker_skb_queue *);
+void ker_skb_native_queue_claim(struct sk_buff *, const void *);
+unsigned int ker_skb_native_queue_release(struct sk_buff *, const void *);
+int ker_skb_native_queue_clone(struct sk_buff *, const void *, struct sk_buff **);
 #endif

@@ -32,7 +32,7 @@ Linux 使用 `sk_buff` 管理网络包，NAPI 负责网络事件处理；DPDK �
 | per CPU 与 current | worker 绑定的上下文和明确的访问规则 |
 | 锁与原子操作 | 已接入原始 refcount，使用原子操作、真实 spinlock 和 pthread mutex；本地事件屏蔽阻止 timer dispatch，尚无完整 softirq |
 | RCU | 读侧临界区、宽限期和延迟回收，先明确可验证的单 worker 模型 |
-| timer 与时间源 | 已有 CLOCK_MONOTONIC 和 timerqueue 调度、取消、重设与预算；Linux timer_list、hrtimer 接口和 TCP 重传接入尚未实现 |
+| timer 与时间源 | 已有 CLOCK_MONOTONIC、timerqueue 和 worker-local Linux timer_list 适配，支持调度、取消、重设与预算；原生邻居定时器已接入，hrtimer 和 TCP 重传仍待移植 |
 | softirq 与 NAPI | worker 主动运行待处理事件，遵守预算和完成语义 |
 | workqueue 与等待机制 | 可显式推进的任务和等待状态，防止阻塞轮询线程 |
 | 初始化与网络配置 | 必需子系统的初始化顺序、接口、地址、路由和邻居配置 |

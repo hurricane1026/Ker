@@ -5,15 +5,18 @@
 #include "ker/linux_neighbor_update.h"
 #include "runtime/tx-export.h"
 #include "runtime/skb.h"
+#include "runtime/skb-queue-internal.h"
 #include "runtime/arp.h"
 #include <linux/if_ether.h>
 #include <rte_lcore.h>
 #include <errno.h>
 #include <string.h>
 #include <linux/bug.h>
+#undef __skb_dequeue
 static _Thread_local struct ker_neighbor_monitor *active;
 static _Thread_local unsigned long bh_saved_flags;
 static _Thread_local bool bh_active;
+static _Thread_local unsigned int resolution_rcu_depth;
 static int horizon(struct ker_runtime *, unsigned long);
 static unsigned long interval(struct neigh_parms *p)
 {
@@ -61,16 +64,82 @@ void ker_neigh_timer_stat(struct neigh_table *table, unsigned int offset)
     active->stats.res_failed++;
 }
 void ker_neigh_timer_debug(void) { BUG_ON(!active); active->debug_events++; }
+void ker_neigh_resolution_rcu_lock(void)
+{ BUG_ON(!active || !active->busy || resolution_rcu_depth); resolution_rcu_depth = 1; }
+void ker_neigh_resolution_rcu_unlock(void)
+{ BUG_ON(!active || !active->busy || resolution_rcu_depth != 1); resolution_rcu_depth = 0; }
+struct neighbour *ker_neigh_resolution_dst_lookup(struct dst_entry *dst, struct sk_buff *skb)
+{ (void)dst; (void)skb; BUG_ON(!active || !active->busy); BUG_ON(true); return NULL; }
+struct dst_entry *ker_neigh_resolution_skb_dst(struct sk_buff *skb)
+{ BUG_ON(!active || !active->busy || !skb || skb->_skb_refdst); return NULL; }
 struct sk_buff *ker_neigh_empty_tail(struct sk_buff_head *queue)
 {
-    BUG_ON(!active || queue != &active->entry->arp_queue || queue->qlen ||
-        queue->next != (struct sk_buff *)queue || queue->prev != (struct sk_buff *)queue);
-    return NULL;
+    BUG_ON(!active || queue != &active->entry->arp_queue);
+    if (!active->resolution_enabled) {
+        BUG_ON(queue->qlen || queue->next != (struct sk_buff *)queue ||
+            queue->prev != (struct sk_buff *)queue);
+        return NULL;
+    }
+    return queue->prev == (struct sk_buff *)queue ? NULL : queue->prev;
 }
-void ker_neigh_empty_purge(struct sk_buff_head *queue) { (void)ker_neigh_empty_tail(queue); }
+void ker_neigh_empty_purge(struct sk_buff_head *queue)
+{
+    BUG_ON(!active || queue != &active->entry->arp_queue);
+    struct sk_buff *skb;
+    while ((skb = __skb_dequeue(queue)) != NULL) {
+        unsigned int charge = ker_skb_native_queue_release(skb, queue);
+        BUG_ON(charge > active->unresolved_bytes);
+        active->unresolved_bytes -= charge;
+        BUG_ON(ker_skb_free(skb));
+    }
+}
 struct sk_buff *ker_neigh_unsupported_clone(struct sk_buff *skb, gfp_t flags)
-{ (void)skb; (void)flags; BUG_ON(true); return NULL; }
-void ker_neigh_empty_consume(struct sk_buff *skb) { BUG_ON(skb); }
+{
+    (void)flags;
+    BUG_ON(!active || !active->resolution_enabled || !skb);
+    struct sk_buff *clone = NULL;
+    int error = ker_skb_native_queue_clone(skb, &active->entry->arp_queue, &clone);
+    if (error) active->resolution_error = error;
+    return clone;
+}
+void ker_neigh_empty_consume(struct sk_buff *skb) { if (skb) BUG_ON(ker_skb_free(skb)); }
+struct sk_buff *ker_neigh_native_dequeue(struct sk_buff_head *queue)
+{
+    BUG_ON(!active || queue != &active->entry->arp_queue);
+    if (!active->resolution_enabled) {
+        BUG_ON(queue->qlen || queue->next != (struct sk_buff *)queue ||
+            queue->prev != (struct sk_buff *)queue);
+        return NULL;
+    }
+    struct sk_buff *skb = __skb_dequeue(queue);
+    if (skb) {
+        unsigned int charge = ker_skb_native_queue_release(skb, queue);
+        BUG_ON(charge > active->unresolved_bytes);
+        active->unresolved_bytes -= charge;
+    }
+    return skb;
+}
+void ker_neigh_native_queue_tail(struct sk_buff_head *queue, struct sk_buff *skb)
+{
+    BUG_ON(!active || !active->resolution_enabled || queue != &active->entry->arp_queue ||
+        !skb || !skb->truesize || skb->truesize > active->resolution_queue_bytes ||
+        skb->truesize > SIZE_MAX - active->unresolved_bytes);
+    ker_skb_native_queue_claim(skb, queue);
+    __skb_queue_tail(queue, skb);
+    active->unresolved_bytes += skb->truesize;
+}
+void ker_neigh_native_free(struct sk_buff *skb)
+{ BUG_ON(!active || !active->busy || !skb || ker_skb_free(skb)); }
+void ker_neigh_native_dst_force(struct sk_buff *skb)
+{ BUG_ON(!active || !active->busy || !skb || skb->_skb_refdst); }
+void ker_neigh_native_stat(struct neigh_table *table, unsigned int offset)
+{
+    BUG_ON(!active || table != active->table->native ||
+        offset != offsetof(struct neigh_statistics, unres_discards));
+    active->stats.unres_discards++;
+}
+static void resolution_error_report(struct neighbour *entry, struct sk_buff *skb)
+{ BUG_ON(!scope(entry)->resolution_enabled || !skb || ker_skb_free(skb)); }
 static void event(struct ker_neighbor_monitor *m, struct ker_neighbor_event *out)
 {
     *out = (struct ker_neighbor_event){.state = m->entry->nud_state, .probes = (unsigned int)atomic_read(&m->entry->probes), .error=m->error};
@@ -89,7 +158,8 @@ int ker_neigh_timer_deliver(struct neighbour *entry)
 void ker_neigh_timer_trace(struct neighbour *entry) { scope(entry)->timer_events++; }
 static void solicit(struct neighbour *entry, struct sk_buff *skb)
 {
-    struct ker_neighbor_monitor *m = scope(entry); BUG_ON(skb);
+    struct ker_neighbor_monitor *m = scope(entry);
+    BUG_ON(skb && !m->resolution_enabled);
     struct ker_neighbor_event e; event(m, &e);
     BUG_ON(m->probe_callback || m->probe_event);
     m->probe_callback = true; m->probe_event = &e;
@@ -105,8 +175,19 @@ static int valid(struct ker_neighbor_monitor *m)
     if (!m || !m->table || !m->entry) return -EINVAL;
     if (rte_lcore_id() != m->table->lcore) return -EXDEV;
     if (m->busy || m->timer.running || m->timer.scoping) return -EBUSY;
-    if (m->entry->tbl != m->table->native || m->entry->ops != &m->ops || m->entry->dead || m->entry->flags ||
-        m->entry->arp_queue.qlen || m->entry->arp_queue_len_bytes) return -EINVAL;
+    if (m->entry->tbl != m->table->native || m->entry->ops != &m->ops || m->entry->dead || m->entry->flags)
+        return -EINVAL;
+    size_t bytes = 0; unsigned int count = 0;
+    struct sk_buff_head *queue = &m->entry->arp_queue;
+    for (struct sk_buff *skb = queue->next; skb != (struct sk_buff *)queue; skb = skb->next) {
+        if (!skb->truesize || skb->truesize > SIZE_MAX - bytes) return -EINVAL;
+        bytes += skb->truesize; count++;
+    }
+    if (count != queue->qlen || bytes != m->unresolved_bytes ||
+        bytes != m->entry->arp_queue_len_bytes) return -EINVAL;
+    if (!m->resolution_enabled && count) return -EINVAL;
+    if (m->resolution_enabled && (!m->resolution_tx || !m->resolution_queue_bytes ||
+        bytes > m->resolution_queue_bytes || !m->resolution_tx->resolver_refs)) return -EINVAL;
     return 0;
 }
 static void timeout(struct timer_list *native)
@@ -236,6 +317,18 @@ static int output_native(void *arg)
     if (!skb->dev) skb->dev=a->monitor->entry->dev;
     return ker_linux_neigh_resolve_output(a->monitor->entry,skb);
 }
+static int resolution_output(struct neighbour *entry, struct sk_buff *skb)
+{
+    struct ker_neighbor_monitor *m = scope(entry);
+    BUG_ON(!m->resolution_enabled || !m->resolution_tx || !skb || m->output_tx);
+    struct sk_buff *owned = skb;
+    struct output_args args = {m, &owned};
+    m->output_tx = m->resolution_tx;
+    int result = output_native(&args);
+    m->output_tx = NULL;
+    BUG_ON(owned);
+    return result;
+}
 void ker_neighbor_output_free(struct sk_buff *skb)
 {
     BUG_ON(!active || !active->busy || !skb || ker_skb_free(skb));
@@ -245,12 +338,12 @@ int ker_neighbor_output_xmit(struct sk_buff *skb)
     BUG_ON(!active || !active->busy || !active->output_tx || !skb);
     struct sk_buff *owned=skb;
     int error=ker_tx_export_enqueue(active->output_tx,&owned);
-    if(error) BUG_ON(ker_skb_free(skb));
+    if(error) { active->resolution_error=error; BUG_ON(ker_skb_free(skb)); }
     return error;
 }
 void ker_neighbor_output_unsupported_hh(void) { BUG_ON(true); }
-int ker_neighbor_monitor_output(struct ker_neighbor_monitor *m, struct ker_tx_export *tx,
-    struct sk_buff **packet)
+static int monitor_output_common(struct ker_neighbor_monitor *m, struct ker_tx_export *tx,
+    struct sk_buff **packet, bool resolving)
 {
     int error=valid(m); if(error)return error;
     if(!tx || !packet || !*packet)return -EINVAL;
@@ -258,19 +351,23 @@ int ker_neighbor_monitor_output(struct ker_neighbor_monitor *m, struct ker_tx_ex
     if(m->timer.runtime->polling || ker_local_irq_disabled())return -EBUSY;
     struct neighbour *entry=m->entry;
     unsigned int state=entry->nud_state;
-    if(state!=NUD_REACHABLE && state!=NUD_STALE && state!=NUD_DELAY && state!=NUD_PROBE)
+    if (resolving) {
+        if (!m->resolution_enabled || tx != m->resolution_tx ||
+            (state != NUD_REACHABLE && state != NUD_STALE && state != NUD_DELAY &&
+             state != NUD_PROBE && state != NUD_FAILED && state != NUD_INCOMPLETE)) return -ENOTSUP;
+    } else if(state!=NUD_REACHABLE && state!=NUD_STALE && state!=NUD_DELAY && state!=NUD_PROBE)
         return -ENOTSUP;
     struct net_device *dev=entry->dev;
     if(!dev || dev->type!=ARPHRD_ETHER || dev->addr_len!=ETH_ALEN ||
        dev->hard_header_len!=ETH_HLEN || dev->needed_headroom || dev->needed_tailroom ||
        !dev->header_ops || dev->header_ops->create!=eth_header || dev->header_ops->cache ||
-       dev->header_ops->cache_update || entry->hh.hh_len || entry->arp_queue.qlen ||
-       entry->arp_queue_len_bytes || !m->table->address || !m->table->address->device ||
+       dev->header_ops->cache_update || entry->hh.hh_len || (!resolving && entry->arp_queue.qlen) ||
+       (!resolving && entry->arp_queue_len_bytes) || !m->table->address || !m->table->address->device ||
        !m->table->address->native || !m->table->address->native->ifa_list ||
        m->table->address->device->native!=dev || NEIGH_VAR(entry->parms,APP_PROBES)!=0)
         return -ENOTSUP;
     bool pending=timer_pending(&entry->timer);
-    if(pending != (state!=NUD_STALE))return -ENOTSUP;
+    if(pending != (state!=NUD_STALE && state!=NUD_FAILED))return -ENOTSUP;
     if((unsigned int)refcount_read(&entry->refcnt)!=2U+(unsigned int)pending)return -EBUSY;
     if(tx->queue.context!=m->table->address->device->context || !tx->sink || tx->polling)
         return -EXDEV;
@@ -284,6 +381,7 @@ int ker_neighbor_monitor_output(struct ker_neighbor_monitor *m, struct ker_tx_ex
        info->tx_flags || info->destructor_arg || skb->head_frag || skb->pp_recycle || skb->fclone ||
        skb->ip_summed!=CHECKSUM_NONE)return -ENOTSUP;
     if(skb->dev && skb->dev!=dev)return -EXDEV;
+    if (resolving && (skb->_skb_refdst || skb->truesize > m->resolution_queue_bytes)) return -ENOTSUP;
     if(skb->protocol!=rte_cpu_to_be_16(ETH_P_IP) || skb->len<ETH_HLEN+20 ||
        skb->mac_len!=ETH_HLEN || skb->mac_header!=skb_headroom(skb) ||
        skb->network_header!=skb->mac_header+ETH_HLEN)return -EINVAL;
@@ -296,16 +394,88 @@ int ker_neighbor_monitor_output(struct ker_neighbor_monitor *m, struct ker_tx_ex
        skb->transport_header!=skb->network_header+ihl ||
        total>dev->mtu || memcmp(ip_header+12,&m->table->address->native->ifa_list->ifa_local,4) ||
        memcmp(ip_header+16,entry->primary_key,4))return -EINVAL;
-    if(state==NUD_STALE) {
-        error=horizon(m->timer.runtime,(unsigned long)NEIGH_VAR(entry->parms,DELAY_PROBE_TIME));
+    if(state==NUD_STALE || (resolving && state==NUD_FAILED)) {
+        unsigned long delay = state==NUD_STALE ?
+            (unsigned long)NEIGH_VAR(entry->parms,DELAY_PROBE_TIME) :
+            (unsigned long)(NEIGH_VAR(entry->parms,RETRANS_TIME) > HZ/100 ?
+                NEIGH_VAR(entry->parms,RETRANS_TIME) : HZ/100);
+        error=horizon(m->timer.runtime,delay);
         if(error)return error;
     }
+    if (resolving && state==NUD_INCOMPLETE && !timer_pending(&entry->timer)) return -ENOTSUP;
     struct output_args args={m,packet};
     m->output_tx=tx;
     int result=call_arg(m,output_native,&args);
     m->output_tx=NULL;
     BUG_ON(bh_active || ker_local_irq_disabled());
     return result;
+}
+int ker_neighbor_monitor_output(struct ker_neighbor_monitor *m, struct ker_tx_export *tx,
+    struct sk_buff **packet) { return monitor_output_common(m, tx, packet, false); }
+int ker_neighbor_monitor_resolve_output(struct ker_neighbor_monitor *m, struct sk_buff **packet)
+{
+    if (!m || !m->resolution_tx) return -EINVAL;
+    return monitor_output_common(m, m->resolution_tx, packet, true);
+}
+int ker_neighbor_monitor_resolution_enable(struct ker_neighbor_monitor *m, struct ker_tx_export *tx)
+{
+    int error=valid(m); if(error)return error;
+    if (!tx || !tx->queue.context || !tx->sink) return -EINVAL;
+    if (m->resolution_enabled) return -EALREADY;
+    if (m->busy || m->timer.runtime->polling || tx->polling) return -EBUSY;
+    if (tx->queue.context != m->table->address->device->context || rte_lcore_id() != tx->queue.context->lcore)
+        return -EXDEV;
+    if (!NEIGH_VAR(m->entry->parms, QUEUE_LEN_BYTES) ||
+        !NEIGH_VAR(m->entry->parms, MCAST_PROBES) || NEIGH_VAR(m->entry->parms, APP_PROBES) ||
+        m->entry->hh.hh_len || m->entry->arp_queue.qlen || m->entry->arp_queue_len_bytes ||
+        (m->entry->dev->header_ops && m->entry->dev->header_ops->cache_update)) return -ENOTSUP;
+    if (tx->resolver_refs == UINT_MAX) return -EOVERFLOW;
+    m->resolution_queue_bytes = (size_t)NEIGH_VAR(m->entry->parms, QUEUE_LEN_BYTES);
+    m->unresolved_bytes = 0; m->resolution_error = 0;
+    m->resolution_tx = tx; m->resolution_enabled = true; tx->resolver_refs++;
+    m->ops.output = resolution_output; m->ops.connected_output = resolution_output;
+    m->ops.error_report = resolution_error_report;
+    m->entry->output = (m->entry->nud_state & NUD_CONNECTED) ? resolution_output : unsupported_output;
+    return 0;
+}
+struct cancel_args { struct sk_buff_head *queue; struct sk_buff *skb; };
+static int cancel_native(void *opaque)
+{
+    struct cancel_args *args = opaque;
+    args->skb = ker_neigh_native_dequeue(args->queue);
+    return args->skb ? 1 : 0;
+}
+int ker_neighbor_monitor_resolution_cancel(struct ker_neighbor_monitor *m, struct sk_buff **out)
+{
+    int error=valid(m); if(error)return error;
+    if (!m->resolution_enabled) return -ENOTSUP;
+    if (!out) return -EINVAL;
+    if (m->busy || m->timer.runtime->polling) return -EBUSY;
+    struct cancel_args args = { .queue = &m->entry->arp_queue };
+    int count = call_arg(m, cancel_native, &args);
+    if (count <= 0) return count;
+    unsigned int charge = args.skb->truesize;
+    BUG_ON(charge > m->entry->arp_queue_len_bytes);
+    m->entry->arp_queue_len_bytes -= charge;
+    *out = args.skb;
+    return 1;
+}
+int ker_neighbor_monitor_resolution_disable(struct ker_neighbor_monitor *m)
+{
+    int error=valid(m); if(error)return error;
+    if (!m->resolution_enabled) return -EALREADY;
+    if (m->busy || m->timer.runtime->polling) return -EBUSY;
+    if ((m->entry->nud_state == NUD_INCOMPLETE && !(m->error && !timer_pending(&m->entry->timer))) ||
+        m->entry->arp_queue.qlen || m->unresolved_bytes)
+        return -EBUSY;
+    BUG_ON(!m->resolution_tx->resolver_refs);
+    m->resolution_tx->resolver_refs--;
+    m->resolution_tx = NULL; m->resolution_enabled = false;
+    m->resolution_queue_bytes = 0; m->resolution_error = 0;
+    m->ops.output = unsupported_output; m->ops.connected_output = unsupported_output;
+    m->ops.error_report = unsupported_error;
+    m->entry->output = unsupported_output;
+    return 0;
 }
 int ker_neighbor_monitor_confirm(struct ker_neighbor_monitor *m)
 {
@@ -326,8 +496,11 @@ int ker_neighbor_monitor_update(struct ker_neighbor_monitor *m, const unsigned c
        dev!=m->table->address->device->native || dev->type!=ARPHRD_ETHER || dev->addr_len!=ETH_ALEN)
         return -ENOTSUP;
     if(m->timer.runtime->polling)return -EBUSY;
-    if(m->entry->nud_state != NUD_PROBE && m->entry->nud_state != NUD_DELAY)return -ENOTSUP;
-    if(!timer_pending(&m->entry->timer) || m->entry->arp_queue.qlen || m->entry->arp_queue_len_bytes ||
+    if(m->entry->nud_state != NUD_PROBE && m->entry->nud_state != NUD_DELAY &&
+       !(m->resolution_enabled && m->entry->nud_state == NUD_INCOMPLETE))return -ENOTSUP;
+    if(!timer_pending(&m->entry->timer) ||
+       ((!m->resolution_enabled || m->entry->nud_state != NUD_INCOMPLETE) &&
+        (m->entry->arp_queue.qlen || m->entry->arp_queue_len_bytes)) ||
        m->entry->hh.hh_len || (m->entry->dev->header_ops && m->entry->dev->header_ops->cache_update))return -ENOTSUP;
     unsigned int refs=2U+!!timer_pending(&m->entry->timer);
     if((unsigned int)refcount_read(&m->entry->refcnt)!=refs)return -EBUSY;
@@ -358,9 +531,16 @@ int ker_neighbor_monitor_probe_scope(struct ker_neighbor_monitor *m, const struc
 int ker_neighbor_monitor_cleanup(struct ker_neighbor_monitor *m)
 {
     int error=valid(m); if(error)return error;
+    if (m->busy || m->timer.runtime->polling || ker_local_irq_disabled()) return -EBUSY;
+    if ((m->entry->nud_state == NUD_INCOMPLETE && !(m->error && !timer_pending(&m->entry->timer))) ||
+        m->entry->arp_queue.qlen || m->unresolved_bytes)
+        return -EBUSY;
     unsigned int refs=2U+!!timer_pending(&m->entry->timer);
     if((unsigned int)refcount_read(&m->entry->refcnt)!=refs)return -EBUSY;
     int pending=ker_timer_list_shutdown(&m->timer); if(pending<0)return pending;
+    if (m->resolution_enabled) {
+        error=ker_neighbor_monitor_resolution_disable(m); if(error)return error;
+    }
     if(pending)BUG_ON(refcount_dec_and_test(&m->entry->refcnt));
     BUG_ON(ker_timer_list_cleanup(&m->timer));
     ker_neighbor_update_restore_mac(m->entry,m->original_mac);

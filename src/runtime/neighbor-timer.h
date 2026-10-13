@@ -24,7 +24,12 @@ struct ker_neighbor_monitor {
     unsigned long event_send_events, event_send_dead_events;
     int event_send_result;
     bool busy, notification, probe_callback;
+    bool resolution_enabled;
+    size_t resolution_queue_bytes;
+    size_t unresolved_bytes;
+    int resolution_error;
     struct ker_tx_export *output_tx;
+    struct ker_tx_export *resolution_tx;
     const struct ker_neighbor_event *probe_event;
     int error; /* stopped adapter clock error; no synthetic NUD transition */
 };
@@ -46,10 +51,21 @@ int ker_neighbor_monitor_event_send(struct ker_neighbor_monitor *);
  * Preflight errors preserve the packet slot and bytes. Native entry transfers
  * ownership; the slot is cleared even when export rejects and drops the packet. */
 int ker_neighbor_monitor_output(struct ker_neighbor_monitor *, struct ker_tx_export *, struct sk_buff **);
+/* Opt in to native resolution for this already monitored peer. The table must
+ * have an offline nonzero queue_bytes cap and multicast probes configured. */
+int ker_neighbor_monitor_resolution_enable(struct ker_neighbor_monitor *, struct ker_tx_export *);
+/* Native neigh_resolve_output with the bounded unresolved queue profile. */
+int ker_neighbor_monitor_resolve_output(struct ker_neighbor_monitor *, struct sk_buff **);
+/* Remove the oldest unresolved packet and return it to the caller. */
+int ker_neighbor_monitor_resolution_cancel(struct ker_neighbor_monitor *, struct sk_buff **);
+/* Empty-only; INCOMPLETE blocks disable unless a stored clock error has
+ * stopped its native timer and all queued ownership has been cancelled. */
+int ker_neighbor_monitor_resolution_disable(struct ker_neighbor_monitor *);
 /* Positive feedback only; invokes original neigh_confirm in the timer scope.
  * It does not revive FAILED neighbors or learn/change their MAC. */
 int ker_neighbor_monitor_confirm(struct ker_neighbor_monitor *);
-/* Apply native neigh_update semantics to an existing PROBE/DELAY entry.
+/* Apply native neigh_update semantics to an existing PROBE/DELAY entry,
+ * or INCOMPLETE while the bounded resolver is enabled.
  * flags accepts only zero or NEIGH_UPDATE_F_OVERRIDE. Updates are worker-owned,
  * monitor-scoped, and notify through the copied monitor event callback. */
 int ker_neighbor_monitor_update(struct ker_neighbor_monitor *, const unsigned char mac[ETH_ALEN], u32 flags);

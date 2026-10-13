@@ -14,14 +14,17 @@ to the caller and has its Ethernet and network header geometry initialized.
 Failure leaves the output pointer unchanged.
 
 The supported profile is a private Ethernet device with one primary static IPv4
-address, no skb queued on the neighbor, `APP_PROBES=0`, `ARP_ANNOUNCE=0`, and
+address, `APP_PROBES=0`, `ARP_ANNOUNCE=0`, and
 `ROUTE_LOCALNET=0`. Linux's native probe count selects unicast or broadcast ARP
 request construction. The source address comes from the native local-address
-selector. FIB, VRF, namespace traversal, application probes, queued skbs, and
-other announcement policies are unsupported; adapter traps guard native
+selector. The default monitor has no queued skb; the
+[known-peer resolver](linux-neighbor-resolution.md) admits its native queued
+probe clone within the callback lifecycle; it does not expose that clone to
+the application or add packet-driven source selection to ARP construction. FIB, VRF, namespace traversal, application
+probes and other announcement policies are unsupported; adapter traps guard native
 fallbacks that the validated profile cannot enter. ARP receive learning,
-neighbor confirmation from packets, PMD transmission, and full resolution stay
-outside this boundary.
+general neighbor learning and PMD transmission stay outside this boundary.
+The resolver uses explicit receive-feedback callbacks for its existing peer.
 
 The imported configuration has no `CONFIG_NET_NS` support, so its device
 structure has no native namespace field. The adapter returns an unobserved null

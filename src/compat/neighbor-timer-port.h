@@ -21,9 +21,11 @@ void ker_neigh_timer_debug(void);
 #define printk(...) fprintf(stderr, __VA_ARGS__)
 #define dump_stack() BUG_ON(true)
 struct sk_buff *ker_neigh_empty_tail(struct sk_buff_head *);
+struct sk_buff *ker_neigh_native_dequeue(struct sk_buff_head *);
 void ker_neigh_empty_purge(struct sk_buff_head *);
 #define skb_peek_tail ker_neigh_empty_tail
 #define __skb_queue_purge ker_neigh_empty_purge
+#define __skb_dequeue(q) ker_neigh_native_dequeue(q)
 struct sk_buff *ker_neigh_unsupported_clone(struct sk_buff *, gfp_t);
 void ker_neigh_empty_consume(struct sk_buff *);
 #define skb_clone ker_neigh_unsupported_clone

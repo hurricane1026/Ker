@@ -45,6 +45,7 @@ int ker_neighbor_configure(struct ker_neighbor_table *table, const struct ker_ne
         !config->delay_ticks || config->delay_ticks > INT_MAX ||
         config->ucast_probes > INT_MAX || config->mcast_probes > INT_MAX ||
         config->mcast_reprobes > INT_MAX ||
+        config->queue_bytes > INT_MAX ||
         config->ucast_probes > (unsigned int)INT_MAX - config->mcast_probes ||
         config->ucast_probes > (unsigned int)INT_MAX - config->mcast_reprobes) return -EINVAL;
     struct neigh_parms *p = &table->native->parms;
@@ -55,6 +56,7 @@ int ker_neighbor_configure(struct ker_neighbor_table *table, const struct ker_ne
     NEIGH_VAR_SET(p, MCAST_PROBES, (int)config->mcast_probes);
     NEIGH_VAR_SET(p, MCAST_REPROBES, (int)config->mcast_reprobes);
     NEIGH_VAR_SET(p, APP_PROBES, 0); /* No userspace ARPD service in this profile. */
+    NEIGH_VAR_SET(p, QUEUE_LEN_BYTES, (int)config->queue_bytes);
     neigh_set_reach_time(p);
     return 0;
 }

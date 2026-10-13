@@ -89,7 +89,7 @@
     "arp-chain-feedback": {
       "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
       "source_case": "test_ff_dpdk_if_send_multiseg",
-      "adaptation": "Ker-specific integration extension of the upstream multisegment geometry scenario: split a valid Ethernet ARP reply across a real DPDK chain, linearize and classify it, then exercise the existing ARP decoder and scoped native neighbor feedback from an actual worker RX poll. Verify rejection boundaries, timer/reference preservation, source-chain release and pool recovery. The ARP feedback scenario is not an upstream F-Stack test and does not claim NIC traffic or general ARP learning."
+      "adaptation": "Ker-specific integration extension of the upstream multisegment geometry scenario: split a valid Ethernet ARP reply across a real DPDK chain, linearize and classify it, then exercise the existing ARP decoder and scoped native neighbor feedback from an actual worker RX poll. Verify rejection boundaries, timer/reference preservation, source-chain release and pool recovery. The ARP feedback scenario is not an upstream F-Stack test and does not claim NIC traffic or general ARP learning. The opt-in known-peer resolver extension also tests INCOMPLETE reply admission, queued output, invalid broadcast reply retention, and consumed output on exporter pressure through the same actual worker RX path."
     },
     "ipv4-ingress-validation": {
       "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
@@ -316,6 +316,11 @@
       "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
       "source_case": "test_ff_dpdk_if_send_basic",
       "adaptation": "Ker-specific native Linux resolved-neighbor output extension, motivated by the pinned packet-send scenario. The neighbor-timer test sends configured IPv4 frames through unchanged neigh_resolve_output and native event-send inline bodies into the bounded TX exporter. It checks current neighbor MAC header rebuilding, supported NUD states and native timer transitions, TX ownership and retries, and admission failures. Source provenance for the three Linux bodies is verified separately by neighbor-output-import. No upstream F-Stack neighbor test, unknown-neighbor resolution, routing, sockets or NIC transmission is claimed."
+    },
+    "neighbor-known-peer-resolution": {
+      "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
+      "source_case": "test_ff_dpdk_if_send_basic",
+      "adaptation": "Ker-specific native Linux neighbor re-resolution extension: previously monitored known peer enters INCOMPLETE, queues bounded skb ownership, solicits through explicit ARP callbacks, and flushes via unchanged neighbor update after accepted feedback. Exercises queue pressure, timeout and cancellation. The F-Stack source case motivates packet output only; it is not an upstream neighbor-resolution test and does not establish unknown-peer discovery, routing, sockets or NIC transmission."
     }
   }
 }
