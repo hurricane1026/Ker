@@ -9,16 +9,20 @@ Linux timerqueue 调度、每 worker 分类内存压力与原生 DPDK 包池可�
 `ker_worker_poll(worker, now_ns, result)` 按顺序执行：
 
 1. 在 timer_budget 内触发到期定时器。
-2. 在 service_budget 内推进已有应用/协议任务。
-3. 在 tx_budget 内推进适配层提供的发送重试与完成回收。
-4. 观察分类内存水位及本 lcore 可获取的 mbuf 描述符快照。
-5. 若无压力，按 RX 配置与可用量计算预算并调用接收适配器。
+2. 若关联了 `ker_flow`，在 handoff_budget 内处理本 worker 的跨 worker 包队列。
+3. 在 service_budget 内推进已有应用/协议任务。
+4. 在 tx_budget 内推进适配层提供的发送重试与完成回收。
+5. 观察分类内存水位及本 lcore 可获取的 mbuf 描述符快照。
+6. 若无压力，按 RX 配置与可用量计算预算并调用接收适配器。
 
 定时器预算必须非零。service、TX 和 RX 可以以零预算关闭；非零预算必须
 提供对应回调。回调同步运行且必须返回不超过预算的工作数或负 errno，
 不能阻塞、重入轮询、注销 worker、关闭或重建所借用的 pool/runtime。
 框架不接管回调创建的包；适配器仍必须遵守 DPDK 分配/归还与发送所有权。
 service 只推进已有任务，不能借此绕过新请求接入限制。
+
+flow handoff 使用独立预算，在 RX 压力门控之前持续推进。配置、解析边界与
+外部 producer quiescence 生命周期见 [flow-steering.md](flow-steering.md)。
 
 容量压力只暂停 RX。应用/协议任务、定时器和 TX 不受这个门控限制，因而
 可以释放已经持有的对象；回收后同一轮重新观察水位并恢复 RX。若回调失败，

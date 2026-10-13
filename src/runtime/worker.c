@@ -1,4 +1,5 @@
 #include "runtime/worker.h"
+#include "runtime/flow.h"
 #include "runtime/memory.h"
 #include <linux/irqflags.h>
 #include <rte_lcore.h>
@@ -15,7 +16,8 @@ int ker_worker_init(struct ker_worker *worker, struct ker_packet_pool *packets,
 {
     if (!worker || !packets || !packets->mbufs || !config || !ops ||
         !config->timer_budget || config->timer_budget > INT_MAX ||
-        config->service_budget > INT_MAX || (config->service_budget && !ops->service) ||
+        config->service_budget > INT_MAX || config->handoff_budget > INT_MAX ||
+        (config->service_budget && !ops->service) ||
         config->rx_budget > INT_MAX || config->tx_budget > INT_MAX ||
         (config->rx_budget && !ops->rx) || (config->tx_budget && !ops->tx) ||
         config->packet_high > packets->mbufs->size || config->rx_margin > packets->mbufs->size ||
@@ -40,6 +42,8 @@ int ker_worker_cleanup(struct ker_worker *worker)
     if (rte_lcore_id() != worker->lcore)
         return -EXDEV;
     if (worker->polling)
+        return -EBUSY;
+    if (worker->flow)
         return -EBUSY;
     int error = ker_runtime_cleanup(&worker->timers);
     if (!error)
@@ -88,7 +92,7 @@ int ker_worker_poll(struct ker_worker *worker, int64_t now_ns, struct ker_worker
         return -EINVAL;
     if (rte_lcore_id() != worker->lcore)
         return -EXDEV;
-    if (worker->polling || ker_local_irq_disabled())
+    if (worker->polling || (worker->flow && worker->flow->delivering) || ker_local_irq_disabled())
         return -EBUSY;
     if (memory_active() || worker->packets->mbufs != worker->backing_pool)
         return -ESHUTDOWN;
@@ -98,6 +102,14 @@ int ker_worker_poll(struct ker_worker *worker, int64_t now_ns, struct ker_worker
     int error = count < 0 ? count : 0;
     if (!error) {
         progress.timers = (unsigned int)count;
+        if (worker->flow && worker->config.handoff_budget) {
+            count = ker_flow_poll(worker->flow, worker->config.handoff_budget);
+            error = count < 0 ? count : 0;
+            if (!error)
+                progress.handoff = (unsigned int)count;
+        }
+    }
+    if (!error) {
         count = io_poll(worker->ops.service, worker->ops.arg, worker->config.service_budget);
         error = count < 0 ? count : 0;
         if (!error)

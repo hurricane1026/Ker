@@ -4,6 +4,8 @@ ker 的目标是把 Linux kernel 网络栈移植到用户态，以 DPDK 提供�
 
 目前已移植 checksum、rbtree、timerqueue 和 refcount 基础代码，并接入 DPDK heap、原子分配尺寸池、每 worker 分类容量预算、描述符 mempool、原生 mbuf 生命周期及 Linux 原始 skb 的线性子集，以及按容量压力限制 RX 的私有 worker 轮询框架，以及原始 net_device 布局、Ethernet 接收分类、单 worker NAPI 调度/完成、原始 packet_type 协议匹配/投递、ARP/Ethernet 报文构造、原始 IPv4 静态地址视图、固定容量永久邻居表，以及原始 ARP 接收门控和私有消息回调，以及按包数/truesize 限制的原始 skb FIFO。提供公共校验和 API，其他 runtime 与内存接口仍是私有接口。**完整 skb、IP/UDP/TCP 协议层、网卡收发和 socket API 尚未实现，当前不能提供网络服务。** `ker_capabilities()` 仍返回 `KER_CAP_CHECKSUM`（`0x20`），协议栈和网卡能力仍关闭。
 
+现已建立私有的固定 TCP/UDP flow owner 选择和有界跨 worker mbuf handoff 基础；它只解析报文头并选择包的调度 worker，不实现协议栈或全局状态隔离。边界见[固定 flow steering](docs/flow-steering.md)。
+
 ## 获取依赖
 
 ```sh
@@ -56,7 +58,7 @@ DPDK 默认启用，从 fork 的本地安装目录查找，要求版本至少为
 | `third_party/dpdk` | DPDK fork，以 submodule 管理 |
 | `docs/architecture.md` | 移植边界、运行模型与分阶段验收标准 |
 
-移植边界见 [Linux 基础代码移植](docs/linux-port.md)、[DPDK 内存与 skb 所有权](docs/dpdk-memory.md) 和 [Linux skb 线性子集](docs/linux-skb.md)。下一阶段接入原始 ARP/IPv4 入口及邻居和发送路径，并补齐设备注册、连接预算与独立控制资源。Ethernet 边界见 [原始接收分类](docs/linux-ethernet.md)。NAPI 边界见 [调度与完成](docs/linux-napi.md)。协议投递边界见 [匹配与所有权](docs/linux-receive.md)。ARP 构造边界见 [报文与导出](docs/linux-arp.md)。ARP 接收边界见 [门控与消息回调](docs/linux-arp-receive.md)。地址边界见 [静态 IPv4 配置](docs/linux-ipv4-address.md)。邻居边界见 [永久表与引用](docs/linux-neighbor.md)。待发送队列见 [原始 FIFO 与限额](docs/linux-skb-queue.md)。Worker 边界见 [轮询与 RX 压力](docs/worker.md)。整体路线见[架构与移植路线](docs/architecture.md)。
+移植边界见 [Linux 基础代码移植](docs/linux-port.md)、[DPDK 内存与 skb 所有权](docs/dpdk-memory.md) 和 [Linux skb 线性子集](docs/linux-skb.md)。下一阶段接入原始 ARP/IPv4 入口及邻居和发送路径，并补齐设备注册、连接预算与独立控制资源。Ethernet 边界见 [原始接收分类](docs/linux-ethernet.md)。NAPI 边界见 [调度与完成](docs/linux-napi.md)。协议投递边界见 [匹配与所有权](docs/linux-receive.md)。ARP 构造边界见 [报文与导出](docs/linux-arp.md)。ARP 接收边界见 [门控与消息回调](docs/linux-arp-receive.md)。地址边界见 [静态 IPv4 配置](docs/linux-ipv4-address.md)。邻居边界见 [永久表与引用](docs/linux-neighbor.md)。待发送队列见 [原始 FIFO 与限额](docs/linux-skb-queue.md)。Worker 边界见 [轮询与 RX 压力](docs/worker.md)，flow 选择边界见[固定 flow steering](docs/flow-steering.md)。整体路线见[架构与移植路线](docs/architecture.md)。
 
 The private [Linux timer_list adapter](docs/linux-timer-list.md) associates unchanged
 native timer fields with worker timerqueues, including scoped jiffies, bounded

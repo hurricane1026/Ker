@@ -49,7 +49,7 @@ RX 获取的 mbuf 由适配层负责释放；交给 Linux 的 skb 由协议栈�
 
 第一阶段在一个线程上运行一个栈实例，按预算轮询 RX、处理协议事件、推进 timer、服务应用事件并提交 TX。即使没有收包，也必须推进定时器。应用回调不能长时间阻塞这个线程。
 
-多核阶段再决定共享栈还是每 worker 独立栈，验证 RSS、同一连接的 worker 归属、监听与 accept 分发、跨核队列、RCU 和路由配置更新。每 worker 独立栈是待验证选项，目前没有做出不可逆的 API 承诺。
+当前已接受一项有限的多 worker 基线：用固定 seeded tuple hash 和不可变 bucket-to-worker 表确定 TCP/UDP 包的 owner，并通过有界 mbuf inbox 在 worker poll 中交接；适配层还可提供有界 exact-key owner override。详见 [固定 flow steering](flow-steering.md)。方向是每个 worker 持有并访问自己的可变协议与设备状态；现有 Linux 全局状态仍需逐项审计并通过适配层隔离或明确共享，完整的独立 worker 协议栈、RSS、监听与 accept 分发、RCU 和在线路由更新仍待实现和验证。
 
 ## 分阶段验收
 

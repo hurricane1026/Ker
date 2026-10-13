@@ -2,6 +2,7 @@
 #define KER_RUNTIME_WORKER_H
 #include "runtime/timer.h"
 #include "runtime/buffer.h"
+struct ker_flow_context;
 
 /* Private poll-loop substrate. Callbacks run synchronously on the owning
  * initialized EAL worker and must not block, reenter, unregister it, or
@@ -13,6 +14,7 @@ struct ker_worker_config {
     unsigned int timer_budget;
     unsigned int service_budget; /* queued application/protocol work, even while RX pauses */
     unsigned int tx_budget;
+    unsigned int handoff_budget; /* bounded flow inbox work before service; zero when unattached */
     unsigned int rx_budget;
     unsigned int packet_low; /* pause RX at or below this accessible free count */
     unsigned int packet_high; /* resume at or above this; zero disables hysteresis */
@@ -23,6 +25,7 @@ struct ker_worker_result {
     unsigned int timers;
     unsigned int service;
     unsigned int tx;
+    unsigned int handoff;
     unsigned int rx;
     unsigned int rx_budget;
     unsigned int packet_available;
@@ -37,6 +40,7 @@ struct ker_worker {
     struct rte_mempool *backing_pool;
     struct ker_worker_config config;
     struct ker_worker_ops ops;
+    struct ker_flow_context *flow;
     unsigned int lcore;
     bool initialized;
     bool polling;
@@ -44,7 +48,7 @@ struct ker_worker {
 };
 int ker_worker_init(struct ker_worker *worker, struct ker_packet_pool *packets,
     const struct ker_worker_config *config, const struct ker_worker_ops *ops);
-/* Always advances timers, queued service work, then TX before RX admission. On callback
+/* Advances timers, attached flow handoff, service work, then TX before RX admission. On callback
  * failure, returns errno and reports successful completed stages in result;
  * side effects of a failed callback cannot be rolled back by the worker.
  * Validation/reentry failures leave result untouched. */
