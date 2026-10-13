@@ -216,3 +216,33 @@ then releases the held buffers and accepts a later valid packet. Teardown occurs
 after production stops and the path drains, with pending/inbox emptiness and pool
 recovery checks. The receive callback retains its explicit allocation-drop
 policy; this test adds no production retry API, NIC/RSS support, or socket state.
+
+## Bounded owner receive adapter
+
+`ker_flow_receive` composes a flow context, an owner-local bounded packet ring,
+and the existing `ker_rx_ring` copy/dispatch adapter. Its flow callback queues
+the transferred chain without allocating a destination skb. The owner runs
+`ker_flow_receive_poll` from its worker service callback, so retry work is not
+gated by the worker's RX admission policy.
+
+The local ring has an exact configured capacity. A chain popped for copying is
+retained as the RX adapter's single pending item on `-ENOMEM`, ahead of all
+later queued chains. Storage is bounded by that capacity plus one pending chain
+and the existing flow inbox. A full local ring consumes and frees the newly
+delivered chain and records an overflow drop: the existing void flow callback
+cannot return backpressure to the submitting worker. Successful flow submission
+therefore means ownership transfer, not guaranteed protocol delivery.
+
+The adapter owns its flow attachment and reserves the device/runtime binding
+through the RX adapter's existing pins. Initialization and cleanup belong to
+the owner lcore and require externally serialized setup/shutdown. Cleanup
+requires an empty flow inbox, local ring and pending slot, no attached ingress
+flow-ring adapter, and no active worker poll or protocol dispatch. Direct
+detach of the owned flow context is blocked. Cancellation returns only the
+pending chain; queued traffic must still be drained before cleanup.
+
+Flow keys are used for owner selection and are not forwarded as transport
+callback metadata. Packet decoding still uses the existing Ethernet/IPv4
+receive path. This adapter adds owner-side allocation retry; the earlier
+test-owned callbacks retain their explicit allocation-drop policy. It does not
+implement sockets, TCP state, NIC/RSS, flow migration or lossless admission.
