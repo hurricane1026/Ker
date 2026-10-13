@@ -75,10 +75,11 @@ static int a_rx(void *arg, unsigned int budget) { (void)arg; return ker_rx_ring_
 static int b_rx(void *arg, unsigned int budget) { (void)arg; return ker_rx_ring_poll(&brx, budget); }
 static int b_tx(void *arg, unsigned int budget) { (void)arg; return ker_tx_export_poll(&btx, budget); }
 
-static void poll_worker(struct ker_worker *worker)
+static struct ker_worker_result poll_worker(struct ker_worker *worker)
 {
     struct ker_worker_result result = {0};
     CHECK(ker_worker_poll(worker, worker->timers.now_ns, &result) == 0);
+    return result;
 }
 
 static void send_probe(const struct ker_neighbor_event *event, void *arg)
@@ -192,7 +193,7 @@ static void run(void)
     struct ker_worker_ops bworker_ops = {.tx = b_tx, .rx = b_rx};
     struct ker_worker_config bworker_config = {.timer_budget = 1, .tx_budget = 1,
         .rx_budget = 1};
-    CHECK(ker_worker_init(&bworker, &pool, &bworker_config, &bworker_ops) == 0);
+    CHECK(ker_worker_init(&bworker, &bpool, &bworker_config, &bworker_ops) == 0);
     CHECK(ker_neighbor_monitor_discovery_init(&monitor, &neighbors,
         &aworker.timers, &atx, bip, send_probe, NULL, NULL) == 0);
 
@@ -275,6 +276,32 @@ static void run(void)
     poll_worker(&aworker);
     CHECK(btx.packets == 0 && arx.last_dropped == 1 && feedback_status == -ENOTSUP);
     poll_worker(&bworker);
+
+    /* B's RX admission follows B's pool: exhausting A must not pause B. */
+    queue_request(ARPOP_REQUEST, aip, bip);
+    struct rte_mbuf *aheld[PACKETS];
+    unsigned int aheld_count = 0;
+    while (aheld_count < PACKETS &&
+        (aheld[aheld_count] = ker_packet_alloc(&pool)) != NULL)
+        ++aheld_count;
+    CHECK(aheld_count > 0 && rte_mempool_avail_count(pool.mbufs) == 0);
+    struct ker_worker_result a_pressure_result = poll_worker(&bworker);
+    CHECK(a_pressure_result.rx == 1 && brx.last_completed == 1);
+    for (unsigned int i = 0; i < aheld_count; ++i) ker_packet_free(aheld[i]);
+
+    /* Exhausting B must suppress its RX callback even while A has capacity. */
+    queue_request(ARPOP_REQUEST, aip, bip);
+    struct rte_mbuf *bheld[31];
+    unsigned int bheld_count = 0;
+    while (bheld_count < 31 &&
+        (bheld[bheld_count] = ker_packet_alloc(&bpool)) != NULL)
+        ++bheld_count;
+    CHECK(bheld_count > 0 && rte_mempool_avail_count(bpool.mbufs) == 0);
+    struct ker_worker_result b_pressure_result = poll_worker(&bworker);
+    CHECK(b_pressure_result.rx_budget == 0 && b_pressure_result.rx == 0);
+    for (unsigned int i = 0; i < bheld_count; ++i) ker_packet_free(bheld[i]);
+    struct ker_worker_result b_recovery_result = poll_worker(&bworker);
+    CHECK(b_recovery_result.rx == 1 && brx.last_completed == 1);
 
     CHECK(ker_neighbor_monitor_cleanup(&monitor) == 0 && atx.resolver_refs == 0);
     CHECK(ker_arp_receiver_unregister(&a_arp_rx) == 0);
