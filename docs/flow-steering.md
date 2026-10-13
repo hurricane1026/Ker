@@ -72,3 +72,26 @@ provide RCU/grace periods, preserve ordering across owner changes, parse
 hardware-stripped VLAN identity, or make pre-existing global state worker-local.
 The ring placement honors the configured socket; small policy snapshots use the
 attaching thread's DPDK allocation socket.
+
+## Flow steering verification
+
+The DPDK test suite includes two focused regressions in addition to the parser
+and lifecycle checks in `flow`:
+
+- `flow-matrix` runs on a single CPU. It checks independent IPv4/IPv6 TCP/UDP
+  golden tuples with a nonuniform `bucket % 3` owner map, both packet
+  directions, and every logical sender-to-owner local/remote path. Its expected
+  key, full hash, and owner are fixed test vectors; it does not ask the routing
+  implementation to produce its own expected result.
+- `flow-multicore` captures the allowed CPU mask before EAL startup, pins and
+  verifies the EAL thread plus two registered worker threads on distinct CPUs,
+  and sends 9,216 unique packets through small bounded inboxes while all three
+  workers produce and drain. It checks full frame bytes, parsed canonical keys,
+  callback owner thread, and exactly-once delivery. CTest marks this test
+  skipped (return code 77) only when fewer than three CPUs are available.
+
+Run both with:
+
+```sh
+ctest --test-dir build -R '^flow-(matrix|multicore)$' --output-on-failure
+```
