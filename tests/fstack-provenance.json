@@ -306,6 +306,11 @@
       "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
       "source_case": "test_ff_dpdk_if_send_multiseg",
       "adaptation": "Ker-specific complete flow ingress/owner receive integration inspired by the pinned segmented TX case. Two distinct pinned CPUs run ingress ring steering and owner-local Ethernet/IPv4 TCP/UDP validation with separate pools and receive state. Immutable expected records verify packet/key bytes and callback placement, deterministic full-inbox pending/FIFO retry, checksum drops, owner-pool exhaustion/drop/recovery, and orderly drain/teardown. Skip only with fewer than two allowed CPUs; setup errors fail. This does not claim upstream F-Stack flow coverage, NIC/RSS, sockets, TCP state, or a production allocation-retry bridge."
+    },
+    "flow-owner-receive": {
+      "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
+      "source_case": "test_ff_dpdk_if_send_multiseg",
+      "adaptation": "Ker-specific owner receive adapter inspired by the pinned segmented TX scenario. A bounded owner-local packet ring queues chains after flow handoff; worker service polling reuses the Ethernet copy/classify receive path. Destination allocation failure retains one pending chain for FIFO retry; queue overflow explicitly consumes and drops the newest chain. Tests cover allocation recovery during RX pressure, lifecycle pins, cancellation and initialization rollback. This is not upstream F-Stack flow coverage, end-to-end lossless backpressure, NIC/RSS, sockets or TCP state."
     }
   }
 }

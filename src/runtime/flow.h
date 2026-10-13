@@ -62,6 +62,8 @@ struct ker_flow_context {
     void *arg;
     bool delivering;
     unsigned int flow_ring_live;
+    /* Set by a composition adapter that owns this context. */
+    bool receive_owned;
     bool attached;
 };
 

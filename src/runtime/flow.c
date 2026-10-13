@@ -363,7 +363,8 @@ int ker_flow_detach(struct ker_flow_context *context)
     if (!context) return -EINVAL;
     if (!context->attached) return 0;
     if (rte_lcore_id() != context->lcore) return -EXDEV;
-    if (context->worker->polling || context->delivering || context->flow_ring_live) return -EBUSY;
+    if (context->worker->polling || context->delivering || context->flow_ring_live ||
+        context->receive_owned) return -EBUSY;
     if (ker_local_irq_disabled()) return -EBUSY;
     if (!rte_ring_empty(context->inbox)) return -EBUSY;
     context->worker->flow = NULL;
