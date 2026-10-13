@@ -425,6 +425,8 @@ int ker_icmpv4_service_disable(struct ker_icmpv4_service *s) {
   struct ker_neighbor_monitor *m = s->monitor;
   if (rte_lcore_id() != r->handler.runtime->lcore)
     return -EXDEV;
+  if (r->udp_endpoint_table)
+    return -EBUSY;
   if (r->icmpv4_service != s || !m->echo_service_refs)
     return -EINVAL;
   if (s->busy || r->handler.runtime->dispatching || m->busy ||

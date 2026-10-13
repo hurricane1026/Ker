@@ -5,6 +5,7 @@
 #include "runtime/arp-receive.h"
 #include "runtime/arp-responder.h"
 #include "runtime/arp.h"
+#include "runtime/buffer.h"
 #include "runtime/ethernet.h"
 #include "runtime/icmp-echo-create.h"
 #include "runtime/icmpv4-create.h"
@@ -18,6 +19,7 @@
 #include "runtime/tx-export.h"
 #include "runtime/tx-ring.h"
 #include "runtime/udp-create.h"
+#include "runtime/udp-endpoint.h"
 #include "runtime/worker.h"
 #include <errno.h>
 #include <linux/if.h>
@@ -34,6 +36,9 @@ static struct ker_transport_receiver brx_transport, arx_transport;
 static struct ker_neighbor_table bneighbors;
 static struct ker_neighbor_monitor bmonitor;
 static struct ker_icmpv4_service service;
+static struct ker_neighbor_table aneighbors;
+static struct ker_neighbor_monitor amonitor;
+static struct ker_icmpv4_service aservice;
 static struct ker_worker aworker, bworker;
 static struct ker_tx_ring ab, ba;
 static struct ker_rx_ring arx, brx;
@@ -47,6 +52,12 @@ static __be32 aip, bip;
 static unsigned int replies_seen, fallback_seen, udp_seen, tcp_seen,
     arp_feedback;
 static uint64_t fake_now = 1000;
+static unsigned int endpoint_seen;
+static unsigned int endpoint_a_seen;
+static int endpoint_drop;
+static int endpoint_status = NET_RX_SUCCESS;
+static struct ker_udp_endpoint_table *endpoint_table_under_test;
+static int endpoint_reentrant_bind, endpoint_reentrant_disable;
 static uint32_t fake_utc = 123456;
 static int fake_utc_status;
 static bool reentry_check;
@@ -64,6 +75,8 @@ static void check_reentry(void) {
 static __be32 router_ip;
 static unsigned int control_events;
 static unsigned int emitted_errors;
+static unsigned char expected_endpoint_quote[576];
+static unsigned int expected_endpoint_quote_length;
 static uint8_t expected_probe_code;
 static uint8_t expected_emitted_type = 3, expected_emitted_code = 3;
 static uint16_t expected_emitted_mtu;
@@ -72,6 +85,7 @@ static uint8_t expected_control_type = 3, expected_control_code = 3,
                expected_pointer;
 static uint16_t expected_mtu;
 static __be32 expected_gateway;
+static int wire_checksum_valid(const unsigned char *, unsigned int);
 static uint64_t monotonic_ms(void *arg) {
   (void)arg;
   check_reentry();
@@ -133,6 +147,18 @@ static int receive_echo(const struct ker_transport_message *message,
           !memcmp(message->ipv4.header + 16, &aip, 4));
     CHECK(!memcmp(message->icmpv4.quoted_ipv4 + 12, &aip, 4) &&
           !memcmp(message->icmpv4.quoted_ipv4 + 16, &bip, 4));
+    CHECK(csum_fold(csum_partial(message->icmpv4.header,
+                                 message->icmpv4.message_length, 0)) == 0);
+    CHECK(
+        wire_checksum_valid(message->ipv4.header, message->ipv4.header_length));
+    CHECK(wire_checksum_valid(message->icmpv4.header,
+                              message->icmpv4.message_length));
+    if (expected_endpoint_quote_length) {
+      CHECK(message->icmpv4.quoted_length == expected_endpoint_quote_length);
+      CHECK(!memcmp(message->icmpv4.quoted_ipv4, expected_endpoint_quote,
+                    expected_endpoint_quote_length));
+      expected_endpoint_quote_length = 0;
+    }
     ++emitted_errors;
     return NET_RX_SUCCESS;
   }
@@ -194,6 +220,52 @@ static int fallback(const struct ker_transport_message *message, void *arg) {
   }
   return NET_RX_SUCCESS;
 }
+static int endpoint_receive(const struct ker_transport_message *message,
+                            void *arg) {
+  (void)arg;
+  CHECK(message->protocol == KER_TRANSPORT_UDP);
+  CHECK(message->packet.udp.destination_port == rte_cpu_to_be_16(9000) ||
+        message->packet.udp.destination_port == rte_cpu_to_be_16(9001));
+  CHECK(message->packet.udp.payload_length == sizeof(payload));
+  CHECK(!memcmp(message->packet.udp.payload, payload, sizeof(payload)));
+  ++endpoint_seen;
+  if (endpoint_table_under_test) {
+    endpoint_reentrant_bind =
+        ker_udp_endpoint_bind(endpoint_table_under_test, rte_cpu_to_be_16(9002),
+                              endpoint_receive, NULL);
+    endpoint_reentrant_disable =
+        ker_udp_endpoint_table_disable(endpoint_table_under_test);
+  }
+  if (endpoint_status != NET_RX_SUCCESS)
+    return endpoint_status;
+  return endpoint_drop ? NET_RX_DROP : NET_RX_SUCCESS;
+}
+static int endpoint_a_receive(const struct ker_transport_message *message,
+                              void *arg) {
+  (void)arg;
+  CHECK(message->protocol == KER_TRANSPORT_UDP);
+  CHECK(message->packet.udp.destination_port == rte_cpu_to_be_16(9000));
+  ++endpoint_a_seen;
+  return NET_RX_SUCCESS;
+}
+static void no_probe(const struct ker_neighbor_event *event, void *arg) {
+  (void)event;
+  (void)arg;
+}
+static int wire_checksum_valid(const unsigned char *bytes,
+                               unsigned int length) {
+  uint32_t sum = 0;
+  for (unsigned int i = 0; i < length; i += 2) {
+    uint16_t word = (uint16_t)bytes[i] << 8;
+    if (i + 1 < length)
+      word |= bytes[i + 1];
+    sum += word;
+    sum = (sum & 0xffffU) + (sum >> 16);
+  }
+  while (sum >> 16)
+    sum = (sum & 0xffffU) + (sum >> 16);
+  return sum == 0xffffU;
+}
 static int feedback(const struct ker_arp_message *message, void *arg) {
   (void)arg;
   CHECK(message->operation == ARPOP_REPLY && message->sender_ip == aip &&
@@ -251,6 +323,13 @@ static void inject_request(struct sk_buff *packet) {
   CHECK(result.tx == 1 && result.rx == 0);
   result = poll_worker(&bworker);
   CHECK(result.rx == 1);
+}
+static void inject_from_b(struct sk_buff *packet) {
+  CHECK(ker_tx_export_enqueue(&btx, &packet) == 0 && !packet);
+  struct ker_worker_result result = poll_worker(&bworker);
+  CHECK(result.tx == 1 && result.rx == 0);
+  result = poll_worker(&aworker);
+  CHECK(result.rx == 1 && result.tx == 0);
 }
 static void send_custom_request(__be32 source, __be32 destination,
                                 const unsigned char destination_mac[ETH_ALEN],
@@ -377,6 +456,8 @@ static void run(void) {
   CHECK(ker_receive_runtime_init(&brt, &bctx) == 0);
   CHECK(ker_neighbor_table_init(&bneighbors, &baddr, "echo_svc_neighbors", 4,
                                 2) == 0);
+  CHECK(ker_neighbor_table_init(&aneighbors, &aaddr, "echo_svc_aneighbors", 4,
+                                2) == 0);
   struct ker_neighbor_config ncfg = {.retrans_ticks = 20,
                                      .reachable_ticks = 100,
                                      .delay_ticks = 30,
@@ -385,6 +466,7 @@ static void run(void) {
                                      .mcast_reprobes = 1,
                                      .queue_bytes = 16384};
   CHECK(ker_neighbor_configure(&bneighbors, &ncfg) == 0);
+  CHECK(ker_neighbor_configure(&aneighbors, &ncfg) == 0);
   CHECK(ker_tx_ring_init(&ab, "echo_svc_ab", 4, SOCKET_ID_ANY) == 0);
   CHECK(ker_tx_ring_init(&ba, "echo_svc_ba", 4, SOCKET_ID_ANY) == 0);
   CHECK(ker_tx_export_init(&atx, &actx, 8, 32768, ring_sink, &ab) == 0);
@@ -407,6 +489,178 @@ static void run(void) {
   CHECK(ker_neighbor_monitor_discovery_init(&bmonitor, &bneighbors,
                                             &bworker.timers, &btx, aip,
                                             send_probe, NULL, NULL) == 0);
+  CHECK(ker_neighbor_monitor_discovery_init(&amonitor, &aneighbors,
+                                            &aworker.timers, &atx, bip,
+                                            no_probe, NULL, NULL) == 0);
+  struct ker_icmpv4_service_config a_service_config = service_config;
+  a_service_config.event = NULL;
+  CHECK(ker_icmpv4_service_enable(&service, &brx_transport, &bmonitor,
+                                  &service_config) == 0);
+  CHECK(ker_icmpv4_service_enable(&aservice, &arx_transport, &amonitor,
+                                  &a_service_config) == 0);
+
+  /* A fixed bounded table owns supported local UDP delivery. */
+  struct ker_udp_endpoint_table endpoints = {0};
+  struct ker_udp_endpoint endpoint_entries[2] = {0};
+  CHECK(ker_udp_endpoint_table_enable(&endpoints, &brx_transport, &service,
+                                      endpoint_entries, 2) == 0);
+  CHECK(ker_udp_endpoint_bind(&endpoints, rte_cpu_to_be_16(9000),
+                              endpoint_receive, NULL) == 0);
+  struct ker_udp_endpoint_table aendpoints = {0};
+  struct ker_udp_endpoint aendpoint_entries[1] = {0};
+  CHECK(ker_udp_endpoint_table_enable(&aendpoints, &arx_transport, &aservice,
+                                      aendpoint_entries, 1) == 0);
+  CHECK(ker_udp_endpoint_bind(&aendpoints, rte_cpu_to_be_16(9000),
+                              endpoint_a_receive, NULL) == 0);
+  struct sk_buff *reverse_udp = NULL;
+  CHECK(ker_udp_ipv4_create_configured(
+            &baddr, amac, aip, rte_cpu_to_be_16(40000), rte_cpu_to_be_16(9000),
+            64, NULL, 0, payload, sizeof(payload), &reverse_udp) == 0);
+  inject_from_b(reverse_udp);
+  CHECK(endpoint_a_seen == 1 && endpoint_seen == 0);
+  struct sk_buff *forward_udp = NULL;
+  CHECK(ker_udp_ipv4_create_configured(
+            &aaddr, bmac, bip, rte_cpu_to_be_16(40000), rte_cpu_to_be_16(9000),
+            64, NULL, 0, payload, sizeof(payload), &forward_udp) == 0);
+  inject_request(forward_udp);
+  CHECK(endpoint_seen == 1 && endpoint_a_seen == 1);
+  CHECK(ker_udp_endpoint_unbind(&aendpoints, rte_cpu_to_be_16(9000)) == 0);
+  CHECK(ker_udp_endpoint_table_disable(&aendpoints) == 0);
+  CHECK(ker_icmpv4_service_disable(&aservice) == 0);
+  endpoint_table_under_test = &endpoints;
+  CHECK(ker_icmpv4_service_disable(&service) == -EBUSY);
+  service.busy = true;
+  CHECK(ker_udp_endpoint_bind(&endpoints, rte_cpu_to_be_16(9002),
+                              endpoint_receive, NULL) == -EBUSY);
+  service.busy = false;
+  bmonitor.busy = true;
+  CHECK(ker_udp_endpoint_bind(&endpoints, rte_cpu_to_be_16(9002),
+                              endpoint_receive, NULL) == -EBUSY);
+  bmonitor.busy = false;
+  CHECK(ker_udp_endpoint_bind(&endpoints, 0, endpoint_receive, NULL) ==
+        -EINVAL);
+  unsigned int endpoint_owner = brx_transport.handler.runtime->lcore;
+  brx_transport.handler.runtime->lcore = endpoint_owner + 1;
+  CHECK(ker_udp_endpoint_bind(&endpoints, rte_cpu_to_be_16(9002),
+                              endpoint_receive, NULL) == -EXDEV);
+  brx_transport.handler.runtime->lcore = endpoint_owner;
+  CHECK(ker_udp_endpoint_bind(&endpoints, rte_cpu_to_be_16(9000),
+                              endpoint_receive, NULL) == -EADDRINUSE);
+  CHECK(ker_udp_endpoint_bind(&endpoints, rte_cpu_to_be_16(9001),
+                              endpoint_receive, NULL) == 0);
+  CHECK(ker_udp_endpoint_bind(&endpoints, rte_cpu_to_be_16(9002),
+                              endpoint_receive, NULL) == -ENOSPC);
+  struct sk_buff *udp = NULL;
+  CHECK(ker_udp_ipv4_create_configured(
+            &aaddr, bmac, bip, rte_cpu_to_be_16(40000), rte_cpu_to_be_16(9000),
+            64, NULL, 0, payload, sizeof(payload), &udp) == 0);
+  inject_request(udp);
+  CHECK(endpoint_seen == 2);
+  CHECK(ker_udp_ipv4_create_configured(
+            &aaddr, bmac, bip, rte_cpu_to_be_16(40000), rte_cpu_to_be_16(9001),
+            64, NULL, 0, payload, sizeof(payload), &udp) == 0);
+  inject_request(udp);
+  CHECK(endpoint_seen == 3);
+  endpoint_drop = 1;
+  CHECK(ker_udp_ipv4_create_configured(
+            &aaddr, bmac, bip, rte_cpu_to_be_16(40000), rte_cpu_to_be_16(9000),
+            64, NULL, 0, payload, sizeof(payload), &udp) == 0);
+  inject_request(udp);
+  CHECK(endpoint_seen == 4 && fallback_seen == 0);
+  CHECK(endpoint_reentrant_bind == -EBUSY &&
+        endpoint_reentrant_disable == -EBUSY &&
+        brx_transport.validation_error == 0 && brt.callback_error == 0);
+  endpoint_drop = 0;
+  endpoint_table_under_test = NULL;
+  endpoint_status = 19;
+  CHECK(ker_udp_ipv4_create_configured(
+            &aaddr, bmac, bip, rte_cpu_to_be_16(40000), rte_cpu_to_be_16(9000),
+            64, NULL, 0, payload, sizeof(payload), &udp) == 0);
+  inject_request(udp);
+  CHECK(brx_transport.validation_error == -EPROTO && fallback_seen == 0 &&
+        brt.callback_error == -EPROTO);
+  endpoint_status = NET_RX_SUCCESS;
+  unsigned int seen_before_invalid = endpoint_seen;
+  CHECK(ker_udp_ipv4_create_configured(
+            &aaddr, bmac, bip, rte_cpu_to_be_16(40000), rte_cpu_to_be_16(9000),
+            64, NULL, 0, payload, sizeof(payload), &udp) == 0);
+  udp->data[ETH_HLEN + 20 + 6] ^= 1; /* Corrupt the UDP checksum. */
+  inject_request(udp);
+  CHECK(endpoint_seen == seen_before_invalid && fallback_seen == 0 &&
+        brx_transport.validation_error == -EBADMSG);
+  static const unsigned char udp_options[4] = {1, 1, 1, 1};
+  CHECK(ker_udp_ipv4_create_ip_options(
+            &actx, amac, bmac, aip, bip, rte_cpu_to_be_16(40000),
+            rte_cpu_to_be_16(9000), 64, udp_options, sizeof(udp_options),
+            payload, sizeof(payload), &udp) == 0);
+  inject_request(udp);
+  CHECK(endpoint_seen == seen_before_invalid);
+  CHECK(fallback_seen == 0);
+  CHECK(brx_transport.validation_error == -EOPNOTSUPP);
+  for (unsigned int unsupported = 0; unsupported < 3; ++unsupported) {
+    CHECK(ker_udp_ipv4_create_configured(&aaddr, bmac, bip,
+                                         rte_cpu_to_be_16(40000),
+                                         rte_cpu_to_be_16(9000), 64, NULL, 0,
+                                         payload, sizeof(payload), &udp) == 0);
+    unsigned char *ip = skb_network_header(udp);
+    if (unsupported == 0)
+      ip[8] = 0; /* TTL zero. */
+    else if (unsupported == 1)
+      ip[6] |= 0x80; /* Reserved fragment flag. */
+    else
+      ip[6] |= 0x20; /* More fragments requires reassembly. */
+    refresh_ip_checksum(udp);
+    inject_request(udp);
+    CHECK(endpoint_seen == seen_before_invalid && fallback_seen == 0 &&
+          brx_transport.validation_error == -EOPNOTSUPP);
+  }
+  CHECK(ker_udp_ipv4_create(&actx, amac, bmac, rte_cpu_to_be_32(0x00010203),
+                            bip, rte_cpu_to_be_16(40000),
+                            rte_cpu_to_be_16(9000), 64, payload,
+                            sizeof(payload), &udp) == 0);
+  inject_request(udp);
+  CHECK(endpoint_seen == seen_before_invalid && fallback_seen == 0 &&
+        brx_transport.validation_error == -EOPNOTSUPP);
+  CHECK(ker_udp_ipv4_create(&actx, amac, bmac, aip,
+                            rte_cpu_to_be_32(0xc0000209),
+                            rte_cpu_to_be_16(40000), rte_cpu_to_be_16(9000), 64,
+                            payload, sizeof(payload), &udp) == 0);
+  inject_request(udp);
+  CHECK(endpoint_seen == seen_before_invalid && fallback_seen == 0 &&
+        brx_transport.validation_error == -EOPNOTSUPP);
+  CHECK(ker_udp_ipv4_create(&actx, amac, broadcast, aip,
+                            rte_cpu_to_be_32(0xffffffff),
+                            rte_cpu_to_be_16(40000), rte_cpu_to_be_16(9000), 64,
+                            payload, sizeof(payload), &udp) == 0);
+  inject_request(udp);
+  CHECK(endpoint_seen == seen_before_invalid && fallback_seen == 0 &&
+        brx_transport.validation_error == -EOPNOTSUPP);
+  CHECK(ker_udp_ipv4_create_configured(
+            &aaddr, bmac, bip, rte_cpu_to_be_16(40000), rte_cpu_to_be_16(9000),
+            64, NULL, 0, payload, sizeof(payload), &udp) == 0);
+  unsigned char *udp_header = skb_network_header(udp) + 20;
+  udp_header[6] = udp_header[7] = 0; /* IPv4 permits omitted UDP checksum. */
+  inject_request(udp);
+  CHECK(endpoint_seen == seen_before_invalid + 1 && fallback_seen == 0 &&
+        brx_transport.validation_error == 0);
+  CHECK(ker_udp_endpoint_unbind(&endpoints, rte_cpu_to_be_16(9000)) == 0);
+  CHECK(ker_udp_endpoint_unbind(&endpoints, rte_cpu_to_be_16(9001)) == 0);
+  CHECK(ker_udp_endpoint_table_disable(&endpoints) == 0);
+  struct ker_udp_endpoint_table second_table = {0};
+  struct ker_udp_endpoint second_entries[1] = {0};
+  CHECK(ker_udp_endpoint_table_enable(&second_table, &brx_transport, &service,
+                                      second_entries, 1) == 0);
+  CHECK(ker_udp_endpoint_bind(&second_table, rte_cpu_to_be_16(9000),
+                              endpoint_receive, NULL) == 0);
+  unsigned int before_second_table = endpoint_seen;
+  CHECK(ker_udp_ipv4_create_configured(
+            &aaddr, bmac, bip, rte_cpu_to_be_16(40000), rte_cpu_to_be_16(9000),
+            64, NULL, 0, payload, sizeof(payload), &udp) == 0);
+  inject_request(udp);
+  CHECK(endpoint_seen == before_second_table + 1 && fallback_seen == 0);
+  CHECK(ker_udp_endpoint_unbind(&second_table, rte_cpu_to_be_16(9000)) == 0);
+  CHECK(ker_udp_endpoint_table_disable(&second_table) == 0);
+  CHECK(ker_icmpv4_service_disable(&service) == 0);
   CHECK(ker_icmpv4_service_enable(&service, &brx_transport, &bmonitor,
                                   &service_config) == 0);
   CHECK(ker_transport_receiver_unregister(&brx_transport) == -EBUSY);
@@ -450,6 +704,78 @@ static void run(void) {
   CHECK(replies_seen == 1 && !btx.packets && !atx.packets);
   CHECK(ker_icmpv4_service_enable(&service, &brx_transport, &bmonitor,
                                   &service_config) == 0);
+
+  struct ker_udp_endpoint_table closed_table = {0};
+  struct ker_udp_endpoint closed_entries[1] = {0};
+  CHECK(ker_udp_endpoint_table_enable(&closed_table, &brx_transport, &service,
+                                      closed_entries, 1) == 0);
+  unsigned int errors_before_closed = emitted_errors;
+  struct sk_buff *closed_udp = NULL;
+  CHECK(ker_udp_ipv4_create_configured(
+            &aaddr, bmac, bip, rte_cpu_to_be_16(40000), rte_cpu_to_be_16(9001),
+            64, NULL, 0, payload, sizeof(payload), &closed_udp) == 0);
+  expected_endpoint_quote_length = 20 + 8 + sizeof(payload);
+  memcpy(expected_endpoint_quote, skb_network_header(closed_udp),
+         expected_endpoint_quote_length);
+  inject_request(closed_udp);
+  result = poll_worker(&bworker);
+  CHECK(result.tx == 1 && result.rx == 0);
+  result = poll_worker(&aworker);
+  CHECK(result.rx == 1 && result.tx == 0);
+  CHECK(emitted_errors == errors_before_closed + 1 && fallback_seen == 0);
+  unsigned int available_before_pressure;
+  CHECK(ker_packet_pool_available(&bpool, &available_before_pressure) == 0);
+  struct rte_mbuf *held_bpool[128];
+  unsigned int endpoint_pressure_held = 0;
+  unsigned int available_now = available_before_pressure;
+  while (available_now > 1) {
+    CHECK(endpoint_pressure_held < sizeof(held_bpool) / sizeof(held_bpool[0]));
+    held_bpool[endpoint_pressure_held] = ker_packet_alloc(&bpool);
+    CHECK(held_bpool[endpoint_pressure_held] != NULL);
+    ++endpoint_pressure_held;
+    --available_now;
+  }
+  uint64_t errors_before_pool_failure = service.errors_submitted;
+  unsigned int emitted_before_pool_failure = emitted_errors;
+  CHECK(ker_udp_ipv4_create_configured(
+            &aaddr, bmac, bip, rte_cpu_to_be_16(40000),
+            rte_cpu_to_be_16(9003), 64, NULL, 0, payload, sizeof(payload),
+            &closed_udp) == 0);
+  inject_request(closed_udp);
+  result = poll_worker(&bworker);
+  CHECK(result.rx == 0 && result.tx == 0);
+  CHECK(service.errors_submitted == errors_before_pool_failure &&
+        service.last_error == -ENOMEM &&
+        emitted_errors == emitted_before_pool_failure && fallback_seen == 0);
+  for (unsigned int i = 0; i < endpoint_pressure_held; ++i)
+    ker_packet_free(held_bpool[i]);
+  unsigned int available_after_pressure;
+  CHECK(ker_packet_pool_available(&bpool, &available_after_pressure) == 0);
+  CHECK(available_after_pressure == available_before_pressure);
+  CHECK(ker_udp_ipv4_create_configured(
+            &aaddr, bmac, bip, rte_cpu_to_be_16(40000),
+            rte_cpu_to_be_16(9003), 64, NULL, 0, payload, sizeof(payload),
+            &closed_udp) == 0);
+  expected_endpoint_quote_length = 20 + 8 + sizeof(payload);
+  memcpy(expected_endpoint_quote, skb_network_header(closed_udp),
+         expected_endpoint_quote_length);
+  inject_request(closed_udp);
+  result = poll_worker(&bworker);
+  CHECK(result.tx == 1 && result.rx == 0);
+  result = poll_worker(&aworker);
+  CHECK(result.rx == 1 && result.tx == 0);
+  CHECK(service.errors_submitted == errors_before_pool_failure + 1 &&
+        emitted_errors == emitted_before_pool_failure + 1 && fallback_seen == 0);
+  service.tokens = 0;
+  CHECK(ker_udp_ipv4_create_configured(
+            &aaddr, bmac, bip, rte_cpu_to_be_16(40000), rte_cpu_to_be_16(9002),
+            64, NULL, 0, payload, sizeof(payload), &closed_udp) == 0);
+  inject_request(closed_udp);
+  result = poll_worker(&bworker);
+  CHECK(result.tx == 0 && result.rx == 0);
+  CHECK(emitted_errors == errors_before_closed + 2 && fallback_seen == 0);
+  service.tokens = service.config.burst;
+  CHECK(ker_udp_endpoint_table_disable(&closed_table) == 0);
 
   unsigned int old_requests = service.received;
   unsigned int old_drops = service.dropped;
@@ -571,14 +897,16 @@ static void run(void) {
   struct sk_buff *timestamp_request = NULL;
   const unsigned int invalid_timestamp_lengths[] = {11, 13};
   for (unsigned int i = 0; i < sizeof(invalid_timestamp_lengths) /
-                                   sizeof(invalid_timestamp_lengths[0]); ++i) {
+                                   sizeof(invalid_timestamp_lengths[0]);
+       ++i) {
     unsigned int received_before = service.received;
     unsigned int dropped_before = service.dropped;
     uint64_t tokens_before = service.tokens;
     unsigned int replies_before = service.replies_submitted;
     CHECK(ker_icmpv4_ipv4_create(&actx, amac, bmac, aip, bip, 13, 0,
-          timestamp_rest, 64, timestamp_body, sizeof(timestamp_body) - 1,
-          &timestamp_request) == 0);
+                                 timestamp_rest, 64, timestamp_body,
+                                 sizeof(timestamp_body) - 1,
+                                 &timestamp_request) == 0);
     unsigned char *timestamp_ip = timestamp_request->data + ETH_HLEN;
     unsigned char *timestamp_icmp = timestamp_ip + 20;
     if (invalid_timestamp_lengths[i] == 11)
@@ -593,17 +921,19 @@ static void run(void) {
     timestamp_ip[3] = (unsigned char)timestamp_wire_length;
     refresh_ip_checksum(timestamp_request);
     timestamp_icmp[2] = timestamp_icmp[3] = 0;
-    __sum16 icmp_sum = csum_fold(csum_partial(timestamp_icmp,
-        8 + (int)invalid_timestamp_lengths[i], 0));
+    __sum16 icmp_sum = csum_fold(
+        csum_partial(timestamp_icmp, 8 + (int)invalid_timestamp_lengths[i], 0));
     memcpy(timestamp_icmp + 2, &icmp_sum, sizeof(icmp_sum));
     inject_request(timestamp_request);
     CHECK(service.received == received_before &&
-          service.dropped == dropped_before && service.tokens == tokens_before &&
+          service.dropped == dropped_before &&
+          service.tokens == tokens_before &&
           service.replies_submitted == replies_before);
   }
-  CHECK(ker_icmpv4_ipv4_create(
-            &actx, amac, bmac, aip, bip, 13, 0, timestamp_rest, 64,
-            timestamp_body, sizeof(timestamp_body) - 1, &timestamp_request) == 0);
+  CHECK(ker_icmpv4_ipv4_create(&actx, amac, bmac, aip, bip, 13, 0,
+                               timestamp_rest, 64, timestamp_body,
+                               sizeof(timestamp_body) - 1,
+                               &timestamp_request) == 0);
   CHECK(ker_tx_export_enqueue(&atx, &timestamp_request) == 0 &&
         !timestamp_request);
   reentry_packet = make_borrowed(aip, bip, 8);
@@ -624,9 +954,10 @@ static void run(void) {
   CHECK(pressure_result.rx == 1 && replies_seen == 3);
   fake_utc_status = 1;
   timestamp_request = NULL;
-  CHECK(ker_icmpv4_ipv4_create(
-            &actx, amac, bmac, aip, bip, 13, 0, timestamp_rest, 64,
-            timestamp_body, sizeof(timestamp_body) - 1, &timestamp_request) == 0);
+  CHECK(ker_icmpv4_ipv4_create(&actx, amac, bmac, aip, bip, 13, 0,
+                               timestamp_rest, 64, timestamp_body,
+                               sizeof(timestamp_body) - 1,
+                               &timestamp_request) == 0);
   inject_request(timestamp_request);
   CHECK(service.last_error == -EINVAL && service.replies_submitted == 2);
   pressure_result = poll_worker(&bworker);
@@ -765,6 +1096,8 @@ static void run(void) {
   unsigned char borrowed_copy[20 + 8 + sizeof(payload)];
   CHECK(borrowed->len == sizeof(borrowed_copy));
   memcpy(borrowed_copy, borrowed->data, borrowed->len);
+  uint64_t errors_before_borrowed = service.errors_submitted;
+  unsigned int emitted_before_borrowed = emitted_errors;
   unsigned int owner = brx_transport.handler.runtime->lcore;
   uint64_t tokens_before_owner_check = service.tokens;
   bmonitor.busy = true;
@@ -786,7 +1119,7 @@ static void run(void) {
   CHECK(reentry_disable_result == -EBUSY && reentry_emit_result == -EBUSY &&
         bmonitor.echo_service_refs == 1);
   reentry_packet = NULL;
-  CHECK(service.errors_submitted == 1 &&
+  CHECK(service.errors_submitted == errors_before_borrowed + 1 &&
         borrowed->len == sizeof(borrowed_copy) &&
         !memcmp(borrowed_copy, borrowed->data, borrowed->len));
   struct ker_ipv4_packet_view borrowed_view;
@@ -795,12 +1128,14 @@ static void run(void) {
   pressure_result = poll_worker(&bworker);
   CHECK(pressure_result.tx == 1 && pressure_result.rx == 0);
   pressure_result = poll_worker(&aworker);
-  CHECK(pressure_result.rx == 1 && emitted_errors == 1);
+  CHECK(pressure_result.rx == 1 &&
+        emitted_errors == emitted_before_borrowed + 1);
 
   expect_emitted_error(3, 4, 1400);
   expect_emitted_error(11, 0, 0);
   expect_emitted_error(12, 0, 4);
-  CHECK(emitted_errors == 4 && service.errors_submitted == 4);
+  CHECK(emitted_errors == emitted_before_borrowed + 4 &&
+        service.errors_submitted == errors_before_borrowed + 4);
 
   /* First fragments are eligible; noninitial fragments and broadcasts are not.
    */
@@ -922,6 +1257,7 @@ static void run(void) {
 
   CHECK(ker_icmpv4_service_disable(&service) == 0);
   CHECK(ker_neighbor_monitor_cleanup(&bmonitor) == 0);
+  CHECK(ker_neighbor_monitor_cleanup(&amonitor) == 0);
   CHECK(ker_arp_receiver_unregister(&barp) == 0);
   CHECK(ker_arp_responder_unregister(&aresponder) == 0);
   CHECK(ker_transport_receiver_unregister(&arx_transport) == 0);
@@ -929,6 +1265,7 @@ static void run(void) {
   CHECK(ker_rx_ring_cleanup(&arx) == 0 && ker_rx_ring_cleanup(&brx) == 0);
   CHECK(ker_worker_cleanup(&bworker) == 0 && ker_worker_cleanup(&aworker) == 0);
   CHECK(ker_neighbor_table_cleanup(&bneighbors) == 0);
+  CHECK(ker_neighbor_table_cleanup(&aneighbors) == 0);
   CHECK(ker_tx_export_cleanup(&btx) == 0 && ker_tx_export_cleanup(&atx) == 0);
   CHECK(ker_tx_ring_cleanup(&ba) == 0 && ker_tx_ring_cleanup(&ab) == 0);
   CHECK(ker_receive_runtime_cleanup(&brt) == 0 &&

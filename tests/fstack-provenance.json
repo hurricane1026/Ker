@@ -349,7 +349,7 @@
         "test_ff_dpdk_if_send_basic",
         "test_ff_dpdk_if_send_multiseg"
       ],
-      "adaptation": "Ker-specific ICMPv4 control extension: generic error events, bounded safe error emission, timestamp and opt-in extended echo, token-bucket limits and independent peer pools with actual RX/TX rings. The source cases motivate packet delivery only; no upstream ICMP suite, sockets, routing, IPv4 reassembly, IPv6 or NIC delivery is claimed."
+      "adaptation": "Ker-specific ICMPv4 control extension: generic error events, bounded safe error emission, timestamp and opt-in extended echo, token-bucket limits and independent peer pools with actual RX/TX rings. The source cases motivate packet delivery only; no upstream ICMP suite, sockets, routing, IPv4 reassembly, IPv6 or NIC delivery is claimed. The same real-ring fixture also exercises an opt-in bounded Ker UDP endpoint table: validated local datagrams reach bound callbacks, while lookup misses automatically generate ICMP port-unreachable through the existing neighbor output. This is not native Linux socket lookup or a F-Stack UDP ingress test."
     },
     "icmpv4-pmtu": {
       "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
