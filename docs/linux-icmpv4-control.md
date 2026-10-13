@@ -65,6 +65,34 @@ UTC 回调提供自 UTC 午夜起的毫秒；服务按一天取模，时间不�
 正在使用的服务或 monitor 绑定。disable 不取消已排队的回复，清理前必须
 正常 drain 或调用所属队列的取消接口。
 
+## UDP 端口未绑定时的自动错误
+
+`udp-endpoint` 为已启用 ICMPv4 service 的 receiver 增加显式、有界的 UDP
+端点表。调用者提供零初始化的表和固定地址的 entry 数组，使用非零、网络
+字节序的目的端口注册同步回调。相同端口只允许一个绑定，容量用尽返回
+`-ENOSPC`；不支持 wildcard、connected UDP、reuseport 或 socket API。
+
+启用后，receiver 先完成 IPv4/UDP 长度和 checksum 校验，再检查本设备、
+本地单播、20 字节 IPv4 头、非零 TTL 和无分片的支持范围。DF 允许；options、
+reserved flag、MF、非首片与不支持的地址范围明确丢弃。IPv4 UDP checksum
+为零仍按协议作为 omitted 接受。命中端口后只调用对应端点：应用返回
+`NET_RX_DROP` 不会生成端口不可达，无效回调状态遵循 dispatcher 的
+`-EPROTO` 契约。
+
+查找失败自动调用已有错误服务生成 type 3/code 3，引用实际收到的 IPv4/UDP
+字节。无论错误被抑制、限速或输出失败，都不回退到通用接收回调。已绑定
+端点可以接收其他有效单播源；错误输出仍限于 monitor 配置的单个 peer。
+输入 skb 由 receiver 释放一次，端点只借用 message，不能保留或释放它。
+
+未启用端点表时，原通用 UDP 回调行为保持不变。bind/unbind/disable 仅允许
+owner worker 在接收分派之外执行；表存续期间阻止 ICMP service disable 和
+receiver unregister。先解除全部绑定，再关闭表和它的依赖对象。
+
+这是 Ker 端点适配，遵循固定 Linux `net/ipv4/udp.c` 中先校验 checksum、
+无 socket 时再发送 port-unreachable 的次序。它继续使用原生 checksum 与
+邻居输出，但不宣称已经导入依赖 socket、route、XFRM 和 netfilter 的完整
+`udp_rcv`。
+
 ## PMTU 的实际作用
 
 零初始化 `ker_icmpv4_pmtu`，为一个显式 peer 绑定初始 MTU、有效期、单调
@@ -83,14 +111,16 @@ UTC 回调提供自 UTC 午夜起的毫秒；服务按一天取模，时间不�
 
 `icmp-echo` 包含通用报文、错误引用、扩展格式与不变性回归；
 `icmpv4-service` 使用两个独立 pool/context、真实 DPDK ring 和 worker，验证
-自动响应、邻居解析、错误交付、限速与失败清理；`icmpv4-pmtu` 验证证据
+自动响应、邻居解析、错误交付、限速与失败清理；其中 UDP 端点回归验证
+双端独立表的同端口交付、应用 DROP 与端口 miss 的区别、实际入站触发的
+错误引用与独立 checksum 校验，以及输出分配失败后的恢复。
+`icmpv4-pmtu` 验证证据
 确认、下降/过期、输出拒绝及 owner/lifecycle。场景来源记录在
 [F-Stack 测试映射](fstack-tests.md) 和
 [provenance](../tests/fstack-provenance.json)。新增 ICMP 场景是 Ker 扩展，
 不是声称复制了 F-Stack 的 ICMP 测试套件。
 
-仍需后续 IPv4 子系统提供的集成包括：UDP 端口查找失败自动触发错误、转发
-TTL 到期、重组超时、socket 异步错误队列、redirect 路由验证与安装、IPv4
+仍需后续 IPv4 子系统提供的集成包括：转发 TTL 到期、重组超时、socket 异步错误队列、redirect 路由验证与安装、IPv4
 options 处理及重组。当前提供可验证的控制接口，不把这些缺失的触发源算作
 已完成。接口位于内部 runtime，尚非安装后的公共 Ker API。
 

@@ -487,7 +487,7 @@ if(KER_WITH_DPDK)
         ker_arp_responder_port ker_address_headers ker_address_port ker_neighbor_headers ker_neighbor_port
         ker_neighbor_timer_headers ker_neighbor_timer_port ker_neighbor_update_headers ker_neighbor_update_port
         ker_neighbor_event_send_port ker_timer_list_port ker_arp_neighbor_feedback_port ker_arp_probe_port
-        ker_arp_port ker_receive_headers ker_receive_port ker_transport_receive_port ker_icmpv4_service_port
+        ker_arp_port ker_receive_headers ker_receive_port ker_transport_receive_port ker_icmpv4_service_port ker_udp_endpoint_port
         ker_icmpv4_create_port ker_eth_headers ker_eth_port ker_rx_ring_port ker_tx_export_port ker_tx_ring_port
         ker_ipv4_view_port ker_udp_view_port ker_tcp_view_port ker_icmpv4_view_port ker_icmp_echo_view_port
         ker_udp_configured_create_port ker_tcp_configured_create_port ker_udp_create_port ker_tcp_create_port
