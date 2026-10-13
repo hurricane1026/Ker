@@ -296,6 +296,11 @@
         "test_ff_dpdk_if_send_tcp_csum"
       ],
       "adaptation": "Ker-specific configured-source integration extension. Configured UDP, TCP and ICMP echo constructors pass through software checksum export, a real bounded DPDK ring, Ethernet classification and the actual worker transport receiver; independent corruption cases cover bad IPv4/UDP checksums, fragments and unsupported protocols. A pool-pressure case cancels the exact pending chain and resumes the later FIFO entry, and ARP plus IPv4 handlers share one configured device/runtime with cleanup pins checked. The pinned F-Stack cases motivate checksum and segmented TX coverage, not configured-source selection, ARP, or ingress. No routing, automatic ARP, sockets, NIC I/O, or F-Stack RX is claimed."
+    },
+    "flow-receive": {
+      "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
+      "source_case": "test_ff_dpdk_if_send_multiseg",
+      "adaptation": "Ker-specific steering/ingress extension motivated by the pinned segmented TX scenario. Segmented IPv4 UDP/TCP chains pass through fixed owner selection and local or worker-poll handoff, then the owner uses its separate pool/context/device for Ethernet copy/classification and transport checksum validation. Includes capacity-one inbox retry, bad-checksum drops, and explicit callback-owned allocation-failure drop/recovery. Logical workers share one EAL thread. The upstream case does not test steering or ingress; this does not claim RSS, NIC I/O, sockets, TCP state, production retry buffering, or IPv6 transport reception. The companion flow-chain test covers IPv4/IPv6 segmented parsing and handoff ownership."
     }
   }
 }

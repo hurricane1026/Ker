@@ -26,6 +26,7 @@ FreeBSD 栈、cmocka mock/stub 或覆盖率脚本。没有通过宿主机 socket
 | fstack-headroom-export | test_ff_dpdk_if_send_basic | 显式 headroom 转为 mbuf data_off，检查字节和 skb 释放后的副本生命周期 |
 | fstack-multiseg-copy | test_ff_dpdk_if_send_multiseg | 真实多段 DPDK 输入复制并合并到线性 Linux skb，检查零长度段、源链所有权和释放源链后的数据；不代表上游分段 TX 或 Linux nonlinear skb 支持 |
 | fstack-multiseg-ethernet-ingress | test_ff_dpdk_if_send_multiseg | 将目的/源 MAC 和 EtherType 拆分到真实 DPDK 段中，经 Ker copy adapter 线性化后调用原始 Linux Ethernet 分类器，并经现有协议 runtime 分发；方向改为 ingress，不宣称 F-Stack TX、NIC/offload 或 Linux nonlinear skb |
+| fstack-flow-receive | test_ff_dpdk_if_send_multiseg | Ker-specific steering/ingress extension：segmented IPv4 TCP/UDP 经固定 flow owner 分流、worker handoff、owner 独立 pool/context/device 和原始 Ethernet 分类后进入 transport checksum 校验。覆盖本地/远端、capacity-one 背压重试、坏 checksum drop，以及 owner pool 耗尽时显式消费/drop 和恢复。flow-chain 另覆盖 IPv4/IPv6 分段解析与链所有权；上游是 TX 场景，不是 flow/RSS 或 ingress 测试；这里不实现 NIC、socket、TCP 状态或 IPv6 transport |
 | fstack-arp-chain-feedback | test_ff_dpdk_if_send_multiseg | Ker-specific integration extension：将有效 ARP reply 的以太网和 ARP 字段拆分到 DPDK chain，经 copy/classify、原始 ARP decoder 和实际 worker RX poll，验证现有 scoped neighbor feedback 从 DELAY 更新至 REACHABLE。该 ARP feedback 场景不是 F-Stack 上游测试，不代表一般 ARP learning 或 NIC 收发 |
 | arp-configured | RFC 826 §2 (format reference; Ker-specific test) | 使用显式静态 IPv4 address 和调用方 MAC tuple 调用原始 ARP request/reply constructor；按42个wire bytes验证broadcast/zero-THA request、reply与旧 raw adapter 等价，并覆盖失败回滚。既有 arp-receive 测试另覆盖 DAD、Ethernet padding、malformed fields、copied-message lifetime 和 callback ownership。无 neighbor lookup、自动应答、路由或 NIC 收发 |
 | arp-ring | test_ff_dpdk_if_send_multiseg | Ker-specific bounded-ring integration：configured ARP request/reply 被 worker TX exporter 复制为真实 segmented DPDK chains，经容量受限ring进入实际 worker RX poll、Ethernet classifier 和原始 ARP receiver；覆盖重试、bad-reply feedback拒绝、短帧drop及pool-pressure取消/FIFO恢复。F-Stack源用例不是ARP测试；不代表ARP学习、自动应答、NIC/RSS或F-Stack RX |
@@ -88,8 +89,10 @@ EAL 测试初始化，显式检查全部 descriptor、queue 和 pool 回收。DP
 - `ker_ipv4_packet_view_init` 只验证owned/classified linear IPv4 skb的完整header/options、total length和原始checksum，并借出只读view；不改变 skb 长度，padding留在原位置，fragment字段只是原始wire-order值。此项是Ker-specific extension，非上游IPv4 ingress场景，无fragment reassembly、FIB、netfilter、L4或socket处理。
 - `ker_udp_packet_view_init` 进一步验证 unfragmented IPv4 UDP 的完整固定头、精确匹配的UDP/IP长度及伪首部checksum；合法IPv4 UDP零checksum按协议作为checksum omitted接受。UDP头/负载以只读borrowed pointers返回，保留wire-order字段，不修剪padding、不送socket，也不信任RX checksum元数据跳过软件校验。该场景由TX-only F-Stack UDP checksum用例启发，属于Ker-specific ingress扩展。
 - `ker_tcp_packet_view_init` 进一步验证unfragmented IPv4 TCP segment、完整 TCP pseudoheader checksum、最小/最大data offset及完整segment bounds；TCP checksum字段值零不作为省略标志，只按同一校验算法验证。Header options保持opaque，不做解释；不修改skb、不做routing、reassembly、TCP状态机或socket处理。此 ingress view 是受 F-Stack TX checksum案例启发的Ker-specific extension。
-- 有 RSS、跨 worker 转发、设备管理能力后，适配 flow-map、drain/reload 场景；
-  当前 FIFO 测试不代表这些并发/多进程能力。
+- 固定 hash/bucket 分流与有界跨 worker 转发已建立；现在可接收合法 segmented
+  mbuf，并通过 `fstack-flow-receive` 验证 owner 的 IPv4 transport 校验路径。
+  该桥接测试在单个 EAL thread 上使用独立逻辑 worker，不替代现有跨 CPU 测试。
+  RSS、在线 flow-map 更新、drain/reload、多进程和状态迁移仍需独立实现与测试。
 - 有 Ker socket/epoll API 后，再引入 TCP/UDP 应用互通、连接回收、超时等黑盒
   场景。FreeBSD kqueue/内部 mbuf 的白盒测试不直接用于原始 Linux 布局。
 - 在实际移植配置、日志、pcap 或 IPC 模块后，再选择对应 ff_* glue 用例；
