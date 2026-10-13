@@ -64,6 +64,9 @@ struct ker_flow_context {
     bool attached;
 };
 
+/* Parse a validated linear or segmented Ethernet packet without changing it.
+ * The key is written only on success; chained bytes are read through a bounded
+ * header prefix after the full segment topology and length sum are checked. */
 int ker_flow_parse(const struct rte_mbuf *packet, uint64_t domain,
     enum ker_flow_direction direction, struct ker_flow_key *key);
 int ker_flow_hash(const struct ker_flow_key *key, uint64_t seed, uint32_t *hash);
@@ -77,8 +80,9 @@ int ker_flow_attach(struct ker_flow_context *context, struct ker_flow_fabric *fa
 int ker_flow_detach(struct ker_flow_context *context);
 int ker_flow_owner(const struct ker_flow_context *context, const struct ker_flow_key *key,
     unsigned int *owner);
-/* Success transfers exactly one mbuf reference, locally or into the bounded
- * target inbox, and clears *packet. Errors preserve caller ownership. */
+/* Success transfers exactly one mbuf reference (the complete chain), locally
+ * or into the bounded target inbox, and clears *packet. Errors preserve caller
+ * ownership. */
 int ker_flow_submit(struct ker_flow_context *context, uint64_t domain,
     enum ker_flow_direction direction, struct rte_mbuf **packet);
 int ker_flow_poll(struct ker_flow_context *context, unsigned int budget);

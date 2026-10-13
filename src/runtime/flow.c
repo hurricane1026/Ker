@@ -26,6 +26,45 @@ static uint16_t be16(const uint8_t *p)
     return (uint16_t)((uint16_t)p[0] << 8 | p[1]);
 }
 
+/* Ethernet (14) + fixed IPv6 (40) + minimum TCP header (20). */
+#define FLOW_PREFIX_SIZE 74U
+
+/* Validate the complete topology before following segment data pointers. The
+ * walk is bounded by the head's count. */
+static int packet_geometry(const struct rte_mbuf *head, size_t *length)
+{
+    if (!head || !length || !head->nb_segs) return -EINVAL;
+    uint16_t count = head->nb_segs;
+    const struct rte_mbuf *segment = head;
+    uint64_t total = 0;
+    for (uint16_t i = 0; i < count; ++i) {
+        if (!segment) return -EINVAL;
+        if (!segment->buf_addr ||
+            (uint64_t)segment->data_off + segment->data_len > segment->buf_len)
+            return -EINVAL;
+        total += segment->data_len;
+        if (total > UINT32_MAX) return -EOVERFLOW;
+        segment = segment->next;
+    }
+    if (segment || total != head->pkt_len) return -EINVAL;
+    *length = (size_t)total;
+    return 0;
+}
+
+static size_t copy_prefix(const struct rte_mbuf *head, uint8_t *prefix, size_t limit)
+{
+    size_t copied = 0;
+    for (const struct rte_mbuf *segment = head; segment && copied < limit; segment = segment->next) {
+        size_t amount = segment->data_len;
+        if (amount > limit - copied) amount = limit - copied;
+        if (amount) {
+            memcpy(prefix + copied, rte_pktmbuf_mtod(segment, const uint8_t *), amount);
+            copied += amount;
+        }
+    }
+    return copied;
+}
+
 static bool key_valid(const struct ker_flow_key *key)
 {
     if (!key || (key->family != 4 && key->family != 6) ||
@@ -44,10 +83,19 @@ static int parse_packet(const struct rte_mbuf *packet, uint64_t domain,
     if (!packet || !out || (direction != KER_FLOW_INGRESS && direction != KER_FLOW_EGRESS)) return -EINVAL;
     if (packet->ol_flags & (RTE_MBUF_F_RX_VLAN_STRIPPED | RTE_MBUF_F_RX_QINQ_STRIPPED |
         RTE_MBUF_F_TX_VLAN | RTE_MBUF_F_TX_QINQ)) return -ENOTSUP;
-    if (packet->nb_segs != 1) return -ENOTSUP;
-    if (packet->pkt_len != packet->data_len) return -EINVAL;
-    const uint8_t *data = rte_pktmbuf_mtod(packet, const uint8_t *);
-    size_t length = packet->data_len;
+    size_t length;
+    int geometry_error = packet_geometry(packet, &length);
+    if (geometry_error) return geometry_error;
+    uint8_t prefix[FLOW_PREFIX_SIZE];
+    const uint8_t *data;
+    size_t prefix_length;
+    if (packet->nb_segs == 1) {
+        data = rte_pktmbuf_mtod(packet, const uint8_t *);
+        prefix_length = packet->data_len;
+    } else {
+        prefix_length = copy_prefix(packet, prefix, sizeof(prefix));
+        data = prefix;
+    }
     if (length < 14) return -EMSGSIZE;
     uint16_t ethertype = be16(data + 12);
     if (ethertype == RTE_ETHER_TYPE_VLAN || ethertype == RTE_ETHER_TYPE_QINQ)
@@ -59,6 +107,7 @@ static int parse_packet(const struct rte_mbuf *packet, uint64_t domain,
     size_t transport_offset;
     if (ethertype == RTE_ETHER_TYPE_IPV4) {
         if (length < 14 + 20) return -EMSGSIZE;
+        if (prefix_length < 14 + 20) return -EMSGSIZE;
         ip = data + 14;
         if ((ip[0] >> 4) != 4 || (ip[0] & 0x0f) < 5) return -EINVAL;
         if ((ip[0] & 0x0f) > 5) return -ENOTSUP;
@@ -74,6 +123,7 @@ static int parse_packet(const struct rte_mbuf *packet, uint64_t domain,
         transport_offset = 14 + 20;
     } else if (ethertype == RTE_ETHER_TYPE_IPV6) {
         if (length < 14 + 40) return -EMSGSIZE;
+        if (prefix_length < 14 + 40) return -EMSGSIZE;
         ip = data + 14;
         if ((ip[0] >> 4) != 6) return -EINVAL;
         ip_length = 40U + be16(ip + 4);
@@ -93,6 +143,7 @@ static int parse_packet(const struct rte_mbuf *packet, uint64_t domain,
     size_t transport_length = ip_length - (key.family == 4 ? 20 : 40);
     size_t minimum = key.protocol == IPPROTO_TCP ? 20 : 8;
     if (transport_length < minimum) return -EINVAL;
+    if (prefix_length < transport_offset + minimum) return -EMSGSIZE;
     const uint8_t *transport = data + transport_offset;
     size_t header_length;
     if (key.protocol == IPPROTO_TCP) {

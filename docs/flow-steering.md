@@ -7,7 +7,7 @@ the handoff moves one native DPDK mbuf reference and its parsed key only.
 
 ## Key and owner selection
 
-The parser accepts a single-segment Ethernet-II mbuf. It supports IPv4 with
+The parser accepts single- or multi-segment Ethernet-II mbuf chains. It supports IPv4 with
 IHL=5 and IPv6 with the fixed 40-byte header, followed directly by TCP or UDP.
 The adapter supplies a 64-bit network-domain value, which must be the same for
 both directions of a flow and distinguish any VLAN, VRF, tunnel, or other
@@ -16,11 +16,20 @@ egress keys use source as local. Address/port roles are preserved, so reverse
 packets produce the same key without sorting endpoints.
 
 The parser rejects VLAN/QinQ frames, stripped VLAN metadata, IPv4 options and
-fragments, IPv6 extension headers, non-TCP/UDP protocols, multi-segment packets,
+fragments, IPv6 extension headers, non-TCP/UDP protocols,
 and malformed or truncated headers. Ethernet padding is allowed, while all IP
 and transport bounds use declared lengths. Failures leave both the mbuf and
 output key unchanged. Unsupported parse cases return `-ENOTSUP`; malformed or
 truncated packets return `-EINVAL` or `-EMSGSIZE`.
+
+Before reading any bytes, parsing checks the declared segment count against the
+linked chain, buffer bounds for each segment, and the total packet length.
+Empty segments are allowed. A bounded header prefix (at most 74 bytes) is read
+without allocating or linearizing the complete packet. Parsing is read-only;
+shared/indirect backing remains accepted when its geometry is valid. The caller
+must keep the complete chain and backing stable during parsing. Successful
+submission transfers the caller's reference to the whole chain; a downstream
+adapter can impose stricter ownership requirements.
 
 Hash input is a documented byte sequence: big-endian domain, family, protocol,
 16-byte local and remote addresses, then big-endian local and remote ports.
@@ -104,3 +113,22 @@ Run these tests with:
 ```sh
 ctest --test-dir build -R '^flow-(buckets|matrix|multicore)$' --output-on-failure
 ```
+
+## Segmented ingress integration
+
+`flow-chain` checks IPv4/IPv6 TCP/UDP keys across segment splits, malformed
+geometry, and whole-chain handoff ownership. `fstack-flow-receive` then connects
+segmented IPv4 TCP/UDP flow delivery to the existing Ethernet copy/classifier
+and worker-local transport receiver. Its two logical workers have separate
+packet pools, skb contexts, devices, and receive runtimes on one EAL thread.
+It checks local delivery, remote worker-poll handoff, checksum rejection,
+capacity-one inbox retry, and destination-pool exhaustion and recovery.
+
+The test bridge copies the uniquely-owned direct chain into the owner's skb
+context and releases the input chain before protocol dispatch. Its allocation
+failure policy is explicitly to consume and count a drop. The flow callback
+has already accepted ownership and cannot return a retry result; this does not
+provide the RX-ring adapter's pending/cancel semantics. A production retrying
+bridge would require separately bounded storage and lifecycle rules. Actual
+transport validation remains IPv4-only; IPv6 coverage here is flow parsing and
+handoff, not an IPv6 protocol stack.
