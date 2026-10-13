@@ -16,6 +16,7 @@ FreeBSD 栈、cmocka mock/stub 或覆盖率脚本。没有通过宿主机 socket
 | fstack-clock-monotonic | test_ff_get_tsc_ns_monotonic | Ker CLOCK_MONOTONIC ns，验证非递减，不复制 TSC 算法 |
 | fstack-empty-export | test_ff_dpdk_if_send_zero_total | 空 skb copy-export，断言长度和所有权，不宣称网卡发送 |
 | fstack-null-context | test_ff_dpdk_if_send_null_ctx_no_crash | Ker allocation 拒绝 null context，输出不变 |
+| fstack-arp-chain-feedback（first-contact discovery） | test_ff_dpdk_if_send_basic | Ker-specific 首次邻居解析：显式 IPv4 peer、无预设 MAC，从 NUD_NONE 经原生 ARP 排队/回复后发送；验证创建回滚、生命周期和失败恢复。不代表完整 Linux 邻居创建子系统、路由、一般 ARP learning 或 NIC 发送 |
 | neighbor-timer（known-peer resolution） | test_ff_dpdk_if_send_basic | Ker-specific Linux 邻居重新解析：已有受监控 peer 从 FAILED 进入 INCOMPLETE，原生有界队列暂存数据、ARP callback 构造探测包、有效回复触发原生 FIFO flush，覆盖淘汰、超时释放与取消；不是 F-Stack 上游 ARP 测试，不代表未知邻居发现、路由或 NIC 发送 |
 | neighbor-timer（resolved output） | test_ff_dpdk_if_send_basic | Ker-specific Linux 原始 `neigh_resolve_output` 移植：已有 MAC 的受监测 IPv4 邻居重建 Ethernet 头并交给有界 TX exporter，覆盖 NUD 状态、更新后的 MAC、所有权及背压；原始 Linux 函数另由 `neighbor-output-import` 校验来源。不代表 F-Stack 邻居测试、未知邻居解析、路由或 NIC 发送 |
 | fstack-packet-export | test_ff_dpdk_if_send_basic | 实际字节复制；原始 backing 释放后 copy 仍可读取 |

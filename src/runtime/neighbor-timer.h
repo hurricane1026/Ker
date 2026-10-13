@@ -25,6 +25,7 @@ struct ker_neighbor_monitor {
     int event_send_result;
     bool busy, notification, probe_callback;
     bool resolution_enabled;
+    bool owns_entry;
     size_t resolution_queue_bytes;
     size_t unresolved_bytes;
     int resolution_error;
@@ -38,6 +39,11 @@ struct ker_neighbor_monitor {
  * Timing parameters must already be configured; no ARP learning or queues. */
 int ker_neighbor_monitor_init(struct ker_neighbor_monitor *, struct ker_neighbor_table *,
     struct ker_runtime *, __be32 ip, ker_neighbor_event_fn probe, ker_neighbor_event_fn notify, void *);
+/* Create and monitor one absent explicit IPv4 peer with native NUD_NONE state.
+ * The bounded resolver is enabled atomically; cleanup removes the owned entry. */
+int ker_neighbor_monitor_discovery_init(struct ker_neighbor_monitor *, struct ker_neighbor_table *,
+    struct ker_runtime *, struct ker_tx_export *, __be32 ip,
+    ker_neighbor_event_fn probe, ker_neighbor_event_fn notify, void *);
 /* Explicitly request delayed probing of a STALE entry through native
  * __neigh_event_send; only its documented monitor profile is admitted. */
 int ker_neighbor_monitor_probe(struct ker_neighbor_monitor *);
@@ -72,7 +78,8 @@ int ker_neighbor_monitor_update(struct ker_neighbor_monitor *, const unsigned ch
 int ker_neighbor_monitor_snapshot(struct ker_neighbor_monitor *, struct ker_neighbor_event *);
 /* Internal callback binding used by the native ARP probe adapter. */
 int ker_neighbor_monitor_probe_scope(struct ker_neighbor_monitor *, const struct ker_neighbor_event *);
-/* Cancel its timer/reference, restore the original permanent mapping, unpin.
- * Fails while native callbacks run or other lookup references remain. */
+/* Cancel its timer/reference and unpin; restore the original permanent mapping
+ * or remove the entry owned by a discovery monitor. Fails while native callbacks
+ * run, unresolved packets remain, or other lookup references remain. */
 int ker_neighbor_monitor_cleanup(struct ker_neighbor_monitor *);
 #endif
