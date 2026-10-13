@@ -3,6 +3,7 @@
 #include "check.h"
 #include "eal.h"
 #include "runtime/flow.h"
+#include "runtime/flow-ring.h"
 #include "runtime/worker.h"
 #include "runtime/memory.h"
 #include "runtime/transport-receive.h"
@@ -17,6 +18,8 @@ struct endpoint {
     struct ker_transport_receiver receiver;
     struct ker_worker worker;
     struct ker_flow_context flow;
+    struct ker_tx_ring input;
+    struct ker_flow_ring ingress;
     unsigned handed, delivered, dropped;
     unsigned protocol;
     bool bad_checksum;
@@ -135,10 +138,12 @@ static void init(struct endpoint *e, unsigned id, struct ker_flow_fabric *fabric
     CHECK(ker_eth_device_init(&e->device, &e->skb, id ? "flow1" : "flow0", id + 1, mac) == 0);
     CHECK(ker_receive_runtime_init(&e->runtime, &e->skb) == 0);
     CHECK(ker_transport_receiver_register(&e->receiver, &e->runtime, &e->device, message, e) == 0);
-    struct ker_worker_config cfg = {.timer_budget=1, .handoff_budget=1};
-    struct ker_worker_ops ops = {0};
+    struct ker_worker_config cfg = {.timer_budget=1, .handoff_budget=1, .rx_budget=1};
+    struct ker_worker_ops ops = {.rx=ker_flow_ring_poll, .arg=&e->ingress};
     CHECK(ker_worker_init(&e->worker, &e->pool, &cfg, &ops) == 0);
     CHECK(ker_flow_attach(&e->flow, fabric, &e->worker, id, receive, e) == 0);
+    CHECK(ker_tx_ring_init(&e->input, id ? "flow_input1" : "flow_input0", 1, SOCKET_ID_ANY) == 0);
+    CHECK(ker_flow_ring_init(&e->ingress, &e->input, &e->flow, 7, KER_FLOW_INGRESS) == 0);
 }
 static void poll_one(struct endpoint *e)
 {
@@ -146,8 +151,22 @@ static void poll_one(struct endpoint *e)
     CHECK(ker_worker_poll(&e->worker, 0, &result) == 0);
     CHECK(result.handoff == 1 && !e->skb.live);
 }
+static void enqueue(struct endpoint *e, struct rte_mbuf **packet)
+{
+    CHECK(ker_tx_ring_sink(*packet, &e->input) == 0);
+    *packet = NULL;
+}
+static void poll_input(struct endpoint *e, int error)
+{
+    struct ker_worker_result result = {0};
+    CHECK(ker_worker_poll(&e->worker, 0, &result) == error);
+    CHECK(result.rx == (error == 0 ? 1U : 0U));
+    CHECK(e->ingress.last_completed == result.rx && e->ingress.last_error == error);
+}
 static void cleanup(struct endpoint *e)
 {
+    CHECK(ker_flow_ring_cleanup(&e->ingress) == 0);
+    CHECK(ker_tx_ring_cleanup(&e->input) == 0);
     CHECK(ker_flow_detach(&e->flow) == 0);
     CHECK(ker_worker_cleanup(&e->worker) == 0);
     CHECK(ker_transport_receiver_unregister(&e->receiver) == 0);
@@ -179,7 +198,10 @@ int main(void)
                     for (unsigned remote = 0; remote < 2; ++remote) {
                         unsigned before = dest->handed;
                         struct rte_mbuf *m = chain(&src->pool, dest);
-                        CHECK(ker_flow_submit(remote ? &src->flow : &dest->flow, 7, KER_FLOW_INGRESS, &m) == 0 && !m);
+                        struct endpoint *input = remote ? src : dest;
+                        enqueue(input, &m);
+                        CHECK(!m && dest->handed == before);
+                        poll_input(input, 0);
                         CHECK(dest->handed == before + !remote);
                         if (remote) poll_one(dest);
                         CHECK(dest->handed == before + 1);
@@ -189,11 +211,12 @@ int main(void)
                 frame(dest, protocol, 0, options);
                 struct rte_mbuf *first = chain(&src->pool, dest), *retry = chain(&src->pool, dest);
                 struct rte_mbuf *saved = retry;
-                CHECK(ker_flow_submit(&src->flow, 7, KER_FLOW_INGRESS, &first) == 0 && !first);
-                CHECK(ker_flow_submit(&src->flow, 7, KER_FLOW_INGRESS, &retry) == -ENOBUFS && retry == saved);
-                CHECK(retry->nb_segs == 7);
+                enqueue(src, &first); poll_input(src, 0);
+                enqueue(src, &retry); poll_input(src, -ENOBUFS);
+                CHECK(!first && !retry && src->ingress.pending == saved);
+                CHECK(src->ingress.pending->nb_segs == 7);
                 poll_one(dest);
-                CHECK(ker_flow_submit(&src->flow, 7, KER_FLOW_INGRESS, &retry) == 0 && !retry);
+                poll_input(src, 0); CHECK(!src->ingress.pending);
                 poll_one(dest);
                 /* Exhaust only the owner's pool; the ingress producer can still
                  * allocate and hand off a chain. Owner drops then recovers. */
@@ -203,13 +226,13 @@ int main(void)
                 unsigned delivered = dest->delivered, dropped = dest->dropped;
                 dest->allocation_drop = true;
                 struct rte_mbuf *m = chain(&src->pool, dest);
-                CHECK(ker_flow_submit(&src->flow, 7, KER_FLOW_INGRESS, &m) == 0 && !m);
+                enqueue(src, &m); poll_input(src, 0); CHECK(!m);
                 poll_one(dest);
                 CHECK(dest->dropped == dropped + 1 && dest->delivered == delivered);
                 for (unsigned i = 0; i < count; ++i) ker_packet_free(held[i]);
                 dest->allocation_drop = false;
                 m = chain(&src->pool, dest);
-                CHECK(ker_flow_submit(&src->flow, 7, KER_FLOW_INGRESS, &m) == 0 && !m);
+                enqueue(src, &m); poll_input(src, 0); CHECK(!m);
                 poll_one(dest); CHECK(dest->delivered == delivered + 1);
             }
             CHECK(dest->handed - handed_before == (options ? 24U : 20U));
