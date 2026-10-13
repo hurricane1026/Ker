@@ -24,6 +24,8 @@ typedef int (*ker_icmpv4_utc_ms_fn)(void *, uint32_t *);
 struct ker_icmpv4_service_config {
   uint8_t ttl;
   bool echo_enabled, timestamp_enabled, probe_enabled;
+  /* Copied with the rest of the config; bit N selects IPv4 protocol N. */
+  uint8_t unavailable_protocols[32];
   unsigned int burst;
   uint64_t refill_ms;
   ker_icmpv4_monotonic_ms_fn monotonic_ms;

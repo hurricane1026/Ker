@@ -33,6 +33,7 @@ static struct ker_receive_runtime art, brt;
 static struct ker_arp_responder aresponder;
 static struct ker_arp_receiver barp;
 static struct ker_transport_receiver brx_transport, arx_transport;
+static struct ker_protocol_handler competing_ip;
 static struct ker_neighbor_table bneighbors;
 static struct ker_neighbor_monitor bmonitor;
 static struct ker_icmpv4_service service;
@@ -86,6 +87,8 @@ static uint8_t expected_control_type = 3, expected_control_code = 3,
 static uint16_t expected_mtu;
 static __be32 expected_gateway;
 static int wire_checksum_valid(const unsigned char *, unsigned int);
+static void refresh_ip_checksum(struct sk_buff *);
+static void inject_from_b(struct sk_buff *);
 static uint64_t monotonic_ms(void *arg) {
   (void)arg;
   check_reentry();
@@ -220,6 +223,15 @@ static int fallback(const struct ker_transport_message *message, void *arg) {
   }
   return NET_RX_SUCCESS;
 }
+static int consume_competing_ip(struct sk_buff *skb,
+                               struct ker_protocol_handler *handler,
+                               struct net_device *original, void *arg) {
+  (void)handler;
+  (void)original;
+  (void)arg;
+  BUG_ON(ker_skb_free(skb));
+  return NET_RX_DROP;
+}
 static int endpoint_receive(const struct ker_transport_message *message,
                             void *arg) {
   (void)arg;
@@ -324,6 +336,56 @@ static void inject_request(struct sk_buff *packet) {
   result = poll_worker(&bworker);
   CHECK(result.rx == 1);
 }
+static void inject_unknown_protocol_fields(uint8_t protocol, uint8_t ttl,
+                                           uint16_t fragment,
+                                           bool expect_error) {
+  struct sk_buff *packet = NULL;
+  CHECK(ker_udp_ipv4_create_configured(
+            &aaddr, bmac, bip, rte_cpu_to_be_16(40000), rte_cpu_to_be_16(9000),
+            64, NULL, 0, payload, sizeof(payload), &packet) == 0);
+  unsigned char *ip = skb_network_header(packet);
+  ip[9] = protocol;
+  ip[8] = ttl;
+  uint16_t network_fragment = htons(fragment);
+  memcpy(ip + 6, &network_fragment, sizeof(network_fragment));
+  refresh_ip_checksum(packet);
+  if (expect_error) {
+    expected_endpoint_quote_length = packet->len - ETH_HLEN;
+    memcpy(expected_endpoint_quote, ip, expected_endpoint_quote_length);
+  }
+  inject_request(packet);
+}
+static void inject_unknown_protocol(uint8_t protocol) {
+  inject_unknown_protocol_fields(protocol, 64, 0, true);
+}
+static void inject_unknown_bad_checksum(void) {
+  struct sk_buff *packet = NULL;
+  CHECK(ker_udp_ipv4_create_configured(
+            &aaddr, bmac, bip, rte_cpu_to_be_16(40000), rte_cpu_to_be_16(9000),
+            64, NULL, 0, payload, sizeof(payload), &packet) == 0);
+  skb_network_header(packet)[9] = 253;
+  inject_request(packet);
+}
+static void inject_unknown_options(void) {
+  static const unsigned char options[4] = {1, 1, 1, 1};
+  struct sk_buff *packet = NULL;
+  CHECK(ker_udp_ipv4_create_ip_options(
+            &actx, amac, bmac, aip, bip, rte_cpu_to_be_16(40000),
+            rte_cpu_to_be_16(9000), 64, options, sizeof(options), payload,
+            sizeof(payload), &packet) == 0);
+  skb_network_header(packet)[9] = 253;
+  refresh_ip_checksum(packet);
+  inject_request(packet);
+}
+static void inject_empty_default_protocol(void) {
+  struct sk_buff *packet = NULL;
+  CHECK(ker_udp_ipv4_create_configured(
+            &baddr, amac, aip, rte_cpu_to_be_16(40000), rte_cpu_to_be_16(9000),
+            64, NULL, 0, payload, sizeof(payload), &packet) == 0);
+  skb_network_header(packet)[9] = 253;
+  refresh_ip_checksum(packet);
+  inject_from_b(packet);
+}
 static void inject_from_b(struct sk_buff *packet) {
   CHECK(ker_tx_export_enqueue(&btx, &packet) == 0 && !packet);
   struct ker_worker_result result = poll_worker(&bworker);
@@ -346,7 +408,8 @@ static void send_custom_request(__be32 source, __be32 destination,
 static void refresh_ip_checksum(struct sk_buff *packet) {
   unsigned char *ip = skb_network_header(packet);
   ip[10] = ip[11] = 0;
-  __sum16 checksum = csum_fold(csum_partial(ip, 20, 0));
+  unsigned int header_length = (ip[0] & 0x0fU) * 4U;
+  __sum16 checksum = csum_fold(csum_partial(ip, header_length, 0));
   memcpy(ip + 10, &checksum, sizeof(checksum));
 }
 static struct sk_buff *make_borrowed(__be32 source, __be32 destination,
@@ -494,10 +557,48 @@ static void run(void) {
                                             no_probe, NULL, NULL) == 0);
   struct ker_icmpv4_service_config a_service_config = service_config;
   a_service_config.event = NULL;
+  const unsigned int unavailable_known[] = {1, 6, 17};
+  for (unsigned int i = 0; i < sizeof(unavailable_known) /
+                                  sizeof(unavailable_known[0]); ++i) {
+    struct ker_icmpv4_service_config invalid_service_config = service_config;
+    invalid_service_config.unavailable_protocols[unavailable_known[i] / 8] |=
+        (uint8_t)(1U << (unavailable_known[i] % 8));
+    CHECK(ker_icmpv4_service_enable(&service, &brx_transport, &bmonitor,
+                                    &invalid_service_config) == -EINVAL);
+    CHECK(!service.receiver && !brx_transport.icmpv4_service &&
+          bmonitor.echo_service_refs == 0);
+  }
+  service_config.unavailable_protocols[31] = 1U << 5; /* protocol 253 */
+  service_config.unavailable_protocols[0] |= 1U; /* protocol 0 */
+  service_config.unavailable_protocols[3] |= 1U << 7; /* protocol 31 */
+  service_config.unavailable_protocols[4] |= 1U; /* protocol 32 */
+  service_config.unavailable_protocols[31] |= 1U << 7; /* protocol 255 */
+  unsigned int errors_before_unbound = emitted_errors;
+  inject_unknown_protocol_fields(100, 64, 0, false);
+  struct ker_worker_result unbound_result = poll_worker(&bworker);
+  CHECK(unbound_result.rx == 0 && unbound_result.tx == 0 &&
+        brx_transport.validation_error == -EPROTONOSUPPORT &&
+        fallback_seen == 0 && emitted_errors == errors_before_unbound);
   CHECK(ker_icmpv4_service_enable(&service, &brx_transport, &bmonitor,
                                   &service_config) == 0);
+  uint8_t selected_bitmap[sizeof(service_config.unavailable_protocols)];
+  memcpy(selected_bitmap, service.config.unavailable_protocols,
+         sizeof(selected_bitmap));
+  memset(service_config.unavailable_protocols, 0,
+         sizeof(service_config.unavailable_protocols));
+  CHECK(!memcmp(service.config.unavailable_protocols, selected_bitmap,
+                sizeof(selected_bitmap)));
+  memcpy(service_config.unavailable_protocols, selected_bitmap,
+         sizeof(selected_bitmap));
   CHECK(ker_icmpv4_service_enable(&aservice, &arx_transport, &amonitor,
                                   &a_service_config) == 0);
+  unsigned int empty_errors_before = emitted_errors;
+  inject_empty_default_protocol();
+  struct ker_worker_result empty_result = poll_worker(&aworker);
+  CHECK(empty_result.rx == 0 && empty_result.tx == 0 &&
+        arx_transport.validation_error == -EPROTONOSUPPORT &&
+        aservice.errors_submitted == 0 &&
+        emitted_errors == empty_errors_before);
 
   /* A fixed bounded table owns supported local UDP delivery. */
   struct ker_udp_endpoint_table endpoints = {0};
@@ -663,6 +764,7 @@ static void run(void) {
   CHECK(ker_icmpv4_service_disable(&service) == 0);
   CHECK(ker_icmpv4_service_enable(&service, &brx_transport, &bmonitor,
                                   &service_config) == 0);
+
   CHECK(ker_transport_receiver_unregister(&brx_transport) == -EBUSY);
   CHECK(ker_neighbor_monitor_cleanup(&bmonitor) == -EBUSY);
   CHECK(ker_neighbor_monitor_resolution_disable(&bmonitor) == -EBUSY);
@@ -704,7 +806,6 @@ static void run(void) {
   CHECK(replies_seen == 1 && !btx.packets && !atx.packets);
   CHECK(ker_icmpv4_service_enable(&service, &brx_transport, &bmonitor,
                                   &service_config) == 0);
-
   struct ker_udp_endpoint_table closed_table = {0};
   struct ker_udp_endpoint closed_entries[1] = {0};
   CHECK(ker_udp_endpoint_table_enable(&closed_table, &brx_transport, &service,
@@ -723,6 +824,114 @@ static void run(void) {
   result = poll_worker(&aworker);
   CHECK(result.rx == 1 && result.tx == 0);
   CHECK(emitted_errors == errors_before_closed + 1 && fallback_seen == 0);
+  unsigned int unknown_errors_before = emitted_errors;
+  expected_emitted_type = 3;
+  expected_emitted_code = 2;
+  const uint8_t selected_protocols[] = {0, 31, 32, 253, 255};
+  for (unsigned int i = 0; i < sizeof(selected_protocols); ++i) {
+    inject_unknown_protocol(selected_protocols[i]);
+    result = poll_worker(&bworker);
+    CHECK(result.tx == 1 && result.rx == 0);
+    result = poll_worker(&aworker);
+    CHECK(result.rx == 1 && result.tx == 0);
+    CHECK(emitted_errors == unknown_errors_before + i + 1 &&
+          brx_transport.validation_error == -EPROTONOSUPPORT);
+  }
+  uint64_t selected_errors_submitted = service.errors_submitted;
+  unsigned int selected_emitted_before_pressure = emitted_errors;
+  unsigned int unknown_pool_available;
+  CHECK(ker_packet_pool_available(&bpool, &unknown_pool_available) == 0);
+  struct rte_mbuf *unknown_held[128];
+  unsigned int unknown_held_count = 0;
+  while (unknown_pool_available > 1) {
+    CHECK(unknown_held_count < sizeof(unknown_held) / sizeof(unknown_held[0]));
+    unknown_held[unknown_held_count] = ker_packet_alloc(&bpool);
+    CHECK(unknown_held[unknown_held_count] != NULL);
+    ++unknown_held_count;
+    --unknown_pool_available;
+  }
+  inject_unknown_protocol(253);
+  result = poll_worker(&bworker);
+  CHECK(result.rx == 0 && result.tx == 0 && service.last_error == -ENOMEM &&
+        brx_transport.validation_error == -EPROTONOSUPPORT &&
+        service.errors_submitted == selected_errors_submitted &&
+        emitted_errors == selected_emitted_before_pressure);
+  expected_endpoint_quote_length = 0;
+  for (unsigned int i = 0; i < unknown_held_count; ++i)
+    ker_packet_free(unknown_held[i]);
+  unsigned int unknown_pool_restored;
+  CHECK(ker_packet_pool_available(&bpool, &unknown_pool_restored) == 0 &&
+        unknown_pool_restored == unknown_pool_available + unknown_held_count);
+  inject_unknown_protocol(253);
+  result = poll_worker(&bworker);
+  CHECK(result.tx == 1 && result.rx == 0);
+  result = poll_worker(&aworker);
+  CHECK(result.rx == 1 && result.tx == 0 && service.last_error == 0 &&
+        service.errors_submitted == selected_errors_submitted + 1 &&
+        emitted_errors == selected_emitted_before_pressure + 1);
+
+  unsigned int unknown_emitted_before_rate = emitted_errors;
+  uint64_t unknown_errors_before_rate = service.errors_submitted;
+  unsigned int tokens_before_unknown_rate = service.tokens;
+  service.tokens = 0;
+  inject_unknown_protocol(253);
+  result = poll_worker(&bworker);
+  CHECK(result.rx == 0 && result.tx == 0 && service.last_error == -EAGAIN &&
+        brx_transport.validation_error == -EPROTONOSUPPORT &&
+        service.errors_submitted == unknown_errors_before_rate &&
+        emitted_errors == unknown_emitted_before_rate);
+  expected_endpoint_quote_length = 0;
+  service.tokens = tokens_before_unknown_rate;
+  inject_unknown_protocol(253);
+  result = poll_worker(&bworker);
+  CHECK(result.tx == 1 && result.rx == 0);
+  result = poll_worker(&aworker);
+  CHECK(result.rx == 1 && result.tx == 0 && service.last_error == 0 &&
+        service.errors_submitted == unknown_errors_before_rate + 1 &&
+        emitted_errors == unknown_emitted_before_rate + 1);
+  unsigned int unknown_errors_after_selected = emitted_errors;
+  int unknown_last_error = service.last_error;
+  inject_unknown_protocol_fields(100, 64, 0, false);
+  result = poll_worker(&bworker);
+  CHECK(result.rx == 0 && result.tx == 0 &&
+        brx_transport.validation_error == -EPROTONOSUPPORT &&
+        emitted_errors == unknown_errors_after_selected &&
+        service.last_error == unknown_last_error);
+  const uint16_t suppressed_fragments[] = {0x2000, 0x8000, 1};
+  for (unsigned int i = 0; i < sizeof(suppressed_fragments) /
+                                  sizeof(suppressed_fragments[0]); ++i) {
+    inject_unknown_protocol_fields(253, 64, suppressed_fragments[i], false);
+    result = poll_worker(&bworker);
+    CHECK(result.rx == 0 && result.tx == 0 &&
+          brx_transport.validation_error == -EPROTONOSUPPORT &&
+          emitted_errors == unknown_errors_after_selected &&
+          service.last_error == -ENOTSUP);
+  }
+  inject_unknown_protocol_fields(253, 0, 0, false);
+  result = poll_worker(&bworker);
+  CHECK(result.rx == 0 && result.tx == 0 &&
+        brx_transport.validation_error == -EPROTONOSUPPORT &&
+        emitted_errors == unknown_errors_after_selected &&
+        service.last_error == -ENOTSUP);
+  inject_unknown_protocol_fields(253, 64, 0x4000, true); /* DF is allowed. */
+  result = poll_worker(&bworker);
+  CHECK(result.tx == 1 && result.rx == 0);
+  result = poll_worker(&aworker);
+  CHECK(result.rx == 1 && result.tx == 0 &&
+        emitted_errors == unknown_errors_after_selected + 1 &&
+        brx_transport.validation_error == -EPROTONOSUPPORT);
+  inject_unknown_bad_checksum();
+  result = poll_worker(&bworker);
+  CHECK(result.rx == 0 && result.tx == 0 &&
+        brx_transport.validation_error == -EBADMSG &&
+        emitted_errors == unknown_errors_after_selected + 1);
+  inject_unknown_options();
+  result = poll_worker(&bworker);
+  CHECK(result.rx == 0 && result.tx == 0 &&
+        brx_transport.validation_error == -EPROTONOSUPPORT &&
+        service.last_error == -ENOTSUP &&
+        emitted_errors == unknown_errors_after_selected + 1);
+  expected_emitted_code = 3;
   unsigned int available_before_pressure;
   CHECK(ker_packet_pool_available(&bpool, &available_before_pressure) == 0);
   struct rte_mbuf *held_bpool[128];
@@ -773,7 +982,8 @@ static void run(void) {
   inject_request(closed_udp);
   result = poll_worker(&bworker);
   CHECK(result.tx == 0 && result.rx == 0);
-  CHECK(emitted_errors == errors_before_closed + 2 && fallback_seen == 0);
+  CHECK(emitted_errors == emitted_before_pool_failure + 1 &&
+        fallback_seen == 0);
   service.tokens = service.config.burst;
   CHECK(ker_udp_endpoint_table_disable(&closed_table) == 0);
 
@@ -1255,7 +1465,61 @@ static void run(void) {
   result = poll_worker(&bworker);
   CHECK(result.rx == 1 && fallback_seen == 3);
 
+  unsigned int errors_before_competitor = emitted_errors;
+  CHECK(ker_protocol_register(&brt, &competing_ip, &bdev,
+                              rte_cpu_to_be_16(ETH_P_IP),
+                              consume_competing_ip, NULL) == 0);
+  inject_unknown_protocol_fields(253, 64, 0, false); /* after receiver */
+  result = poll_worker(&bworker);
+  CHECK(result.rx == 0 && result.tx == 0 &&
+        brx_transport.validation_error == -EPROTONOSUPPORT &&
+        service.last_error == -EOPNOTSUPP &&
+        emitted_errors == errors_before_competitor);
+  CHECK(ker_protocol_unregister(&competing_ip) == 0);
+
   CHECK(ker_icmpv4_service_disable(&service) == 0);
+  unsigned int errors_before_disabled = emitted_errors;
+  inject_unknown_protocol_fields(253, 64, 0, false);
+  result = poll_worker(&bworker);
+  CHECK(result.rx == 0 && result.tx == 0 &&
+        brx_transport.validation_error == -EPROTONOSUPPORT &&
+        emitted_errors == errors_before_disabled);
+  CHECK(ker_transport_receiver_unregister(&brx_transport) == 0);
+  CHECK(ker_protocol_register(&brt, &competing_ip, &bdev,
+                              rte_cpu_to_be_16(ETH_P_IP),
+                              consume_competing_ip, NULL) == 0);
+  CHECK(ker_transport_receiver_register(&brx_transport, &brt, &bdev, fallback,
+                                        NULL) == 0);
+  CHECK(ker_icmpv4_service_enable(&service, &brx_transport, &bmonitor,
+                                  &service_config) == 0);
+  inject_unknown_protocol_fields(253, 64, 0, false); /* receiver after device */
+  result = poll_worker(&bworker);
+  CHECK(result.rx == 0 && result.tx == 0 &&
+        brx_transport.validation_error == -EBUSY && service.last_error == 0 &&
+        emitted_errors == errors_before_competitor);
+  CHECK(ker_icmpv4_service_disable(&service) == 0);
+  CHECK(ker_transport_receiver_unregister(&brx_transport) == 0);
+  CHECK(ker_protocol_unregister(&competing_ip) == 0);
+
+  CHECK(ker_protocol_register(&brt, &competing_ip, NULL,
+                              rte_cpu_to_be_16(ETH_P_IP),
+                              consume_competing_ip, NULL) == 0);
+  CHECK(ker_transport_receiver_register(&brx_transport, &brt, &bdev, fallback,
+                                        NULL) == 0);
+  CHECK(ker_icmpv4_service_enable(&service, &brx_transport, &bmonitor,
+                                  &service_config) == 0);
+  inject_unknown_protocol_fields(253, 64, 0, false); /* receiver after global */
+  result = poll_worker(&bworker);
+  CHECK(result.rx == 0 && result.tx == 0 &&
+        brx_transport.validation_error == -EPROTONOSUPPORT &&
+        service.last_error == -EOPNOTSUPP &&
+        emitted_errors == errors_before_competitor);
+
+  CHECK(ker_icmpv4_service_disable(&service) == 0);
+  CHECK(ker_transport_receiver_unregister(&brx_transport) == 0);
+  CHECK(ker_protocol_unregister(&competing_ip) == 0);
+  CHECK(ker_transport_receiver_register(&brx_transport, &brt, &bdev, fallback,
+                                        NULL) == 0);
   CHECK(ker_neighbor_monitor_cleanup(&bmonitor) == 0);
   CHECK(ker_neighbor_monitor_cleanup(&amonitor) == 0);
   CHECK(ker_arp_receiver_unregister(&barp) == 0);
