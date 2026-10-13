@@ -145,6 +145,21 @@ bad:
 static void prepare(struct harness *h,bool multicore)
 {
     memset(h,0,sizeof(*h)); h->multicore=multicore;
+    for(unsigned i=0;i<TOTAL;i++) atomic_init(&h->seen[i],0);
+    for(unsigned i=0;i<PRODUCERS;i++) {
+        atomic_init(&h->received[i],0);
+        atomic_init(&h->retries[i],0);
+    }
+    for(unsigned v=0;v<VARIANTS;v++) {
+        atomic_init(&h->epoch_done[v],0);
+        atomic_init(&h->epoch_overlap[v],0);
+        for(unsigned i=0;i<PRODUCERS;i++) {
+            atomic_init(&h->epoch_seen[v][i],0);
+            atomic_init(&h->epoch_success[v][i],0);
+        }
+    }
+    atomic_init(&h->producer_done,0);
+    atomic_init(&h->callback_errors,0);
     uint16_t map[KER_FLOW_BUCKETS]; for(unsigned b=0;b<KER_FLOW_BUCKETS;b++) map[b]=(uint16_t)(b%3U);
     struct ker_flow_config cfg={.worker_count=PRODUCERS,.bucket_owner=map,.seed=SEED,
         .inbox_capacity=multicore?8U:32U,.name=multicore?"ker_flow_stress":"ker_flow_matrix",.socket_id=SOCKET_ID_ANY};
