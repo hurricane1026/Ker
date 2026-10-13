@@ -301,6 +301,11 @@
       "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
       "source_case": "test_ff_dpdk_if_send_multiseg",
       "adaptation": "Ker-specific steering/ingress extension motivated by the pinned segmented TX scenario. Segmented IPv4 UDP/TCP chains pass through fixed owner selection and local or worker-poll handoff, then the owner uses its separate pool/context/device for Ethernet copy/classification and transport checksum validation. Includes capacity-one inbox retry, bad-checksum drops, and explicit callback-owned allocation-failure drop/recovery. Logical workers share one EAL thread. The upstream case does not test steering or ingress; this does not claim RSS, NIC I/O, sockets, TCP state, production retry buffering, or IPv6 transport reception. The companion flow-chain test covers IPv4/IPv6 segmented parsing and handoff ownership. Extended to every IPv4 option length from 0 through 40 bytes, validating copied option bytes, full header length, options-area checksum corruption and recovery; flow-ip-options separately checks variable-IHL steering bounds and fixed key/hash invariance. Options remain opaque, without source-route or other option interpretation. The input now enters through a real bounded ker_tx_ring and ker_flow_ring worker RX callback, which preserves a pending chain on full owner inbox and retries before reading later entries. This ingress ownership retry does not change the explicit owner-side allocation-drop policy."
+    },
+    "flow-concurrent-receive": {
+      "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
+      "source_case": "test_ff_dpdk_if_send_multiseg",
+      "adaptation": "Ker-specific complete flow ingress/owner receive integration inspired by the pinned segmented TX case. Two distinct pinned CPUs run ingress ring steering and owner-local Ethernet/IPv4 TCP/UDP validation with separate pools and receive state. Immutable expected records verify packet/key bytes and callback placement, deterministic full-inbox pending/FIFO retry, checksum drops, owner-pool exhaustion/drop/recovery, and orderly drain/teardown. Skip only with fewer than two allowed CPUs; setup errors fail. This does not claim upstream F-Stack flow coverage, NIC/RSS, sockets, TCP state, or a production allocation-retry bridge."
     }
   }
 }
