@@ -8,6 +8,7 @@
 #include "runtime/skb-queue-internal.h"
 #include "runtime/arp.h"
 #include <linux/if_ether.h>
+#include <linux/neighbour.h>
 #include <rte_lcore.h>
 #include <errno.h>
 #include <string.h>
@@ -267,6 +268,64 @@ int ker_neighbor_monitor_init(struct ker_neighbor_monitor *m, struct ker_neighbo
     entry->nud_state=NUD_REACHABLE; entry->confirmed=now; entry->used=now; entry->updated=now;
     return call(m,start);
 }
+int ker_neighbor_monitor_discovery_init(struct ker_neighbor_monitor *m,
+    struct ker_neighbor_table *table, struct ker_runtime *clock, struct ker_tx_export *tx,
+    __be32 ip, ker_neighbor_event_fn probe, ker_neighbor_event_fn notify, void *arg)
+{
+    if (!m || !table || !table->native || !clock || !tx || !probe) return -EINVAL;
+    if (m->entry || m->table) return -EALREADY;
+    if (rte_lcore_id() != table->lcore) return -EXDEV;
+    if (!table->address || !table->address->device || !table->address->device->native ||
+        !tx->queue.context || !tx->sink) return -EINVAL;
+    if (tx->queue.context != table->address->device->context ||
+        rte_lcore_id() != tx->queue.context->lcore) return -EXDEV;
+    if (clock->polling || tx->polling) return -EBUSY;
+    if (!NEIGH_VAR(&table->native->parms, RETRANS_TIME) ||
+        table->native->parms.reachable_time <= 0 ||
+        !NEIGH_VAR(&table->native->parms, DELAY_PROBE_TIME) ||
+        !NEIGH_VAR(&table->native->parms, QUEUE_LEN_BYTES) ||
+        !NEIGH_VAR(&table->native->parms, MCAST_PROBES) ||
+        NEIGH_VAR(&table->native->parms, APP_PROBES)) return -ENOTSUP;
+    int error = horizon(clock, interval(&table->native->parms));
+    if (error) return error;
+    if (tx->resolver_refs == UINT_MAX) return -EOVERFLOW;
+
+    error = ker_neighbor_add_unresolved(table, ip);
+    if (error) return error;
+    struct neighbour *entry = NULL;
+    error = ker_neighbor_lookup(table, ip, &entry);
+    if (error) { BUG_ON(ker_neighbor_remove(table, ip)); return error; }
+    if (entry->nud_state != NUD_NONE || refcount_read(&entry->refcnt) != 2 ||
+        entry->timer.function || entry->ops || entry->output) {
+        BUG_ON(ker_neighbor_release(table, entry));
+        BUG_ON(ker_neighbor_remove(table, ip));
+        return -EBUSY;
+    }
+    *m = (struct ker_neighbor_monitor){.table=table, .entry=entry, .probe=probe,
+        .notify=notify, .arg=arg, .owns_entry=true};
+    error = ker_timer_list_init(&m->timer, clock, &entry->timer, timeout);
+    if (error) goto rollback;
+    m->ops = (struct neigh_ops){.solicit=solicit, .output=unsupported_output,
+        .connected_output=unsupported_output, .error_report=unsupported_error};
+    entry->ops=&m->ops; entry->output=unsupported_output;
+    unsigned long now;
+    error = ker_timer_list_now(&m->timer, &now);
+    if (error) goto rollback_timer;
+    entry->used=now; entry->updated=now;
+    error = ker_neighbor_monitor_resolution_enable(m, tx);
+    if (error) goto rollback_timer;
+    return 0;
+
+rollback_timer:
+    entry->ops=NULL; entry->output=NULL;
+    BUG_ON(ker_timer_list_shutdown(&m->timer));
+    BUG_ON(ker_timer_list_cleanup(&m->timer));
+rollback:
+    BUG_ON(ker_neighbor_release(table, entry));
+    BUG_ON(ker_neighbor_remove(table, ip));
+    *m=(struct ker_neighbor_monitor){0};
+    return error;
+}
 int ker_neighbor_monitor_probe(struct ker_neighbor_monitor *m)
 {
     int error=valid(m); if(error)return error;
@@ -354,7 +413,8 @@ static int monitor_output_common(struct ker_neighbor_monitor *m, struct ker_tx_e
     if (resolving) {
         if (!m->resolution_enabled || tx != m->resolution_tx ||
             (state != NUD_REACHABLE && state != NUD_STALE && state != NUD_DELAY &&
-             state != NUD_PROBE && state != NUD_FAILED && state != NUD_INCOMPLETE)) return -ENOTSUP;
+             state != NUD_PROBE && state != NUD_FAILED && state != NUD_INCOMPLETE &&
+             !(m->owns_entry && state == NUD_NONE))) return -ENOTSUP;
     } else if(state!=NUD_REACHABLE && state!=NUD_STALE && state!=NUD_DELAY && state!=NUD_PROBE)
         return -ENOTSUP;
     struct net_device *dev=entry->dev;
@@ -367,7 +427,7 @@ static int monitor_output_common(struct ker_neighbor_monitor *m, struct ker_tx_e
        m->table->address->device->native!=dev || NEIGH_VAR(entry->parms,APP_PROBES)!=0)
         return -ENOTSUP;
     bool pending=timer_pending(&entry->timer);
-    if(pending != (state!=NUD_STALE && state!=NUD_FAILED))return -ENOTSUP;
+    if(pending != (state!=NUD_STALE && state!=NUD_FAILED && state!=NUD_NONE))return -ENOTSUP;
     if((unsigned int)refcount_read(&entry->refcnt)!=2U+(unsigned int)pending)return -EBUSY;
     if(tx->queue.context!=m->table->address->device->context || !tx->sink || tx->polling)
         return -EXDEV;
@@ -394,7 +454,7 @@ static int monitor_output_common(struct ker_neighbor_monitor *m, struct ker_tx_e
        skb->transport_header!=skb->network_header+ihl ||
        total>dev->mtu || memcmp(ip_header+12,&m->table->address->native->ifa_list->ifa_local,4) ||
        memcmp(ip_header+16,entry->primary_key,4))return -EINVAL;
-    if(state==NUD_STALE || (resolving && state==NUD_FAILED)) {
+    if(state==NUD_STALE || (resolving && (state==NUD_FAILED || state==NUD_NONE))) {
         unsigned long delay = state==NUD_STALE ?
             (unsigned long)NEIGH_VAR(entry->parms,DELAY_PROBE_TIME) :
             (unsigned long)(NEIGH_VAR(entry->parms,RETRANS_TIME) > HZ/100 ?
@@ -543,6 +603,15 @@ int ker_neighbor_monitor_cleanup(struct ker_neighbor_monitor *m)
     }
     if(pending)BUG_ON(refcount_dec_and_test(&m->entry->refcnt));
     BUG_ON(ker_timer_list_cleanup(&m->timer));
+    if (m->owns_entry) {
+        __be32 ip;
+        memcpy(&ip, m->entry->primary_key, sizeof(ip));
+        m->entry->ops=NULL; m->entry->output=NULL;
+        BUG_ON(ker_neighbor_release(m->table,m->entry));
+        BUG_ON(ker_neighbor_remove(m->table,ip));
+        *m=(struct ker_neighbor_monitor){0};
+        return 0;
+    }
     ker_neighbor_update_restore_mac(m->entry,m->original_mac);
     m->entry->confirmed=m->original_confirmed; m->entry->used=m->original_used;
     m->entry->updated=m->original_updated; atomic_set(&m->entry->probes,(int)m->original_probes);

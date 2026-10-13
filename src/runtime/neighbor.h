@@ -33,6 +33,8 @@ int ker_neighbor_table_cleanup(struct ker_neighbor_table *table);
 /* Immutable NUD_PERMANENT entry. Duplicate keys fail, no replacement/learning.
  * limit exhaustion is ENOSPC; fixed DPDK pool/budget failure is ENOMEM. */
 int ker_neighbor_add(struct ker_neighbor_table *table, __be32 ip, const unsigned char mac[6]);
+/* Internal adapter primitive: insert an explicit IPv4 key in genuine NUD_NONE. */
+int ker_neighbor_add_unresolved(struct ker_neighbor_table *table, __be32 ip);
 int ker_neighbor_remove(struct ker_neighbor_table *table, __be32 ip);
 /* Original lookup/clone grants one reference. Failure leaves output unchanged.
  * Every acquired reference must be released; removal refuses live references. */

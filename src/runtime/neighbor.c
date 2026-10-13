@@ -1,6 +1,7 @@
 #include "runtime/neighbor.h"
 #include "runtime/memory.h"
 #include <linux/slab.h>
+#include <linux/neighbour.h>
 #include <rte_lcore.h>
 #include <sys/socket.h>
 #include <limits.h>
@@ -59,13 +60,16 @@ int ker_neighbor_table_init(struct ker_neighbor_table *table, struct ker_ipv4_ad
         .limit = limit, .lcore = rte_lcore_id()};
     return 0;
 }
-int ker_neighbor_add(struct ker_neighbor_table *table, __be32 ip, const unsigned char mac[6])
+static int neighbor_insert(struct ker_neighbor_table *table, __be32 ip,
+    const unsigned char mac[ETH_ALEN], unsigned int initial_state)
 {
     int error = valid(table);
     if (error) return error;
     unsigned int host = rte_be_to_cpu_32(ip);
     if (!mac || !host || (host >> 24) == 127 || (host & 0xf0000000U) >= 0xe0000000U ||
-        (mac[0] & 1) || !(mac[0] | mac[1] | mac[2] | mac[3] | mac[4] | mac[5])) return -EINVAL;
+        (mac[0] & 1) || (initial_state == NUD_PERMANENT &&
+        !(mac[0] | mac[1] | mac[2] | mac[3] | mac[4] | mac[5])) ||
+        (initial_state != NUD_PERMANENT && initial_state != NUD_NONE)) return -EINVAL;
     if (__neigh_lookup_noref(table->native, &ip, table->address->device->native)) return -EEXIST;
     if ((unsigned int)atomic_read(&table->native->entries) >= table->limit) return -ENOSPC;
     if (refcount_read(&table->native->parms.refcnt) >= INT_MAX) return -EOVERFLOW;
@@ -74,7 +78,7 @@ int ker_neighbor_add(struct ker_neighbor_table *table, __be32 ip, const unsigned
     error = pthread_rwlock_init(&entry->lock.native, NULL);
     if (error) { kmem_cache_free(table->records, entry); return -error; }
     entry->tbl = table->native; entry->parms = neigh_parms_clone(&table->native->parms);
-    entry->dev = table->address->device->native; entry->nud_state = NUD_PERMANENT;
+    entry->dev = table->address->device->native; entry->nud_state = initial_state;
     refcount_set(&entry->refcnt, 1); memcpy(entry->primary_key, &ip, sizeof(ip)); memcpy(entry->ha, mac, ETH_ALEN);
     spin_lock_init(&entry->ha_lock.lock); spin_lock_init(&entry->hh.hh_lock.lock);
     skb_queue_head_init(&entry->arp_queue); INIT_LIST_HEAD(&entry->gc_list); INIT_LIST_HEAD(&entry->managed_list);
@@ -85,6 +89,10 @@ int ker_neighbor_add(struct ker_neighbor_table *table, __be32 ip, const unsigned
     atomic_inc(&table->native->entries);
     return 0;
 }
+int ker_neighbor_add(struct ker_neighbor_table *table, __be32 ip, const unsigned char mac[6])
+{ return neighbor_insert(table, ip, mac, NUD_PERMANENT); }
+int ker_neighbor_add_unresolved(struct ker_neighbor_table *table, __be32 ip)
+{ static const unsigned char unknown[ETH_ALEN] = {0}; return neighbor_insert(table, ip, unknown, NUD_NONE); }
 int ker_neighbor_lookup(struct ker_neighbor_table *table, __be32 ip, struct neighbour **result)
 {
     int error = valid(table);

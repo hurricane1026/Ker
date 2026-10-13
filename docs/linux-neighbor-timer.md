@@ -9,7 +9,9 @@ verbatim block provenance. Linux and DPDK dependency files are unchanged.
 This is a bounded reachability monitor for an administrator-provided IPv4/MAC
 mapping. Its default profile does not resolve addresses. The opt-in
 [known-peer resolver](linux-neighbor-resolution.md) adds bounded native
-re-resolution after an existing monitored peer fails. Configure an empty
+re-resolution after an existing monitored peer fails. The separate
+[discovery initializer](linux-neighbor-discovery.md) starts an explicitly
+selected peer in NUD_NONE without a supplied MAC. Configure an empty
 neighbor table with `ker_neighbor_configure`, add a permanent mapping, then bind
 stable, zero-initialized monitor storage to that entry and its worker clock.
 Initialization marks the configured mapping REACHABLE and arms its native timer.
@@ -57,8 +59,9 @@ snapshot and inspect its state.
 Cleanup cancels the timer, drops its reference, detaches the timer-list adapter,
 restores the administrator's PERMANENT mapping and releases the monitor's pin.
 It is a return to static configuration, not a statement that probing succeeded.
-The entry can then be removed or monitored again. The clock and table cannot be
-destroyed while monitoring is active.
+The entry can then be removed or monitored again. A monitor created through
+the discovery initializer instead removes its owned entry on cleanup. The clock
+and table cannot be destroyed while monitoring is active.
 
 In the default monitor profile, unresolved packet queues and probe clones
 remain disabled. The opt-in resolver admits its bounded queue and scoped probe

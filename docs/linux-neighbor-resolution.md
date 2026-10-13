@@ -7,6 +7,10 @@ Linux's original `__neigh_event_send` to enter INCOMPLETE and hold packets in
 queue after a supported native update accepts a MAC. Upstream Linux and DPDK
 sources remain unchanged.
 
+For an explicitly selected peer with no configured MAC, the separate
+[first-contact discovery initializer](linux-neighbor-discovery.md) creates a
+NUD_NONE entry and binds this same resolver.
+
 This is opt-in on a worker-owned monitor and TX exporter. Configure a positive
 unresolved-queue byte limit offline with the neighbor table parameters, then
 bind the exporter through `ker_neighbor_monitor_resolution_enable`. The limit
@@ -40,5 +44,5 @@ Explicit cancellation returns queued ownership to the caller. Disable and
 cleanup enforce the resolver's queue, timer and exporter lifetime boundaries.
 After a clock-range error stops an INCOMPLETE timer, cancel its remaining queue
 before cleanup; no artificial FAILED transition is made.
-There is no unknown-peer creation, general ARP learning, route lookup, ICMP
-unreachable generation, socket service or NIC transmission in this profile.
+This resolver binding alone does not create peers. General ARP learning, route lookup, ICMP
+unreachable generation, socket service and NIC transmission remain outside this profile.
