@@ -61,8 +61,11 @@ destroyed while monitoring is active.
 Unresolved packet queues, skb cloning in probing, error packet delivery, proxy
 neighbors, application probes, external validation flags, garbage collection,
 ARP learning and packet output are unsupported. Queues must remain empty;
-unsupported native paths fail closed. Native output callbacks return ENOTSUP
-without consuming a packet. Probe callbacks may use the bounded
+unsupported native paths fail closed. The monitor's default native output
+callbacks return ENOTSUP without consuming a packet. The separate
+[`ker_neighbor_monitor_output`](linux-neighbor-output.md) operation admits a
+resolved IPv4 packet explicitly and runs native `neigh_resolve_output` into a
+bounded TX exporter; it does not enable unresolved queues. Probe callbacks may use the bounded
 [native ARP probe adapter](linux-arp-probes.md), which captures the original
 Linux request constructor as a caller-owned skb. It does not add NIC
 transmission or a complete ARP resolution service. Public capability bits

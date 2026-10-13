@@ -16,6 +16,7 @@ FreeBSD 栈、cmocka mock/stub 或覆盖率脚本。没有通过宿主机 socket
 | fstack-clock-monotonic | test_ff_get_tsc_ns_monotonic | Ker CLOCK_MONOTONIC ns，验证非递减，不复制 TSC 算法 |
 | fstack-empty-export | test_ff_dpdk_if_send_zero_total | 空 skb copy-export，断言长度和所有权，不宣称网卡发送 |
 | fstack-null-context | test_ff_dpdk_if_send_null_ctx_no_crash | Ker allocation 拒绝 null context，输出不变 |
+| neighbor-timer（resolved output） | test_ff_dpdk_if_send_basic | Ker-specific Linux 原始 `neigh_resolve_output` 移植：已有 MAC 的受监测 IPv4 邻居重建 Ethernet 头并交给有界 TX exporter，覆盖 NUD 状态、更新后的 MAC、所有权及背压；原始 Linux 函数另由 `neighbor-output-import` 校验来源。不代表 F-Stack 邻居测试、未知邻居解析、路由或 NIC 发送 |
 | fstack-packet-export | test_ff_dpdk_if_send_basic | 实际字节复制；原始 backing 释放后 copy 仍可读取 |
 | fstack-multiseg-boundary | test_ff_dpdk_if_send_multiseg | 当前 Ker ENOTSUP admission 边界，未实现上游的正向多段发送 |
 | fstack-queue-isolation | test_ut_nr_19_drain_ring_sp_sc | 两个本地 Linux skb FIFO 隔离，不等价于多进程 generation/ring |

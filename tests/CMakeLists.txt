@@ -366,6 +366,7 @@ if(KER_WITH_DPDK)
     target_link_libraries(ker-neighbor-timer-test PRIVATE ker_neighbor_timer_headers
         ker_neighbor_timer_port ker_timer_list_port ker_neighbor_port
         ker_neighbor_update_headers ker_neighbor_update_port ker_neighbor_event_send_headers ker_neighbor_event_send_port ker_address_port ker_arp_headers ker_arp_port ker_arp_probe_port ker_eth_port ker_linux_port ker_dpdk_port ker_skb_port Threads::Threads)
+    target_link_libraries(ker-neighbor-timer-test PRIVATE ker_udp_create_port ker_udp_configured_create_port ker_tx_export_port)
     add_test(NAME neighbor-timer COMMAND ker-neighbor-timer-test)
     set_tests_properties(neighbor-timer PROPERTIES TIMEOUT 30)
     add_test(NAME neighbor-timer-import COMMAND "${Python3_EXECUTABLE}"
@@ -384,6 +385,10 @@ if(KER_WITH_DPDK)
         "${CMAKE_CURRENT_SOURCE_DIR}/neighbor-event-send-import.py" "${KER_LINUX_DIR}"
         "${KER_NEIGH_EVENT_SEND_MANIFEST}" "${KER_NEIGH_EVENT_SEND_IMPORT}"
         "${PROJECT_SOURCE_DIR}/tools/import-linux-neighbor-event-send.py")
+    add_test(NAME neighbor-output-import COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/neighbor-output-import.py" "${KER_LINUX_DIR}"
+        "${KER_NEIGH_OUTPUT_MANIFEST}" "${KER_NEIGH_OUTPUT_IMPORT}"
+        "${PROJECT_SOURCE_DIR}/tools/import-linux-neighbor-output.py")
     add_executable(ker-neighbor-test neighbor.c)
     target_compile_definitions(ker-neighbor-test PRIVATE _GNU_SOURCE)
     target_link_libraries(ker-neighbor-test PRIVATE ker_neighbor_headers ker_neighbor_port ker_receive_headers
@@ -401,7 +406,7 @@ if(KER_WITH_DPDK)
     target_link_libraries(ker-arp-receive-test PRIVATE ker_arp_rx_headers ker_arp_rx_port
         ker_arp_neighbor_feedback_port ker_neighbor_timer_headers ker_neighbor_timer_port
         ker_neighbor_update_headers ker_neighbor_update_port ker_neighbor_event_send_port ker_timer_list_port ker_neighbor_port
-        ker_address_port ker_arp_port ker_receive_port ker_napi_port ker_eth_port
+        ker_address_port ker_arp_port ker_receive_port ker_napi_port ker_eth_port ker_tx_export_port
         ker_linux_port ker_dpdk_port ker_skb_port Threads::Threads)
     add_test(NAME arp-receive COMMAND ker-arp-receive-test)
     set_tests_properties(arp-receive PROPERTIES TIMEOUT 30)
@@ -415,7 +420,7 @@ if(KER_WITH_DPDK)
     target_link_libraries(ker-fstack-arp-chain-test PRIVATE ker_arp_rx_headers ker_arp_rx_port
         ker_arp_neighbor_feedback_port ker_neighbor_timer_headers ker_neighbor_timer_port
         ker_neighbor_update_headers ker_neighbor_update_port ker_neighbor_event_send_port ker_timer_list_port
-        ker_neighbor_port ker_address_port ker_arp_port ker_receive_port ker_napi_port ker_eth_port
+        ker_neighbor_port ker_address_port ker_arp_port ker_receive_port ker_napi_port ker_eth_port ker_tx_export_port
         ker_linux_port ker_dpdk_port ker_skb_port Threads::Threads)
     add_test(NAME fstack-arp-chain-feedback COMMAND ker-fstack-arp-chain-test)
     set_tests_properties(fstack-arp-chain-feedback PROPERTIES TIMEOUT 30)

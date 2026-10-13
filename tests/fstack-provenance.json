@@ -311,6 +311,11 @@
       "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
       "source_case": "test_ff_dpdk_if_send_multiseg",
       "adaptation": "Ker-specific owner receive adapter inspired by the pinned segmented TX scenario. A bounded owner-local packet ring queues chains after flow handoff; worker service polling reuses the Ethernet copy/classify receive path. Destination allocation failure retains one pending chain for FIFO retry; queue overflow explicitly consumes and drops the newest chain. Tests cover allocation recovery during RX pressure, lifecycle pins, cancellation and initialization rollback. This is not upstream F-Stack flow coverage, end-to-end lossless backpressure, NIC/RSS, sockets or TCP state."
+    },
+    "neighbor-resolved-output": {
+      "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
+      "source_case": "test_ff_dpdk_if_send_basic",
+      "adaptation": "Ker-specific native Linux resolved-neighbor output extension, motivated by the pinned packet-send scenario. The neighbor-timer test sends configured IPv4 frames through unchanged neigh_resolve_output and native event-send inline bodies into the bounded TX exporter. It checks current neighbor MAC header rebuilding, supported NUD states and native timer transitions, TX ownership and retries, and admission failures. Source provenance for the three Linux bodies is verified separately by neighbor-output-import. No upstream F-Stack neighbor test, unknown-neighbor resolution, routing, sockets or NIC transmission is claimed."
     }
   }
 }
