@@ -21,7 +21,8 @@ struct endpoint {
     unsigned protocol;
     bool bad_checksum;
     bool allocation_drop;
-    uint8_t frame[57];
+    uint8_t frame[97];
+    unsigned ip_header_length;
     unsigned length;
 };
 static const unsigned char mac[6] = {2, 0, 0, 0, 0, 1};
@@ -33,17 +34,20 @@ static uint16_t sum16(const uint8_t *p, unsigned n, uint32_t sum)
     return (uint16_t)~sum;
 }
 static void put16(uint8_t *p, unsigned value) { p[0] = value >> 8; p[1] = value; }
-static void frame(struct endpoint *e, unsigned protocol, unsigned corrupt)
+static void frame(struct endpoint *e, unsigned protocol, unsigned corrupt, unsigned options)
 {
     memset(e->frame, 0, sizeof(e->frame));
     e->protocol = protocol; e->bad_checksum = corrupt != 0;
     unsigned l4len = (protocol == 6 ? 20 : 8) + 3;
-    e->length = 34 + l4len;
-    uint8_t *p = e->frame, *ip = p + 14, *l4 = ip + 20;
+    e->ip_header_length = 20 + options;
+    e->length = 14 + e->ip_header_length + l4len;
+    uint8_t *p = e->frame, *ip = p + 14, *l4 = ip + e->ip_header_length;
     memcpy(p, mac, 6); memcpy(p + 6, mac, 6); p[12] = 8;
-    ip[0] = 0x45; put16(ip + 2, 20 + l4len); ip[8] = 64; ip[9] = protocol;
+    ip[0] = 0x40 | (e->ip_header_length / 4);
+    put16(ip + 2, e->ip_header_length + l4len); ip[8] = 64; ip[9] = protocol;
+    if (options) { memset(ip + 20, 1, options); ip[20 + options - 1] = 0; }
     const uint8_t addresses[8] = {192, 0, 2, 1, 10, 0, 0, 1};
-    memcpy(ip + 12, addresses, 8); put16(ip + 10, sum16(ip, 20, 0));
+    memcpy(ip + 12, addresses, 8); put16(ip + 10, sum16(ip, e->ip_header_length, 0));
     put16(l4, 1234); put16(l4 + 2, 443);
     if (protocol == 6) { l4[12] = 0x50; l4[13] = 0x10; }
     else put16(l4 + 4, l4len);
@@ -55,12 +59,15 @@ static void frame(struct endpoint *e, unsigned protocol, unsigned corrupt)
     put16(l4 + (protocol == 6 ? 16 : 6), checksum);
     if (corrupt == 1) ip[10] ^= 1;
     if (corrupt == 2) l4[l4len - 1] ^= 1;
+    if (corrupt == 3) { CHECK(options); ip[20 + options - 1] ^= 1; }
 }
 static int message(const struct ker_transport_message *m, void *arg)
 {
     struct endpoint *e = arg;
     CHECK(!e->bad_checksum && !e->allocation_drop);
     CHECK(m->protocol == e->protocol);
+    CHECK(m->ipv4.header_length == e->ip_header_length);
+    CHECK(memcmp(m->ipv4.header + 20, e->frame + 34, e->ip_header_length - 20) == 0);
     CHECK(e->runtime.dispatching && e->flow.delivering);
     const uint8_t *payload;
     if (m->protocol == KER_TRANSPORT_UDP) {
@@ -82,7 +89,7 @@ static void receive(void *arg, const struct ker_flow_key *key, struct rte_mbuf *
     CHECK(key->domain == 7 && key->family == 4 && key->protocol == e->protocol);
     CHECK(key->local_port == 443 && key->remote_port == 1234);
     CHECK(packet->nb_segs == 7 && packet->pkt_len == e->length);
-    uint8_t bytes[57];
+    uint8_t bytes[97];
     const void *data = rte_pktmbuf_read(packet, 0, packet->pkt_len, bytes);
     CHECK(data && memcmp(data, e->frame, e->length) == 0);
     ++e->handed;
@@ -105,7 +112,8 @@ static void receive(void *arg, const struct ker_flow_key *key, struct rte_mbuf *
 static struct rte_mbuf *chain(struct ker_packet_pool *pool, const struct endpoint *e)
 {
     /* EtherType, IPv4 address, and transport fields cross segment boundaries. */
-    const unsigned lengths[7] = {13, 2, 8, 4, 8, 4, e->length - 39};
+    const unsigned lengths[7] = {13, 2, 8, 4, e->ip_header_length - 12, 4,
+        e->length - (14 + e->ip_header_length + 5)};
     struct rte_mbuf *head = NULL;
     unsigned offset = 0;
     for (unsigned i = 0; i < 7; ++i) {
@@ -161,47 +169,53 @@ int main(void)
         struct endpoint endpoints[2] = {0};
         for (unsigned w = 0; w < 2; ++w) init(&endpoints[w], w, &fabric);
         struct endpoint *dest = &endpoints[owner], *src = &endpoints[1 - owner];
-        for (unsigned protocol_index = 0; protocol_index < 2; ++protocol_index) {
-            unsigned protocol = protocol_index ? 6 : 17;
-            for (unsigned corrupt = 0; corrupt < 3; ++corrupt) {
-                frame(dest, protocol, corrupt);
-                for (unsigned remote = 0; remote < 2; ++remote) {
-                    unsigned before = dest->handed;
-                    struct rte_mbuf *m = chain(&src->pool, dest);
-                    CHECK(ker_flow_submit(remote ? &src->flow : &dest->flow, 7, KER_FLOW_INGRESS, &m) == 0 && !m);
-                    CHECK(dest->handed == before + !remote);
-                    if (remote) poll_one(dest);
-                    CHECK(dest->handed == before + 1);
-                    CHECK(src->handed == 0 && !dest->skb.live);
+        for (unsigned options = 0; options <= 40; options += 4) {
+            unsigned handed_before = dest->handed, delivered_before = dest->delivered;
+            unsigned dropped_before = dest->dropped;
+            for (unsigned protocol_index = 0; protocol_index < 2; ++protocol_index) {
+                unsigned protocol = protocol_index ? 6 : 17;
+                for (unsigned corrupt = 0; corrupt < (options ? 4U : 3U); ++corrupt) {
+                    frame(dest, protocol, corrupt, options);
+                    for (unsigned remote = 0; remote < 2; ++remote) {
+                        unsigned before = dest->handed;
+                        struct rte_mbuf *m = chain(&src->pool, dest);
+                        CHECK(ker_flow_submit(remote ? &src->flow : &dest->flow, 7, KER_FLOW_INGRESS, &m) == 0 && !m);
+                        CHECK(dest->handed == before + !remote);
+                        if (remote) poll_one(dest);
+                        CHECK(dest->handed == before + 1);
+                        CHECK(src->handed == 0 && !dest->skb.live);
+                    }
                 }
+                frame(dest, protocol, 0, options);
+                struct rte_mbuf *first = chain(&src->pool, dest), *retry = chain(&src->pool, dest);
+                struct rte_mbuf *saved = retry;
+                CHECK(ker_flow_submit(&src->flow, 7, KER_FLOW_INGRESS, &first) == 0 && !first);
+                CHECK(ker_flow_submit(&src->flow, 7, KER_FLOW_INGRESS, &retry) == -ENOBUFS && retry == saved);
+                CHECK(retry->nb_segs == 7);
+                poll_one(dest);
+                CHECK(ker_flow_submit(&src->flow, 7, KER_FLOW_INGRESS, &retry) == 0 && !retry);
+                poll_one(dest);
+                /* Exhaust only the owner's pool; the ingress producer can still
+                 * allocate and hand off a chain. Owner drops then recovers. */
+                struct rte_mbuf *held[127]; unsigned count = 0;
+                while (count < 127 && (held[count] = ker_packet_alloc(&dest->pool))) ++count;
+                CHECK(count == 127);
+                unsigned delivered = dest->delivered, dropped = dest->dropped;
+                dest->allocation_drop = true;
+                struct rte_mbuf *m = chain(&src->pool, dest);
+                CHECK(ker_flow_submit(&src->flow, 7, KER_FLOW_INGRESS, &m) == 0 && !m);
+                poll_one(dest);
+                CHECK(dest->dropped == dropped + 1 && dest->delivered == delivered);
+                for (unsigned i = 0; i < count; ++i) ker_packet_free(held[i]);
+                dest->allocation_drop = false;
+                m = chain(&src->pool, dest);
+                CHECK(ker_flow_submit(&src->flow, 7, KER_FLOW_INGRESS, &m) == 0 && !m);
+                poll_one(dest); CHECK(dest->delivered == delivered + 1);
             }
-            frame(dest, protocol, 0);
-            struct rte_mbuf *first = chain(&src->pool, dest), *retry = chain(&src->pool, dest);
-            struct rte_mbuf *saved = retry;
-            CHECK(ker_flow_submit(&src->flow, 7, KER_FLOW_INGRESS, &first) == 0 && !first);
-            CHECK(ker_flow_submit(&src->flow, 7, KER_FLOW_INGRESS, &retry) == -ENOBUFS && retry == saved);
-            CHECK(retry->nb_segs == 7);
-            poll_one(dest);
-            CHECK(ker_flow_submit(&src->flow, 7, KER_FLOW_INGRESS, &retry) == 0 && !retry);
-            poll_one(dest);
-            /* Exhaust only the owner's pool; the ingress producer can still
-             * allocate and hand off a chain. Owner drops then recovers. */
-            struct rte_mbuf *held[127]; unsigned count = 0;
-            while (count < 127 && (held[count] = ker_packet_alloc(&dest->pool))) ++count;
-            CHECK(count == 127);
-            unsigned delivered = dest->delivered, dropped = dest->dropped;
-            dest->allocation_drop = true;
-            struct rte_mbuf *m = chain(&src->pool, dest);
-            CHECK(ker_flow_submit(&src->flow, 7, KER_FLOW_INGRESS, &m) == 0 && !m);
-            poll_one(dest);
-            CHECK(dest->dropped == dropped + 1 && dest->delivered == delivered);
-            for (unsigned i = 0; i < count; ++i) ker_packet_free(held[i]);
-            dest->allocation_drop = false;
-            m = chain(&src->pool, dest);
-            CHECK(ker_flow_submit(&src->flow, 7, KER_FLOW_INGRESS, &m) == 0 && !m);
-            poll_one(dest); CHECK(dest->delivered == delivered + 1);
+            CHECK(dest->handed - handed_before == (options ? 24U : 20U));
+            CHECK(dest->delivered - delivered_before == 10);
+            CHECK(dest->dropped - dropped_before == (options ? 14U : 10U));
         }
-        CHECK(dest->handed == 20 && dest->delivered == 10 && dest->dropped == 10);
         for (unsigned w = 0; w < 2; ++w) cleanup(&endpoints[w]);
         CHECK(ker_flow_fabric_cleanup(&fabric) == 0);
     }
