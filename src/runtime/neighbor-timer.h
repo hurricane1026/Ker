@@ -9,6 +9,7 @@ struct ker_tx_export;
  * ARP packet. They may not mutate, remove, reenter, or free this monitor. */
 struct ker_neighbor_event { __be32 ip; unsigned int state, probes; unsigned char mac[6]; int error; };
 typedef void (*ker_neighbor_event_fn)(const struct ker_neighbor_event *, void *);
+typedef int (*ker_neighbor_output_mtu_fn)(void *, uint32_t *);
 struct ker_neighbor_monitor {
     struct ker_neighbor_table *table;
     struct neighbour *entry;
@@ -25,6 +26,8 @@ struct ker_neighbor_monitor {
     int event_send_result;
     bool busy, notification, probe_callback;
     bool resolution_enabled;
+    ker_neighbor_output_mtu_fn output_mtu;
+    void *output_mtu_ctx;
     unsigned int echo_service_refs;
     bool owns_entry;
     size_t resolution_queue_bytes;

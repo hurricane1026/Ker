@@ -239,8 +239,8 @@ static void run(void)
     reserved->data[ETH_HLEN + 6] = 0x80;
     refresh_ip_checksum(reserved);
     inject_request(reserved);
-    CHECK(service.requests == old_requests + 6 && service.dropped == old_drops + 6 &&
-        service.last_error == -ENOTSUP);
+    CHECK(service.requests == old_requests + 5 && service.dropped == old_drops + 5 &&
+        brx_transport.validation_error == -ENOTSUP);
 
     struct sk_buff *bad_checksum = NULL;
     CHECK(ker_icmp_echo_ipv4_create_fields(&actx, amac, bmac, aip, bip,
@@ -248,7 +248,7 @@ static void run(void)
         payload, sizeof(payload), &bad_checksum) == 0);
     bad_checksum->data[ETH_HLEN + 20 + 8] ^= 1;
     inject_request(bad_checksum);
-    CHECK(service.requests == old_requests + 6 && service.dropped == old_drops + 6 &&
+    CHECK(service.requests == old_requests + 5 && service.dropped == old_drops + 5 &&
         brx_transport.validation_error == -EBADMSG);
 
     struct sk_buff *pressure_request = NULL;

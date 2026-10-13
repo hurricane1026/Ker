@@ -28,7 +28,7 @@ int ker_icmp_echo_service_enable(struct ker_icmp_echo_service *service,
         return -EINVAL;
     if (service->receiver || service->monitor)
         return -EALREADY;
-    if (!receiver->handler.registered || receiver->echo_service || !receiver->handler.runtime ||
+    if (!receiver->handler.registered || receiver->echo_service || receiver->icmpv4_service || !receiver->handler.runtime ||
         !receiver->handler.device || !receiver->handler.runtime->context)
         return -EINVAL;
     if (!monitor->entry || !monitor->table || !monitor->table->address ||

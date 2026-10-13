@@ -342,6 +342,22 @@
         "test_ff_dpdk_if_send_multiseg"
       ],
       "adaptation": "Ker-specific first-contact echo-service integration extension. Two independent skb pools and real SP/SC rings carry a validated echo request, native neighbor resolution emits an ARP probe through the existing responder and scoped feedback path, and the returned echo reply is checked by the peer transport callback. This is not the F-Stack socket, ping, full ICMP input/reply path, routing, or NIC delivery."
+    },
+    "icmpv4-service": {
+      "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
+      "source_case": [
+        "test_ff_dpdk_if_send_basic",
+        "test_ff_dpdk_if_send_multiseg"
+      ],
+      "adaptation": "Ker-specific ICMPv4 control extension: generic error events, bounded safe error emission, timestamp and opt-in extended echo, token-bucket limits and independent peer pools with actual RX/TX rings. The source cases motivate packet delivery only; no upstream ICMP suite, sockets, routing, IPv4 reassembly, IPv6 or NIC delivery is claimed."
+    },
+    "icmpv4-pmtu": {
+      "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
+      "source_case": [
+        "test_ff_dpdk_if_send_basic",
+        "test_ff_dpdk_if_send_multiseg"
+      ],
+      "adaptation": "Ker-specific path-MTU extension: require a sent-packet confirmation callback before lowering one peer cache, apply legacy plateaus and expiry, and reject actual oversized neighbor output without taking packet ownership. This is not a F-Stack PMTU test and does not add routing, sockets, retransmission, segmentation or IPv6."
     }
   }
 }
