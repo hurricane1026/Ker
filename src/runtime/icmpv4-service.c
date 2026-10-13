@@ -324,6 +324,11 @@ static int service_receive_impl(void *opaque, struct sk_buff *skb,
       e = -EHOSTUNREACH;
       goto fail;
     }
+    if (type == 13 &&
+        (m->icmpv4.payload_length != 12 || !s->config.utc_ms)) {
+      e = -EINVAL;
+      goto fail;
+    }
     e = token(s);
     if (e)
       goto fail;
@@ -331,10 +336,6 @@ static int service_receive_impl(void *opaque, struct sk_buff *skb,
       e = send_reply(s, source, 0, m->icmpv4.rest, m->icmpv4.payload,
                      m->icmpv4.payload_length);
     } else {
-      if (m->icmpv4.payload_length != 12 || !s->config.utc_ms) {
-        e = -EINVAL;
-        goto fail;
-      }
       uint32_t receive, transmit;
       e = utc_now(s, &receive);
       if (e)

@@ -88,10 +88,52 @@ static void quoted_ipv4_vectors(void)
     CHECK(ker_icmpv4_quoted_ipv4_view_init(quote, sizeof(quote), &view) == -EINVAL);
 }
 
+static void timestamp_length_vectors(void)
+{
+    const unsigned char rest[4] = {0x12, 0x34, 0x56, 0x78};
+    unsigned char body[13] = {0};
+    const unsigned int lengths[] = {11, 12, 13};
+    const uint8_t types[] = {13, 14};
+    for (unsigned int t = 0; t < sizeof(types); ++t) {
+        for (unsigned int i = 0; i < sizeof(lengths) / sizeof(lengths[0]); ++i) {
+            struct sk_buff *skb = NULL;
+            CHECK(ker_icmpv4_ipv4_create(&context, smac, dmac, source_ip,
+                dest_ip, types[t], 0, rest, 64, body, 12, &skb) == 0);
+            unsigned char *ip = skb->data + ETH_HLEN;
+            unsigned char *icmp = ip + 20;
+            if (lengths[i] == 11) CHECK(ker_skb_trim(skb, skb->len - 1) == 0);
+            if (lengths[i] == 13) {
+                unsigned char *extra = NULL;
+                CHECK(ker_skb_put(skb, 1, &extra) == 0);
+                *extra = 0;
+            }
+            unsigned int wire_length = 20 + 8 + lengths[i];
+            ip[2] = (unsigned char)(wire_length >> 8); ip[3] = (unsigned char)wire_length;
+            ip[10] = ip[11] = 0;
+            uint16_t ipcs = checksum(ip, 20);
+            ip[10] = (unsigned char)(ipcs >> 8); ip[11] = (unsigned char)ipcs;
+            refresh_linux_checksum(icmp, 8 + lengths[i]);
+            struct rte_mbuf *mbuf = NULL;
+            CHECK(ker_skb_to_mbuf(skb, &mbuf) == 0);
+            struct sk_buff *classified = NULL;
+            CHECK(ker_eth_receive_copy_chain(&device, mbuf, 128, &classified) == 0);
+            ker_packet_free(mbuf);
+            struct ker_icmpv4_packet_view view;
+            memset(&view, 0xa5, sizeof(view));
+            struct ker_icmpv4_packet_view before = view;
+            int expected = lengths[i] == 12 ? 0 : -EMSGSIZE;
+            CHECK(ker_icmpv4_packet_view_init(&context, classified, &view) == expected);
+            if (expected) CHECK(!memcmp(&view, &before, sizeof(view)));
+            CHECK(ker_skb_free(classified) == 0);
+            CHECK(ker_skb_free(skb) == 0);
+        }
+    }
+}
+
 static void generic_type_code_vectors(void)
 {
     static const struct { uint8_t type, max_code; } supported[] = {
-        {0, 0}, {8, 0}, {3, 15}, {5, 3}, {11, 1}, {12, 2}, {13, 0}, {14, 0},
+        {0, 0}, {8, 0}, {3, 15}, {5, 3}, {11, 1}, {12, 2},
     };
     static unsigned char body[28] = {0};
     body[0] = 0x45; body[2] = 0; body[3] = sizeof(body); body[8] = 64; body[9] = 17;
@@ -622,6 +664,7 @@ int main(void)
     CHECK(ker_eth_device_init(&device, &context, "icmp0", 1, smac) == 0);
     constructor_vectors();
     quoted_ipv4_vectors();
+    timestamp_length_vectors();
     generic_type_code_vectors();
     generic_constructor_vectors();
     extended_echo_object_vectors();

@@ -566,12 +566,44 @@ static void run(void) {
   timestamp_rest[2] = 9;
   timestamp_rest[3] = 0;
   uint32_t originate = htonl(1000);
-  unsigned char timestamp_body[12] = {0};
+  unsigned char timestamp_body[13] = {0};
   memcpy(timestamp_body, &originate, 4);
   struct sk_buff *timestamp_request = NULL;
+  const unsigned int invalid_timestamp_lengths[] = {11, 13};
+  for (unsigned int i = 0; i < sizeof(invalid_timestamp_lengths) /
+                                   sizeof(invalid_timestamp_lengths[0]); ++i) {
+    unsigned int received_before = service.received;
+    unsigned int dropped_before = service.dropped;
+    uint64_t tokens_before = service.tokens;
+    unsigned int replies_before = service.replies_submitted;
+    CHECK(ker_icmpv4_ipv4_create(&actx, amac, bmac, aip, bip, 13, 0,
+          timestamp_rest, 64, timestamp_body, sizeof(timestamp_body) - 1,
+          &timestamp_request) == 0);
+    unsigned char *timestamp_ip = timestamp_request->data + ETH_HLEN;
+    unsigned char *timestamp_icmp = timestamp_ip + 20;
+    if (invalid_timestamp_lengths[i] == 11)
+      CHECK(ker_skb_trim(timestamp_request, timestamp_request->len - 1) == 0);
+    if (invalid_timestamp_lengths[i] == 13) {
+      unsigned char *extra = NULL;
+      CHECK(ker_skb_put(timestamp_request, 1, &extra) == 0);
+      *extra = 0;
+    }
+    unsigned int timestamp_wire_length = 20 + 8 + invalid_timestamp_lengths[i];
+    timestamp_ip[2] = (unsigned char)(timestamp_wire_length >> 8);
+    timestamp_ip[3] = (unsigned char)timestamp_wire_length;
+    refresh_ip_checksum(timestamp_request);
+    timestamp_icmp[2] = timestamp_icmp[3] = 0;
+    __sum16 icmp_sum = csum_fold(csum_partial(timestamp_icmp,
+        8 + (int)invalid_timestamp_lengths[i], 0));
+    memcpy(timestamp_icmp + 2, &icmp_sum, sizeof(icmp_sum));
+    inject_request(timestamp_request);
+    CHECK(service.received == received_before &&
+          service.dropped == dropped_before && service.tokens == tokens_before &&
+          service.replies_submitted == replies_before);
+  }
   CHECK(ker_icmpv4_ipv4_create(
             &actx, amac, bmac, aip, bip, 13, 0, timestamp_rest, 64,
-            timestamp_body, sizeof(timestamp_body), &timestamp_request) == 0);
+            timestamp_body, sizeof(timestamp_body) - 1, &timestamp_request) == 0);
   CHECK(ker_tx_export_enqueue(&atx, &timestamp_request) == 0 &&
         !timestamp_request);
   reentry_packet = make_borrowed(aip, bip, 8);
@@ -594,7 +626,7 @@ static void run(void) {
   timestamp_request = NULL;
   CHECK(ker_icmpv4_ipv4_create(
             &actx, amac, bmac, aip, bip, 13, 0, timestamp_rest, 64,
-            timestamp_body, sizeof(timestamp_body), &timestamp_request) == 0);
+            timestamp_body, sizeof(timestamp_body) - 1, &timestamp_request) == 0);
   inject_request(timestamp_request);
   CHECK(service.last_error == -EINVAL && service.replies_submitted == 2);
   pressure_result = poll_worker(&bworker);

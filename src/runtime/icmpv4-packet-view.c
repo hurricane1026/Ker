@@ -189,7 +189,7 @@ int ker_icmpv4_packet_view_init(struct ker_skb_context *context,
         return -EINVAL;
     if (!supported_type_code(icmp[0], icmp[1]))
         return -ENOTSUP;
-    if ((icmp[0] == 13 || icmp[0] == 14) && ip.payload_length < 20)
+    if ((icmp[0] == 13 || icmp[0] == 14) && ip.payload_length != 20)
         return -EMSGSIZE;
     if (csum_fold(csum_partial(icmp, (int)ip.payload_length, 0)) != 0)
         return -EBADMSG;
