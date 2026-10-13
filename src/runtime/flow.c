@@ -26,8 +26,8 @@ static uint16_t be16(const uint8_t *p)
     return (uint16_t)((uint16_t)p[0] << 8 | p[1]);
 }
 
-/* Ethernet (14) + fixed IPv6 (40) + minimum TCP header (20). */
-#define FLOW_PREFIX_SIZE 74U
+/* Ethernet (14) + maximum IPv4 header (60) + minimum TCP header (20). */
+#define FLOW_PREFIX_SIZE 94U
 
 /* Validate the complete topology before following segment data pointers. The
  * walk is bounded by the head's count. */
@@ -105,14 +105,17 @@ static int parse_packet(const struct rte_mbuf *packet, uint64_t domain,
     const uint8_t *ip;
     size_t ip_length;
     size_t transport_offset;
+    size_t ip_header_length;
     if (ethertype == RTE_ETHER_TYPE_IPV4) {
         if (length < 14 + 20) return -EMSGSIZE;
         if (prefix_length < 14 + 20) return -EMSGSIZE;
         ip = data + 14;
         if ((ip[0] >> 4) != 4 || (ip[0] & 0x0f) < 5) return -EINVAL;
-        if ((ip[0] & 0x0f) > 5) return -ENOTSUP;
+        ip_header_length = (size_t)(ip[0] & 0x0f) * 4;
         ip_length = be16(ip + 2);
-        if (ip_length < 20) return -EINVAL;
+        if (ip_length < ip_header_length) return -EINVAL;
+        if (14 + ip_header_length > length) return -EMSGSIZE;
+        if (14 + ip_header_length > prefix_length) return -EMSGSIZE;
         if (14 + ip_length > length) return -EMSGSIZE;
         uint16_t fragment = be16(ip + 6);
         if (fragment & 0x3fff) return -ENOTSUP;
@@ -120,7 +123,7 @@ static int parse_packet(const struct rte_mbuf *packet, uint64_t domain,
         key.protocol = ip[9];
         memcpy(key.local + 12, ip + (direction == KER_FLOW_INGRESS ? 16 : 12), 4);
         memcpy(key.remote + 12, ip + (direction == KER_FLOW_INGRESS ? 12 : 16), 4);
-        transport_offset = 14 + 20;
+        transport_offset = 14 + ip_header_length;
     } else if (ethertype == RTE_ETHER_TYPE_IPV6) {
         if (length < 14 + 40) return -EMSGSIZE;
         if (prefix_length < 14 + 40) return -EMSGSIZE;
@@ -135,12 +138,13 @@ static int parse_packet(const struct rte_mbuf *packet, uint64_t domain,
         memcpy(key.local, ip + (direction == KER_FLOW_INGRESS ? 24 : 8), 16);
         memcpy(key.remote, ip + (direction == KER_FLOW_INGRESS ? 8 : 24), 16);
         transport_offset = 14 + 40;
+        ip_header_length = 40;
     } else {
         return -ENOTSUP;
     }
     if (key.protocol != IPPROTO_TCP && key.protocol != IPPROTO_UDP)
         return -ENOTSUP;
-    size_t transport_length = ip_length - (key.family == 4 ? 20 : 40);
+    size_t transport_length = ip_length - ip_header_length;
     size_t minimum = key.protocol == IPPROTO_TCP ? 20 : 8;
     if (transport_length < minimum) return -EINVAL;
     if (prefix_length < transport_offset + minimum) return -EMSGSIZE;

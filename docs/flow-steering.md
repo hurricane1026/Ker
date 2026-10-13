@@ -7,15 +7,18 @@ the handoff moves one native DPDK mbuf reference and its parsed key only.
 
 ## Key and owner selection
 
-The parser accepts single- or multi-segment Ethernet-II mbuf chains. It supports IPv4 with
-IHL=5 and IPv6 with the fixed 40-byte header, followed directly by TCP or UDP.
+The parser accepts single- or multi-segment Ethernet-II mbuf chains. It supports
+IPv4 with IHL 5–15 (20–60 header bytes) and IPv6 with the fixed 40-byte header,
+followed directly by TCP or UDP. IPv4 options are opaque bytes: they do not enter
+the flow key, and source-route or other option semantics are not implemented.
+The encoded source/destination addresses determine the key.
 The adapter supplies a 64-bit network-domain value, which must be the same for
 both directions of a flow and distinguish any VLAN, VRF, tunnel, or other
 namespace that matters to the adapter. Ingress keys use destination as local;
 egress keys use source as local. Address/port roles are preserved, so reverse
 packets produce the same key without sorting endpoints.
 
-The parser rejects VLAN/QinQ frames, stripped VLAN metadata, IPv4 options and
+The parser rejects VLAN/QinQ frames, stripped VLAN metadata, IPv4
 fragments, IPv6 extension headers, non-TCP/UDP protocols,
 and malformed or truncated headers. Ethernet padding is allowed, while all IP
 and transport bounds use declared lengths. Failures leave both the mbuf and
@@ -24,7 +27,7 @@ truncated packets return `-EINVAL` or `-EMSGSIZE`.
 
 Before reading any bytes, parsing checks the declared segment count against the
 linked chain, buffer bounds for each segment, and the total packet length.
-Empty segments are allowed. A bounded header prefix (at most 74 bytes) is read
+Empty segments are allowed. A bounded header prefix (at most 94 bytes) is read
 without allocating or linearizing the complete packet. Parsing is read-only;
 shared/indirect backing remains accepted when its geometry is valid. The caller
 must keep the complete chain and backing stable during parsing. Successful
@@ -132,3 +135,18 @@ provide the RX-ring adapter's pending/cancel semantics. A production retrying
 bridge would require separately bounded storage and lifecycle rules. Actual
 transport validation remains IPv4-only; IPv6 coverage here is flow parsing and
 handoff, not an IPv6 protocol stack.
+
+## IPv4 options steering verification
+
+`flow-ip-options` covers every IPv4 IHL from 5 through 15 for UDP/TCP and both
+flow directions. Fixed keys/hashes remain independent of option bytes. Length
+checks use the declared IPv4 header and packet sizes, so trailing Ethernet
+padding cannot supply missing transport bytes. Segmentation tests include the
+maximum-IHL ports and TCP data offset beyond the previous 74-byte prefix.
+
+`fstack-flow-receive` runs its local/remote owner, inbox retry, and destination
+allocation-failure cases with each option length. The owner checks the complete
+IPv4 header checksum and the transport checksum; corrupting an options byte
+passes structural steering but is dropped by protocol validation. The callback
+compares accepted option bytes and header length after copying to the owner's
+skb. These tests add no option interpretation, routing or source-route policy.
