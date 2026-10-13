@@ -415,12 +415,13 @@ if(KER_WITH_DPDK)
         "${CMAKE_C_COMPILER}" "${KER_LINUX_INCLUDE}" "${KER_SKB_IMPORT}" "${KER_ETH_IMPORT}"
         "${KER_NAPI_IMPORT}" "${KER_RX_IMPORT}" "${KER_ARP_IMPORT}" ${DPDK_INCLUDE_DIRS})
     add_executable(ker-fstack-arp-chain-test fstack-arp-chain.c)
-    target_include_directories(ker-fstack-arp-chain-test PRIVATE "${KER_NEIGH_UPDATE_IMPORT}")
+    target_include_directories(ker-fstack-arp-chain-test PRIVATE "${KER_NEIGH_UPDATE_IMPORT}" "${KER_ARP_PROBE_IMPORT}")
     target_compile_definitions(ker-fstack-arp-chain-test PRIVATE _GNU_SOURCE)
     target_link_libraries(ker-fstack-arp-chain-test PRIVATE ker_arp_rx_headers ker_arp_rx_port
         ker_arp_neighbor_feedback_port ker_neighbor_timer_headers ker_neighbor_timer_port
         ker_neighbor_update_headers ker_neighbor_update_port ker_neighbor_event_send_port ker_timer_list_port
         ker_neighbor_port ker_address_port ker_arp_port ker_receive_port ker_napi_port ker_eth_port ker_tx_export_port
+        ker_arp_probe_port ker_udp_create_port ker_udp_configured_create_port
         ker_linux_port ker_dpdk_port ker_skb_port Threads::Threads)
     add_test(NAME fstack-arp-chain-feedback COMMAND ker-fstack-arp-chain-test)
     set_tests_properties(fstack-arp-chain-feedback PROPERTIES TIMEOUT 30)

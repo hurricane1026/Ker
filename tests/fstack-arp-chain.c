@@ -6,6 +6,8 @@
 #include "runtime/neighbor-timer.h"
 #include "runtime/worker.h"
 #include "runtime/memory.h"
+#include "runtime/tx-export.h"
+#include "runtime/udp-create.h"
 #include "ker/linux_neighbor_update.h"
 #include <errno.h>
 
@@ -18,6 +20,8 @@ static struct ker_arp_receiver receiver;
 static struct ker_neighbor_table neighbors;
 static struct ker_neighbor_monitor monitor;
 static struct ker_worker worker;
+static struct ker_tx_export tx;
+static struct rte_mbuf *tx_packet;
 static const unsigned char local_mac[ETH_ALEN] = {2, 1, 2, 3, 4, 5};
 static const unsigned char original_peer[ETH_ALEN] = {2, 6, 7, 8, 9, 10};
 static const unsigned char learned_peer[ETH_ALEN] = {2, 10, 9, 8, 7, 6};
@@ -29,6 +33,13 @@ static unsigned int notification_expected_state;
 static __be32 expected_sender_ip, expected_target_ip;
 static bool expected_target_local;
 static unsigned int expected_packet_type = PACKET_HOST;
+
+static int tx_sink(struct rte_mbuf *packet, void *arg)
+{
+    CHECK(arg == &tx && !tx_packet);
+    tx_packet = packet;
+    return 0;
+}
 
 static int receive_arp(const struct ker_arp_message *message, void *arg)
 {
@@ -120,7 +131,9 @@ static void poll_one(struct rte_mbuf *chain)
     CHECK(!pending_chain);
     pending_chain = chain;
     CHECK(ker_worker_poll(&worker, worker.timers.now_ns, &result) == 0);
-    CHECK(result.rx == 1 && !pending_chain && context.live == 0);
+    CHECK(result.rx == 1 && !pending_chain &&
+        context.live == (monitor.resolution_enabled ?
+            monitor.entry->arp_queue.qlen + tx.packets : 0));
 }
 
 static void check_unchanged_feedback(struct rte_mbuf *chain, int expected_feedback,
@@ -153,9 +166,13 @@ static void check_unchanged_feedback(struct rte_mbuf *chain, int expected_feedba
 
 static void monitor_probe(const struct ker_neighbor_event *event, void *arg)
 {
-    (void)event;
     (void)arg;
     ++probe_callbacks;
+    if (monitor.resolution_enabled) {
+        struct sk_buff *skb = NULL;
+        CHECK(ker_arp_probe_create(&monitor, event, &skb) == 0 && skb);
+        CHECK(ker_tx_export_enqueue(monitor.resolution_tx, &skb) == 0 && !skb);
+    }
 }
 
 int main(void)
@@ -172,7 +189,8 @@ int main(void)
     CHECK(ker_ipv4_address_init(&address, &device, local_ip, 24) == 0);
     CHECK(ker_neighbor_table_init(&neighbors, &address, "arp_chain_neighbors", 4, 2) == 0);
     struct ker_neighbor_config config = {.retrans_ticks = 20, .reachable_ticks = 100,
-        .delay_ticks = 30, .ucast_probes = 2, .mcast_reprobes = 1};
+        .delay_ticks = 30, .ucast_probes = 2, .mcast_probes = 2,
+        .mcast_reprobes = 1, .queue_bytes = 16384};
     CHECK(ker_neighbor_configure(&neighbors, &config) == 0);
     CHECK(ker_neighbor_add(&neighbors, peer_ip, original_peer) == 0);
     CHECK(ker_receive_runtime_init(&receive_runtime, &context) == 0);
@@ -275,6 +293,78 @@ int main(void)
     CHECK(notifications == notifications_before + 1 && rte_mempool_avail_count(pool.mbufs) == 31);
     notification_expected_state = 0;
     CHECK(probe_callbacks == 0); /* This bounded DELAY case doesn't claim ARP probe transmission. */
+
+    /* Re-resolve this explicit peer after native NUD_FAILED. A malformed
+     * broadcast reply leaves the native queue intact; the valid host reply
+     * enters through worker RX and native neigh_update flushes the FIFO. */
+    while (monitor_state() == NUD_REACHABLE) {
+        int64_t deadline; struct ker_worker_result result;
+        CHECK(ker_runtime_next_deadline(&worker.timers, &deadline) == 1);
+        CHECK(ker_worker_poll(&worker, deadline, &result) == 0 && result.rx == 0);
+    }
+    CHECK(monitor_state() == NUD_STALE && ker_neighbor_monitor_probe(&monitor) == 0);
+    for (unsigned int i = 0; i < 8 && monitor_state() != NUD_FAILED; ++i) {
+        int64_t deadline; struct ker_worker_result result;
+        CHECK(ker_runtime_next_deadline(&worker.timers, &deadline) == 1);
+        CHECK(ker_worker_poll(&worker, deadline, &result) == 0 && result.rx == 0);
+    }
+    CHECK(monitor_state() == NUD_FAILED && !monitor.entry->arp_queue.qlen);
+    CHECK(ker_tx_export_init(&tx, &context, 8, SIZE_MAX, tx_sink, &tx) == 0);
+    CHECK(ker_neighbor_monitor_resolution_enable(&monitor, &tx) == 0);
+    const unsigned char stale_destination[ETH_ALEN] = {2, 90, 91, 92, 93, 94};
+    struct sk_buff *queued = NULL;
+    CHECK(ker_udp_ipv4_create_configured(&address, stale_destination, peer_ip,
+        rte_cpu_to_be_16(1111), rte_cpu_to_be_16(2222), 64, NULL, 0, "r", 1, &queued) == 0);
+    CHECK(ker_neighbor_monitor_resolve_output(&monitor, &queued) == 0 && !queued);
+    CHECK(monitor_state() == NUD_INCOMPLETE && monitor.entry->arp_queue.qlen == 1 && tx.packets == 1);
+    check_unchanged_feedback(arp_reply_chain(broadcast, peer_ip, local_ip, true), -ENOTSUP,
+        NET_RX_SUCCESS, peer_ip, local_ip, true, PACKET_BROADCAST);
+    CHECK(monitor_state() == NUD_INCOMPLETE && monitor.entry->arp_queue.qlen == 1);
+    notification_expected_state = NUD_REACHABLE;
+    expected_sender_ip = peer_ip; expected_target_ip = local_ip;
+    expected_target_local = true; expected_packet_type = PACKET_HOST;
+    feedback_result = -EFAULT;
+    poll_one(arp_reply_chain(local_mac, peer_ip, local_ip, true));
+    CHECK(feedback_result == 0 && monitor_state() == NUD_REACHABLE &&
+        monitor.entry->arp_queue.qlen == 0 && monitor.entry->arp_queue_len_bytes == 0 && tx.packets == 2);
+    notification_expected_state = 0;
+    CHECK(ker_tx_export_poll(&tx, 1) == 1 && tx_packet && tx_packet->pkt_len == 42);
+    CHECK(rte_pktmbuf_mtod(tx_packet, const unsigned char *)[0] == 0xff);
+    ker_packet_free(tx_packet); tx_packet = NULL;
+    CHECK(ker_tx_export_poll(&tx, 1) == 1 && tx_packet);
+    CHECK(!memcmp(rte_pktmbuf_mtod(tx_packet, const unsigned char *), learned_peer, ETH_ALEN));
+    CHECK(rte_pktmbuf_mtod(tx_packet, const unsigned char *)[ETH_HLEN + 20 + 8] == 'r');
+    ker_packet_free(tx_packet); tx_packet = NULL;
+    /* Native update ignores output callback failures, as Linux does, while
+     * the adapter consumes the skb and records the exporter backpressure. */
+    while (monitor_state() == NUD_REACHABLE) {
+        int64_t deadline; struct ker_worker_result result;
+        CHECK(ker_runtime_next_deadline(&worker.timers, &deadline) == 1);
+        CHECK(ker_worker_poll(&worker, deadline, &result) == 0 && result.rx == 0);
+    }
+    CHECK(monitor_state() == NUD_STALE && ker_neighbor_monitor_probe(&monitor) == 0);
+    for (unsigned int i = 0; i < 8 && monitor_state() != NUD_FAILED; ++i) {
+        int64_t deadline; struct ker_worker_result result;
+        CHECK(ker_runtime_next_deadline(&worker.timers, &deadline) == 1);
+        CHECK(ker_worker_poll(&worker, deadline, &result) == 0 && result.rx == 0);
+    }
+    CHECK(monitor_state() == NUD_FAILED);
+    while (ker_tx_export_cancel(&tx, &queued) == 1) CHECK(ker_skb_free(queued) == 0);
+    queued = NULL;
+    CHECK(ker_udp_ipv4_create_configured(&address, stale_destination, peer_ip,
+        rte_cpu_to_be_16(1111), rte_cpu_to_be_16(2222), 64, NULL, 0, "f", 1, &queued) == 0);
+    CHECK(ker_neighbor_monitor_resolve_output(&monitor, &queued) == 0 && !queued && tx.packets == 1);
+    tx.packet_limit = tx.packets;
+    notification_expected_state = NUD_REACHABLE;
+    expected_sender_ip = peer_ip; expected_target_ip = local_ip;
+    expected_target_local = true; expected_packet_type = PACKET_HOST;
+    poll_one(arp_reply_chain(local_mac, peer_ip, local_ip, true));
+    CHECK(monitor_state() == NUD_REACHABLE && !monitor.entry->arp_queue.qlen &&
+        monitor.resolution_error == -ENOSPC && tx.packets == 1);
+    notification_expected_state = 0;
+    CHECK(ker_tx_export_cancel(&tx, &queued) == 1 && ker_skb_free(queued) == 0);
+    CHECK(ker_neighbor_monitor_resolution_disable(&monitor) == 0);
+    CHECK(ker_tx_export_cleanup(&tx) == 0);
 
     CHECK(ker_neighbor_monitor_cleanup(&monitor) == 0);
     struct neighbour *entry = NULL; unsigned char restored[ETH_ALEN];

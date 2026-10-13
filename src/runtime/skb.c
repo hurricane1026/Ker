@@ -11,7 +11,7 @@ struct skb_envelope {
     struct sk_buff skb;
     struct ker_skb_context *owner;
     struct rte_mbuf *backing;
-    const struct ker_skb_queue *queue;
+    const void *queue;
     unsigned int queued_charge;
 };
 static struct skb_envelope *envelope(struct sk_buff *skb)
@@ -621,4 +621,32 @@ unsigned int ker_skb_queue_release(struct sk_buff *skb, const struct ker_skb_que
     unsigned int charge = desc->queued_charge;
     desc->queue = NULL; desc->queued_charge = 0;
     return charge;
+}
+void ker_skb_native_queue_claim(struct sk_buff *skb, const void *queue)
+{
+    BUG_ON(!queue || !skb || !context_owned(envelope(skb)->owner) ||
+        envelope(skb)->queue || skb_shared(skb) || skb->next || skb->prev || !skb->truesize);
+    envelope(skb)->queue = queue;
+    envelope(skb)->queued_charge = skb->truesize;
+}
+unsigned int ker_skb_native_queue_release(struct sk_buff *skb, const void *queue)
+{
+    struct skb_envelope *desc = envelope(skb);
+    BUG_ON(!context_owned(desc->owner) || desc->queue != queue || skb->next || skb->prev);
+    unsigned int charge = desc->queued_charge;
+    desc->queue = NULL; desc->queued_charge = 0;
+    return charge;
+}
+int ker_skb_native_queue_clone(struct sk_buff *skb, const void *queue, struct sk_buff **result)
+{
+    if (!result || !skb || !queue || !context_owned(envelope(skb)->owner)) return -EINVAL;
+    struct skb_envelope *src = envelope(skb);
+    if (src->queue != queue || !skb->next || !skb->prev) return -EPERM;
+    if ((atomic_read(&skb_shinfo(skb)->dataref) & SKB_DATAREF_MASK) == SKB_DATAREF_MASK) return -EOVERFLOW;
+    struct skb_envelope *dst = kmem_cache_zalloc(src->owner->descriptors, GFP_ATOMIC);
+    if (!dst) return -ENOMEM;
+    dst->owner = src->owner; dst->backing = src->backing;
+    *result = ker_linux_skb_clone_into(&dst->skb, skb);
+    ++src->owner->live;
+    return 0;
 }

@@ -14,6 +14,7 @@ provenance = json.loads((imported / 'provenance.json').read_text())
 generated = (imported / 'linux_neighbor_update.c').read_text() + (imported / 'ker/linux_neighbor_update.h').read_text()
 required = ('static void neigh_update_flags(', 'static void neigh_update_hhs(',
             'static void neigh_suspect(', 'static void neigh_connect(',
+            'static void neigh_update_process_arp_queue(',
             'static int __neigh_update(', 'int neigh_update(')
 found = set()
 for record in provenance:
@@ -25,6 +26,12 @@ for record in provenance:
     found.add(first)
 for anchor in required:
     assert any(line.startswith(anchor) for line in found), anchor
+for filename, anchor in (('include/linux/types.h', 'typedef struct {'),
+                         ('include/net/dst.h', 'struct dst_entry {')):
+    assert any(record['file'] == filename and
+               anchor in (linux / filename).read_text()[record['start_offset']:
+                   record['start_offset'] + record['length']]
+               for record in provenance), (filename, anchor)
 for flag in ('NEIGH_UPDATE_F_OVERRIDE', 'NEIGH_UPDATE_F_ADMIN',
              'NEIGH_UPDATE_F_MANAGED', 'NEIGH_UPDATE_F_EXT_VALIDATED'):
     assert any(line.startswith('#define ' + flag) for line in generated.splitlines()), flag

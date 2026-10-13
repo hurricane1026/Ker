@@ -34,7 +34,7 @@ def main():
         header+=line(nh,'#define '+name)
     header+=line(u,'#define NTF_EXT_EXT_VALIDATED')+line(nh,'#define NTF_EXT_SHIFT')+line(nh,'#define NTF_EXT_VALIDATED')
     header+=definition(nh,'static inline void neigh_confirm(')
-    header+='void ker_linux_neigh_timeout(struct timer_list *);\nvoid ker_linux_neigh_start(struct neighbour *, unsigned long);\nint ker_linux_neigh_cancel(struct neighbour *);\n#endif\n'
+    header+='void ker_linux_neigh_timeout(struct timer_list *);\nvoid ker_linux_neigh_start(struct neighbour *, unsigned long);\nint ker_linux_neigh_cancel(struct neighbour *);\nvoid ker_linux_neigh_probe(struct neighbour *);\n#endif\n'
     body='''/* SPDX-License-Identifier: GPL-2.0 */
 #include "compat/neighbor-timer-port.h"
 '''
@@ -50,6 +50,7 @@ def main():
     body+='''\nvoid ker_linux_neigh_timeout(struct timer_list *t) { neigh_timer_handler(t); }
 void ker_linux_neigh_start(struct neighbour *n, unsigned long when) { neigh_add_timer(n, when); }
 int ker_linux_neigh_cancel(struct neighbour *n) { return neigh_del_timer(n); }
+void ker_linux_neigh_probe(struct neighbour *n) { neigh_probe(n); }
 '''
     (a.out/'ker').mkdir(parents=True,exist_ok=True)
     for path,data in ((a.out/'ker/linux_neighbor_timer.h',header),(a.out/'linux_neighbor_timer.c',body),(a.out/'provenance.json',json.dumps(provenance,indent=2)+'\n')):

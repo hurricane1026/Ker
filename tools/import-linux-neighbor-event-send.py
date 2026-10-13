@@ -44,16 +44,18 @@ def main():
 #define local_bh_enable() ker_neigh_event_local_bh_enable()
 #define neigh_add_timer(n, when) ker_linux_neigh_start((n), (when))
 #define neigh_del_timer(n) ker_linux_neigh_cancel(n)
-#define neigh_probe(n) ker_neigh_event_unsupported()
-#define skb_dst_force(s) ker_neigh_event_unsupported()
-#define __skb_dequeue(q) ker_neigh_event_unsupported_skb()
-#define __skb_queue_tail(q, s) ker_neigh_event_unsupported()
-#define kfree_skb_reason(s, r) ker_neigh_event_unsupported()
-#define NEIGH_CACHE_STAT_INC(t, f) ker_neigh_event_unsupported()
+#define neigh_probe(n) ker_linux_neigh_probe(n)
+#define skb_dst_force(s) ker_neigh_native_dst_force(s)
+#define __skb_queue_tail(q, s) ker_neigh_native_queue_tail((q), (s))
+#define kfree_skb_reason(s, r) ker_neigh_native_free((s))
+#define NEIGH_CACHE_STAT_INC(t, f) ker_neigh_native_stat((t), offsetof(struct neigh_statistics, f))
 #define trace_neigh_event_send_done(n, rc) ker_neigh_event_trace_done((n), (rc))
 #define trace_neigh_event_send_dead(n, rc) ker_neigh_event_trace_dead((n), (rc))
-static void ker_neigh_event_unsupported(void) { BUG_ON(true); }
-static struct sk_buff *ker_neigh_event_unsupported_skb(void) { BUG_ON(true); return NULL; }
+void ker_neigh_native_dst_force(struct sk_buff *);
+struct sk_buff *ker_neigh_native_dequeue(struct sk_buff_head *);
+void ker_neigh_native_queue_tail(struct sk_buff_head *, struct sk_buff *);
+void ker_neigh_native_free(struct sk_buff *);
+void ker_neigh_native_stat(struct neigh_table *, unsigned int);
 '''
     source += f'\n#line {text.count(chr(10), 0, start) + 1} "third_party/linux/{name}"\n{block}\n'
     source += '\nint ker_linux_neigh_event_send(struct neighbour *n, struct sk_buff *skb, bool immediate_ok)\n{ return __neigh_event_send(n, skb, immediate_ok); }\n'

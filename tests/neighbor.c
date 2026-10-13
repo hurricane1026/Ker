@@ -56,6 +56,10 @@ static void parameters(void)
     CHECK(ker_neighbor_configure(&table, &bad) == -EINVAL);
     bad = timing; bad.mcast_reprobes = UINT_MAX;
     CHECK(ker_neighbor_configure(&table, &bad) == -EINVAL);
+    bad = timing; bad.queue_bytes = (size_t)INT_MAX + 1;
+    CHECK(ker_neighbor_configure(&table, &bad) == -EINVAL);
+    bad = timing; bad.queue_bytes = UINT_MAX;
+    CHECK(ker_neighbor_configure(&table, &bad) == -EINVAL);
     CHECK(memcmp(old_data, p->data, sizeof(old_data)) == 0);
     CHECK(memcmp(old_state, p->data_state, sizeof(old_state)) == 0 && p->reachable_time == old_reachable);
     struct neigh_parms *held = neigh_parms_clone(p);
@@ -81,9 +85,11 @@ static void parameters(void)
     CHECK(NEIGH_VAR(p, RETRANS_TIME) == 1000 && NEIGH_VAR(p, BASE_REACHABLE_TIME) == 30000);
     CHECK(NEIGH_VAR(p, DELAY_PROBE_TIME) == 5000 && NEIGH_VAR(p, UCAST_PROBES) == 3);
     CHECK(NEIGH_VAR(p, MCAST_PROBES) == 3 && NEIGH_VAR(p, MCAST_REPROBES) == 2 && NEIGH_VAR(p, APP_PROBES) == 0);
+    CHECK(NEIGH_VAR(p, QUEUE_LEN_BYTES) == 0);
     unsigned long mask = (1UL << NEIGH_VAR_RETRANS_TIME) | (1UL << NEIGH_VAR_BASE_REACHABLE_TIME) |
         (1UL << NEIGH_VAR_DELAY_PROBE_TIME) | (1UL << NEIGH_VAR_UCAST_PROBES) |
-        (1UL << NEIGH_VAR_MCAST_PROBES) | (1UL << NEIGH_VAR_MCAST_REPROBES) | (1UL << NEIGH_VAR_APP_PROBES);
+        (1UL << NEIGH_VAR_MCAST_PROBES) | (1UL << NEIGH_VAR_MCAST_REPROBES) |
+        (1UL << NEIGH_VAR_APP_PROBES) | (1UL << NEIGH_VAR_QUEUE_LEN_BYTES);
     CHECK(p->data_state[0] == mask);
     CHECK(neigh_rand_reach_time(0) == 0 && neigh_rand_reach_time(1) == 0);
     struct ker_neighbor_config disabled = timing;
