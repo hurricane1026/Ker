@@ -192,3 +192,27 @@ into a real source ring, polls the ingress worker, then polls the selected owner
 for checksum validation. It retains the full options-length, checksum rejection,
 full-inbox retry, and destination allocation-drop recovery matrix. This remains a
 same-process software-ring path, not ethdev/NIC reception or a socket stack.
+
+## Cross-CPU owner receive verification
+
+`fstack-flow-concurrent-receive` joins the software-ring ingress and owner-side
+protocol receive path on two distinct pinned CPUs. It captures the allowed CPU
+mask before EAL pins the main thread; CTest skips with code 77 only if fewer than
+two CPUs are available. Setup/affinity/registration failures otherwise fail the
+test. The registered owner thread initializes and tears down its own worker,
+packet pool, skb context, device, receive runtime, and flow attachment.
+
+Immutable expected records cover identifiable segmented IPv4 TCP/UDP packets
+and varying IPv4 options. The test verifies callback CPU/lcore, flow key, full
+wire bytes, protocol payload, source-order delivery, and exactly-once consumption.
+A capacity-one owner inbox is filled while the owner is paused, forcing ingress
+to retain a second chain and leave the third in the source ring. After release,
+the pending chain must precede later packets. Producer/owner progress is checked
+before production completes; this is a correctness test, not a throughput claim.
+
+Corrupt checksums are consumed without transport delivery. In a synchronized
+phase the owner exhausts only its own pool, consumes an allocation-failure drop,
+then releases the held buffers and accepts a later valid packet. Teardown occurs
+after production stops and the path drains, with pending/inbox emptiness and pool
+recovery checks. The receive callback retains its explicit allocation-drop
+policy; this test adds no production retry API, NIC/RSS support, or socket state.
