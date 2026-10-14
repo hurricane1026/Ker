@@ -53,6 +53,32 @@ static int transport_receive(struct sk_buff *skb,
   if (error)
     goto reject;
 
+  if (message.protocol == KER_TRANSPORT_TCP &&
+      receiver->tcp_listener) {
+    if (!receiver->tcp_listener_receive) {
+      error = -EOPNOTSUPP;
+      goto reject;
+    }
+    int handled = receiver->tcp_listener_receive(
+        receiver->tcp_listener, skb, &message);
+    if (handled < 0) {
+      error = handled;
+      receiver->validation_error = error;
+      BUG_ON(ker_skb_free(skb));
+      return handled == -EPROTO ? -EPROTO : NET_RX_DROP;
+    }
+    if (handled == 1 || handled == 2) {
+      receiver->validation_error = 0;
+      BUG_ON(ker_skb_free(skb));
+      return handled == 1 ? NET_RX_SUCCESS : NET_RX_DROP;
+    }
+    if (handled != 0) {
+      receiver->validation_error = -EPROTO;
+      BUG_ON(ker_skb_free(skb));
+      return NET_RX_DROP;
+    }
+  }
+
   if (message.protocol == KER_TRANSPORT_UDP &&
       receiver->udp_endpoint_table) {
     if (!receiver->udp_endpoint_receive) {
@@ -154,7 +180,7 @@ int ker_transport_receiver_unregister(struct ker_transport_receiver *receiver) {
   if (!receiver || !receiver->handler.registered)
     return -EINVAL;
   if (receiver->echo_service || receiver->icmpv4_service ||
-      receiver->udp_endpoint_table)
+      receiver->udp_endpoint_table || receiver->tcp_listener)
     return -EBUSY;
   int error = ker_protocol_unregister(&receiver->handler);
   if (error)

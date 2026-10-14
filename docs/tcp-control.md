@@ -41,3 +41,5 @@ adds no connection/listener/accept API, handshake state machine, retransmission,
 congestion control, stream reassembly, or TCP public capability. Window scaling,
 SACK, timestamps, TCP authentication, and Fast Open negotiation still require
 separate adaptation and validation.
+
+The next private passive-handshake profile is documented in [TCP listener](tcp-listener.md).
