@@ -31,7 +31,10 @@ static int emit(struct ker_tcp_active *t, uint8_t flags, uint32_t peer_isn)
     unsigned char options[4] = {2, 4, (unsigned char)(t->config.mss >> 8),
                                 (unsigned char)t->config.mss};
     struct sk_buff *skb = NULL;
-    uint16_t window = t->config.window - t->status.receive_bytes;
+    bool fixed_time_wait_window = t->status.state == KER_TCP_ACTIVE_TIME_WAIT && flags == KER_TCP_ACK;
+    uint16_t window = fixed_time_wait_window ?
+        (uint16_t)(t->receive_right - t->status.receive_next) :
+        t->config.window - t->status.receive_bytes;
     uint32_t ack = t->peer_known ? t->status.receive_next : peer_isn + 1U;
     int error = ker_tcp_ipv4_create_neighbor(t->neighbors, t->peer_ip,
         t->config.local_port, t->config.peer_port,
@@ -46,7 +49,7 @@ static int emit(struct ker_tcp_active *t, uint8_t flags, uint32_t peer_isn)
     error = ker_tx_export_enqueue(t->tx, &skb);
     if (skb) BUG_ON(ker_skb_free(skb));
     if (!error && t->peer_known && (flags == KER_TCP_ACK || flags == (KER_TCP_FIN | KER_TCP_ACK))) {
-        t->receive_right = t->status.receive_next + window;
+        if (!fixed_time_wait_window) t->receive_right = t->status.receive_next + window;
         t->status.ack_pending = false;
     }
     return error;
@@ -222,7 +225,12 @@ static int receive_active(void *arg, struct sk_buff *skb,
             }
             close_state(t);
         }
-        if (t->status.state == KER_TCP_ACTIVE_TIME_WAIT && (p->flags & KER_TCP_RST)) {
+        if (t->status.state == KER_TCP_ACTIVE_TIME_WAIT && fin &&
+            p->sequence + p->payload_length + 1U == t->status.receive_next) {
+            /* A retransmitted FIN may carry its original stale ACK in TIME_WAIT. */
+            t->status.ack_pending = true;
+            t->status.last_tx_error = emit(t, KER_TCP_ACK, t->status.peer_isn);
+        } else if (t->status.state == KER_TCP_ACTIVE_TIME_WAIT && (p->flags & KER_TCP_RST)) {
             /* TIME_WAIT cannot be shortened by a reset. */
         } else if ((p->flags & KER_TCP_RST) && p->sequence == t->status.receive_next) {
             t->status.state = KER_TCP_ACTIVE_FAILED; t->status.error = -ECONNRESET;

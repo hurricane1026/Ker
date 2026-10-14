@@ -1,4 +1,13 @@
 static unsigned char close_receive[1024], close_send[512];
+static void wire_control_window(uint32_t seq, uint32_t ack, uint8_t flags, uint16_t window)
+{
+    CHECK(ker_tx_export_poll(&tx, 1) == 1);
+    struct rte_mbuf *frame = NULL; CHECK(ker_tx_ring_take(&output, &frame) == 1);
+    const unsigned char *tcp = rte_pktmbuf_mtod(frame, const unsigned char *) + 34;
+    CHECK(tcp[13] == flags && be32(tcp + 4) == seq && be32(tcp + 8) == ack &&
+          (((uint16_t)tcp[14] << 8) | tcp[15]) == window);
+    ker_packet_free(frame);
+}
 static void wire_control(uint32_t seq, uint32_t ack, uint8_t flags)
 {
     CHECK(ker_tx_export_poll(&tx, 1) == 1);
@@ -81,31 +90,54 @@ static void test_active(void)
     inject(5, 5, KER_TCP_ACK, NULL, 0); CHECK(active.status.state == KER_TCP_ACTIVE_CLOSED);
     CHECK(ker_tcp_active_cleanup(&active) == 0);
     start(300); drain(KER_TCP_SYN); inject(UINT32_MAX, 0, KER_TCP_SYN | KER_TCP_ACK, NULL, 0); drain(KER_TCP_ACK);
-    /* Future FIN does not produce EOF. Simultaneous close then duplicate FIN+ACK. */
-    inject(3, 0, KER_TCP_ACK | KER_TCP_FIN, NULL, 0); drain(KER_TCP_ACK); CHECK(!active.status.peer_eof);
-    CHECK(ker_tcp_active_shutdown_write(&active) == 0); wire_control(0, 0, KER_TCP_FIN | KER_TCP_ACK);
-    inject(0, 0, KER_TCP_ACK | KER_TCP_FIN, NULL, 0); wire_control(1, 1, KER_TCP_ACK);
+    /* Simultaneous close with unread data, followed by the original stale-ACK FIN. */
+    inject(0, 0, KER_TCP_ACK | KER_TCP_PSH, data, sizeof(data)); wire_control(0, 4, KER_TCP_ACK);
+    CHECK(active.status.receive_bytes == sizeof(data) && active.status.receive_next == 4);
+    inject(7, 0, KER_TCP_ACK | KER_TCP_FIN, NULL, 0); wire_control(0, 4, KER_TCP_ACK);
+    CHECK(!active.status.peer_eof);
+    CHECK(ker_tcp_active_shutdown_write(&active) == 0); wire_control(0, 4, KER_TCP_FIN | KER_TCP_ACK);
+    inject(0, 0, KER_TCP_ACK | KER_TCP_FIN, data, sizeof(data)); wire_control(1, 5, KER_TCP_ACK);
     CHECK(active.status.state == KER_TCP_ACTIVE_CLOSING);
-    inject(0, 1, KER_TCP_ACK | KER_TCP_FIN, NULL, 0); wire_control(1, 1, KER_TCP_ACK);
-    CHECK(active.status.state == KER_TCP_ACTIVE_TIME_WAIT && active.status.receive_next == 1);
+    inject(5, 1, KER_TCP_ACK, NULL, 0);
+    CHECK(active.status.state == KER_TCP_ACTIVE_TIME_WAIT && active.status.receive_next == 5);
     uint64_t expires = active.time_wait_deadline_ms;
     uint32_t send_right = active.send_right, una = active.status.send_unacknowledged;
     uint16_t window = active.status.peer_window;
-    injected_window = 17; inject(1, 1, KER_TCP_ACK, NULL, 0);
+    injected_window = 17; inject(5, 1, KER_TCP_ACK, NULL, 0);
     CHECK(active.send_right == send_right && active.status.peer_window == window && active.status.send_unacknowledged == una);
     CHECK(active.status.peer_eof && active.status.local_fin && active.status.local_fin_acked);
     injected_window = 1024;
-    inject(1, 1, KER_TCP_RST, NULL, 0); CHECK(active.status.state == KER_TCP_ACTIVE_TIME_WAIT);
-    inject(1, 1, KER_TCP_ACK | KER_TCP_FIN | KER_TCP_ECE, data, 4);
+    inject(5, 1, KER_TCP_RST, NULL, 0); CHECK(active.status.state == KER_TCP_ACTIVE_TIME_WAIT);
+    inject(0, 1, KER_TCP_ACK | KER_TCP_FIN | KER_TCP_ECE, data, 4);
     CHECK(active.status.state == KER_TCP_ACTIVE_TIME_WAIT && !tx.packets);
     CHECK(ker_tcp_active_reset(&active) == -EBUSY && ker_tcp_active_cleanup(&active) == -EBUSY);
-    inject(0, 1, KER_TCP_ACK | KER_TCP_FIN, NULL, 0); wire_control(1, 1, KER_TCP_ACK);
+    CHECK(ker_tcp_active_read(&active, out, sizeof(out)) == sizeof(out) && !memcmp(out, data, sizeof(data)));
+    CHECK(active.status.receive_bytes == 0 && active.status.ack_pending);
+    uint32_t receive_right = active.receive_right, send_next = active.status.send_next;
+    uint16_t receive_bytes = active.status.receive_bytes;
+    uint16_t receive_window = (uint16_t)(receive_right - active.status.receive_next);
+    CHECK(receive_window < active.config.window - receive_bytes);
+    inject(2, 0, KER_TCP_ACK | KER_TCP_FIN, NULL, 0);
+    CHECK(!tx.packets && active.status.state == KER_TCP_ACTIVE_TIME_WAIT);
+    inject(0, 0, KER_TCP_ACK | KER_TCP_FIN, data, sizeof(data));
+    wire_control_window(1, 5, KER_TCP_ACK, receive_window);
+    CHECK(active.status.state == KER_TCP_ACTIVE_TIME_WAIT && active.status.receive_next == 5 &&
+          active.status.send_next == send_next && active.status.send_unacknowledged == una &&
+          active.status.local_fin && active.status.local_fin_acked && active.status.peer_eof &&
+          active.receive_right == receive_right && active.send_right == send_right &&
+          active.status.peer_window == window && active.status.receive_bytes == receive_bytes &&
+          !active.status.ack_pending && active.time_wait_deadline_ms == expires);
     CHECK(active.time_wait_deadline_ms == expires);
-    fill_tx(); fill_tx(); inject(0, 1, KER_TCP_ACK | KER_TCP_FIN, NULL, 0);
-    CHECK(active.status.ack_pending && active.time_wait_deadline_ms == expires);
+    fill_tx(); fill_tx(); inject(0, 0, KER_TCP_ACK | KER_TCP_FIN, data, sizeof(data));
+    CHECK(active.status.ack_pending && active.status.last_tx_error == -ENOSPC &&
+          active.status.state == KER_TCP_ACTIVE_TIME_WAIT && active.status.receive_next == 5 &&
+          active.status.send_unacknowledged == una && active.receive_right == receive_right &&
+          active.send_right == send_right && active.status.peer_window == window &&
+          active.status.receive_bytes == receive_bytes && active.time_wait_deadline_ms == expires);
     drain(KER_TCP_SYN | KER_TCP_ACK); drain(KER_TCP_SYN | KER_TCP_ACK);
-    CHECK(ker_tcp_active_poll(&active, 301) == 1); wire_control(1, 1, KER_TCP_ACK);
-    CHECK(!active.status.ack_pending && active.time_wait_deadline_ms == expires);
+    CHECK(ker_tcp_active_poll(&active, 301) == 1);
+    wire_control_window(1, 5, KER_TCP_ACK, receive_window);
+    CHECK(!active.status.ack_pending && active.receive_right == receive_right && active.time_wait_deadline_ms == expires);
     CHECK(ker_tcp_active_poll(&active, expires - 1) == 0);
     CHECK(ker_tcp_active_poll(&active, expires - 2) == -EINVAL);
     CHECK(ker_tcp_active_poll(&active, expires) == 1 && active.status.state == KER_TCP_ACTIVE_CLOSED);
