@@ -14,6 +14,34 @@
 #define UDP_ERROR_QUOTE_LENGTH 28U
 #define UDP_ERROR_ID_SPACE 65536U
 
+static struct ker_udp_endpoint *current_endpoint(
+    struct ker_udp_error_tracker *, struct ker_udp_endpoint_handle);
+
+static void flush_accepted(struct ker_udp_error_tracker *tracker,
+                           uint64_t now) {
+  bool valid = now <= UINT64_MAX - tracker->lifetime_ms &&
+               (!tracker->clock_started || now >= tracker->last_now_ms);
+  for (size_t i = 0; i < tracker->record_capacity; ++i) {
+    struct ker_udp_error_record *record = &tracker->records[i];
+    if (!record->accepted_pending)
+      continue;
+    struct ker_udp_endpoint *endpoint =
+        current_endpoint(tracker, record->endpoint);
+    if (!valid || !endpoint || endpoint->incarnation != record->incarnation) {
+      *record = (struct ker_udp_error_record){0};
+      continue;
+    }
+    record->state = KER_UDP_ERROR_SENT;
+    record->skb = NULL;
+    record->accepted_pending = false;
+    record->expires_ms = now + tracker->lifetime_ms;
+  }
+  if (valid) {
+    tracker->clock_started = true;
+    tracker->last_now_ms = now;
+  }
+}
+
 static uint64_t error_clock(void *arg) {
   struct ker_udp_error_tracker *tracker = arg;
   bool tracker_was_busy = tracker->busy;
@@ -23,6 +51,7 @@ static uint64_t error_clock(void *arg) {
   tracker->service->busy = true;
   tracker->endpoints->busy = true;
   uint64_t value = tracker->clock(tracker->clock_arg);
+  flush_accepted(tracker, value);
   tracker->busy = tracker_was_busy;
   tracker->service->busy = service_was_busy;
   tracker->endpoints->busy = endpoints_were_busy;
@@ -51,6 +80,7 @@ static int read_now(struct ker_udp_error_tracker *tracker, uint64_t *now) {
   tracker->service->busy = true;
   tracker->endpoints->busy = true;
   uint64_t value = tracker->clock(tracker->clock_arg);
+  flush_accepted(tracker, value);
   tracker->busy = false;
   tracker->service->busy = service_was_busy;
   tracker->endpoints->busy = endpoints_were_busy;
@@ -287,9 +317,8 @@ static void tx_complete(const struct ker_tx_export_observer_note *note,
   if (!note || note->length != UDP_ERROR_QUOTE_LENGTH || sink_status != 0)
     return; /* A rejected sink leaves the original skb pending for retry. */
   struct ker_udp_error_tracker *tracker = peer->tracker;
-  if (tracker->busy)
+  if (!note->skb)
     return;
-  tracker->busy = true;
   const unsigned char *ip = note->bytes;
   const unsigned char *udp = ip + 20;
   __be32 local, destination;
@@ -307,7 +336,8 @@ static void tx_complete(const struct ker_tx_export_observer_note *note,
   memcpy(&frag_off, ip + 6, sizeof(frag_off));
   for (size_t i = 0; i < tracker->record_capacity; ++i) {
     struct ker_udp_error_record *record = &tracker->records[i];
-    if (record->state != KER_UDP_ERROR_RESERVED ||
+    if (record->state != KER_UDP_ERROR_RESERVED || record->accepted_pending ||
+        record->skb != note->skb ||
         record->monitor != peer->monitor ||
         record->local_address != local || record->peer_address != destination ||
         record->identification != identification || record->frag_off != frag_off ||
@@ -320,25 +350,18 @@ static void tx_complete(const struct ker_tx_export_observer_note *note,
         current_endpoint(tracker, record->endpoint);
     if (!endpoint || endpoint->incarnation != record->incarnation) {
       *record = (struct ker_udp_error_record){0};
-      tracker->busy = false;
       return;
     }
-    uint64_t now = error_clock(tracker);
-    record->state = KER_UDP_ERROR_SENT;
-    if (now > UINT64_MAX - tracker->lifetime_ms ||
-        (tracker->clock_started && now < tracker->last_now_ms)) {
-      *record = (struct ker_udp_error_record){0};
-      tracker->busy = false;
+    if (tracker->busy) {
+      record->accepted_pending = true;
       return;
-    } else {
-      record->expires_ms = now + tracker->lifetime_ms;
-      tracker->clock_started = true;
-      tracker->last_now_ms = now;
     }
+    tracker->busy = true;
+    record->accepted_pending = true;
+    (void)error_clock(tracker);
     tracker->busy = false;
     return;
   }
-  tracker->busy = false;
 }
 
 int ker_udp_error_tracker_init(
@@ -779,6 +802,7 @@ int ker_udp_error_publish(struct ker_udp_error_tracker *tracker,
     return -EINVAL;
   record->ip_length = (uint16_t)packet_length;
   record->udp_checksum = checksum;
+  record->skb = skb;
   return 0;
 }
 

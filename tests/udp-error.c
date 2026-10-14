@@ -45,6 +45,8 @@ static struct rte_mbuf *sent_packet;
 static uint64_t now_ms = 100;
 static bool reject_once = true;
 static bool rollback_once, trigger_clock_reentry;
+static bool trigger_tx_reentry, tx_reentry_polling;
+static int clock_tx_result;
 static unsigned int skip_clock_reentry;
 static struct ker_udp_endpoint_handle active_handle;
 static int clock_reentry_tracker, clock_reentry_endpoint,
@@ -71,6 +73,12 @@ static uint64_t clock_ms(void *arg)
     clock_reentry_init = ker_udp_error_tracker_init(&errors, &service,
         &endpoints, records, 8, peers, 2, 2, clock_ms, NULL, 1000);
   }
+  if (trigger_tx_reentry) {
+    trigger_tx_reentry = false;
+    tx_reentry_polling = true;
+    clock_tx_result = ker_tx_export_poll(&tx, 2);
+    tx_reentry_polling = false;
+  }
   return now_ms;
 }
 static int fallback(const struct ker_transport_message *m, void *arg)
@@ -82,6 +90,10 @@ static void probe_noop(const struct ker_neighbor_event *event, void *arg)
 static int sink(struct rte_mbuf *packet, void *arg)
 {
   (void)arg;
+  if (tx_reentry_polling) {
+    ker_packet_free(packet);
+    return 0;
+  }
   if (reject_once) { reject_once = false; return -EAGAIN; }
   CHECK(!sent_packet);
   sent_packet = packet;
@@ -218,6 +230,7 @@ int main(void)
   CHECK(ker_udp_channel_attach_errors(&channel, queue_events, 2) == 0);
 
   unsigned char payload[16] = {0};
+  const unsigned char *wire = NULL;
   trigger_clock_reentry = true;
   CHECK(ker_udp_send(&channel, payload, sizeof(payload)) == 0);
   CHECK(clock_reentry_tracker == -EBUSY && clock_reentry_endpoint == -EBUSY &&
@@ -230,12 +243,16 @@ int main(void)
   struct ker_udp_error_event event;
   CHECK(ker_udp_channel_recv_error(&channel, &event) == 0 &&
         legacy_events == 1);
-  CHECK(ker_tx_export_poll(&tx, 1) == 1 && sent_packet);
-  const unsigned char *wire = rte_pktmbuf_mtod(sent_packet,
-                                               const unsigned char *);
-  memcpy(quote, wire + ETH_HLEN, sizeof(quote));
-  ker_packet_free(sent_packet);
-  sent_packet = NULL;
+  CHECK(ker_udp_send(&channel, payload, sizeof(payload)) == 0);
+  trigger_tx_reentry = true;
+  struct ker_udp_error_token reentry_token = {0};
+  CHECK(ker_udp_error_reserve(&errors, channel.endpoint, &monitor, local_ip,
+      local_port, peer_ip, peer_port, sizeof(payload), &reentry_token) == 0);
+  CHECK(ker_udp_error_cancel(&errors, reentry_token) == 0);
+  CHECK(clock_tx_result == 2 && records[0].state == KER_UDP_ERROR_SENT &&
+        records[1].state == KER_UDP_ERROR_SENT &&
+        !records[0].accepted_pending && !records[0].skb &&
+        !records[1].accepted_pending && !records[1].skb);
   CHECK(records[0].state == KER_UDP_ERROR_SENT);
 
   unsigned char altered[28];
@@ -271,6 +288,34 @@ int main(void)
       event.local_address == local_ip && event.peer_address == peer_ip &&
       event.reporter_address == router_ip && event.local_port == local_port &&
       event.peer_port == peer_port && event.incarnation != 0);
+
+  /* An identical wire packet queued ahead of the tracked skb cannot claim its
+   * reservation, even though the caller can reproduce every quoted field. */
+  CHECK(ker_udp_send(&channel, payload, sizeof(payload)) == 0);
+  struct sk_buff *tracked = NULL, *spoof = NULL;
+  CHECK(ker_tx_export_cancel(&tx, &tracked) == 1 && tracked);
+  struct rte_mbuf *duplicate = NULL;
+  CHECK(ker_skb_to_mbuf(tracked, &duplicate) == 0 && duplicate);
+  CHECK(ker_skb_copy_from_mbuf_chain(&context, duplicate,
+      skb_headroom(tracked), &spoof) == 0 && spoof);
+  ker_packet_free(duplicate);
+  struct ker_udp_error_record *tracked_record = NULL;
+  for (size_t i = 0; i < 8; ++i)
+    if (records[i].state == KER_UDP_ERROR_RESERVED && records[i].skb == tracked)
+      tracked_record = &records[i];
+  CHECK(tracked_record);
+  CHECK(ker_tx_export_enqueue(&tx, &spoof) == 0 && !spoof);
+  CHECK(ker_tx_export_enqueue(&tx, &tracked) == 0 && !tracked);
+  CHECK(ker_tx_export_poll(&tx, 1) == 1 && sent_packet);
+  CHECK(tracked_record->state == KER_UDP_ERROR_RESERVED &&
+        !tracked_record->accepted_pending);
+  ker_packet_free(sent_packet);
+  sent_packet = NULL;
+  CHECK(ker_tx_export_poll(&tx, 1) == 1 && sent_packet);
+  CHECK(tracked_record->state == KER_UDP_ERROR_SENT &&
+        !tracked_record->skb && !tracked_record->accepted_pending);
+  ker_packet_free(sent_packet);
+  sent_packet = NULL;
 
   /* Events already queued for an old connection incarnation are discarded. */
   CHECK(ker_udp_sendto(&channel, peer_ip, rte_cpu_to_be_16(4322), payload,

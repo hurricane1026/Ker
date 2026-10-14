@@ -36,10 +36,12 @@ struct ker_udp_error_record {
   struct ker_udp_endpoint_handle endpoint;
   struct ker_neighbor_monitor *monitor;
   uint64_t token, sequence, incarnation, expires_ms;
+  struct sk_buff *skb;
   __be32 local_address, peer_address;
   __be16 local_port, peer_port, identification, frag_off;
   uint16_t ip_length;
   __be16 udp_length, udp_checksum;
+  bool accepted_pending;
 };
 
 struct ker_udp_error_tracker;

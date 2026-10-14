@@ -194,6 +194,7 @@ int ker_tx_export_poll(void *arg, unsigned int budget)
         for (struct ker_tx_export_observer *observer = tx->observers;
              observer; observer = observer->next) {
             observer->note.length = 0;
+            observer->note.skb = tx->pending;
             rc = observer->prepare(copy, &observer->note, observer->arg);
             if (rc) {
                 ker_packet_free(copy);

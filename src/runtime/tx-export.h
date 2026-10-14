@@ -10,6 +10,8 @@ typedef int (*ker_tx_export_sink_fn)(struct rte_mbuf *, void *);
 struct ker_tx_export_observer_note {
     unsigned char bytes[KER_TX_EXPORT_NOTE_SIZE];
     size_t length;
+    /* Valid only through the observer completion callback. */
+    const struct sk_buff *skb;
 };
 struct ker_tx_export_observer;
 typedef int (*ker_tx_export_observer_prepare_fn)(
