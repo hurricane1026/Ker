@@ -358,6 +358,14 @@
         "test_ff_dpdk_if_send_multiseg"
       ],
       "adaptation": "Ker-specific path-MTU extension: require a sent-packet confirmation callback before lowering one peer cache, apply legacy plateaus and expiry, and reject actual oversized neighbor output without taking packet ownership. This is not a F-Stack PMTU test and does not add routing, sockets, retransmission, segmentation or IPv6."
+    },
+    "udp-io": {
+      "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
+      "source_case": [
+        "test_ff_dpdk_if_send_udp_csum",
+        "test_ff_dpdk_if_send_multiseg"
+      ],
+      "adaptation": "Ker-specific bounded UDP datagram I/O extension, using actual EAL, packet pools, UDP constructors, neighbor output, TX exporter and RX ring dispatcher. Caller-owned RX slots copy tuple and payload and cover truncation, peek, zero-length datagrams, packet/byte limits and recovery. An exact peer registry supports connected send and explicit sendto without changing the receive filter. Real TX ring and queue pressure validate retry and allocation ownership; MTU callback reentry and lifecycle pins are rejected. This is not a F-Stack socket test, host-socket interoperability, NIC/RSS, multicast or fragmentation support."
     }
   }
 }

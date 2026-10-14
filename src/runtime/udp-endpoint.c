@@ -109,7 +109,7 @@ int ker_udp_endpoint_table_enable(struct ker_udp_endpoint_table *t,
       !icmp->monitor->timer.runtime || !icmp->monitor->resolution_tx)
     return -EINVAL;
   if (t->receiver || t->icmpv4 || t->entries || t->capacity || t->count ||
-      t->busy)
+      t->io_refs || t->busy)
     return -EALREADY;
   struct ker_neighbor_monitor *monitor = icmp->monitor;
   if (r->handler.runtime->dispatching || icmp->busy || monitor->busy ||
@@ -137,7 +137,7 @@ int ker_udp_endpoint_table_disable(struct ker_udp_endpoint_table *t) {
   int error = owner_check(t);
   if (error)
     return error;
-  if (t->count)
+  if (t->count || t->io_refs)
     return -EBUSY;
   struct ker_transport_receiver *r = t->receiver;
   if (r->udp_endpoint_table != t)
@@ -275,6 +275,27 @@ int ker_udp_endpoint_close(struct ker_udp_endpoint_table *t,
     return error;
   *entry = (struct ker_udp_endpoint){0};
   --t->count;
+  return 0;
+}
+int ker_udp_endpoint_snapshot(const struct ker_udp_endpoint_table *table,
+                              struct ker_udp_endpoint_handle handle,
+                              struct ker_udp_endpoint_snapshot *out) {
+  if (!out)
+    return -EINVAL;
+  int error = owner_check(table);
+  if (error)
+    return error;
+  struct ker_udp_endpoint *entry;
+  error = handle_entry((struct ker_udp_endpoint_table *)table, handle, &entry);
+  if (error)
+    return error;
+  struct ker_udp_endpoint_snapshot snapshot = {
+      .local_port = entry->port,
+      .peer_port = entry->peer_port,
+      .peer_address = entry->peer_address,
+      .incarnation = entry->incarnation,
+      .connected = entry->connected};
+  *out = snapshot;
   return 0;
 }
 int ker_udp_endpoint_unbind(struct ker_udp_endpoint_table *t, __be16 port) {

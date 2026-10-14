@@ -531,7 +531,8 @@ int ker_neighbor_monitor_resolution_disable(struct ker_neighbor_monitor *m)
 {
     int error=valid(m); if(error)return error;
     if (!m->resolution_enabled) return -EALREADY;
-    if (m->busy || m->timer.runtime->polling || m->echo_service_refs) return -EBUSY;
+    if (m->busy || m->timer.runtime->polling || m->echo_service_refs ||
+        m->udp_adapter_refs) return -EBUSY;
     if ((m->entry->nud_state == NUD_INCOMPLETE && !(m->error && !timer_pending(&m->entry->timer))) ||
         m->entry->arp_queue.qlen || m->unresolved_bytes)
         return -EBUSY;
@@ -599,7 +600,8 @@ int ker_neighbor_monitor_cleanup(struct ker_neighbor_monitor *m)
 {
     int error=valid(m); if(error)return error;
     if (m->busy || m->timer.runtime->polling || ker_local_irq_disabled() ||
-        m->echo_service_refs || m->output_mtu || m->output_mtu_ctx) return -EBUSY;
+        m->echo_service_refs || m->udp_adapter_refs || m->output_mtu ||
+        m->output_mtu_ctx) return -EBUSY;
     if ((m->entry->nud_state == NUD_INCOMPLETE && !(m->error && !timer_pending(&m->entry->timer))) ||
         m->entry->arp_queue.qlen || m->unresolved_bytes)
         return -EBUSY;

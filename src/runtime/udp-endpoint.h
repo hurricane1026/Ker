@@ -23,18 +23,25 @@ struct ker_udp_endpoint_handle {
   size_t slot;
   uint64_t generation;
 };
+struct ker_udp_endpoint_snapshot {
+  __be16 local_port, peer_port;
+  __be32 peer_address;
+  uint64_t incarnation;
+  bool connected;
+};
 /* Caller owns and zero-initializes the table, entry array and entries. Do not
  * edit entry storage while enabled; keep it stable through disable. Retain the
  * table object to preserve handle generations across re-enable. Zeroing or
  * reusing its storage starts a new object lifetime and invalidates old handles.
  * Ports are nonzero wire-order UDP destination ports. Disable requires an
- * empty table.
+ * empty table and no live UDP I/O adapters.
  * This is a bounded datagram callback adapter, not a socket API. */
 struct ker_udp_endpoint_table {
   struct ker_transport_receiver *receiver;
   struct ker_icmpv4_service *icmpv4;
   struct ker_udp_endpoint *entries;
   size_t capacity, count;
+  unsigned int io_refs;
   uint64_t next_generation;
   bool busy;
 };
@@ -55,6 +62,9 @@ int ker_udp_endpoint_disconnect(struct ker_udp_endpoint_table *,
                                 struct ker_udp_endpoint_handle);
 int ker_udp_endpoint_close(struct ker_udp_endpoint_table *,
                            struct ker_udp_endpoint_handle);
+int ker_udp_endpoint_snapshot(const struct ker_udp_endpoint_table *,
+                              struct ker_udp_endpoint_handle,
+                              struct ker_udp_endpoint_snapshot *);
 /* Only complete local-unicast IPv4 UDP with IHL 20, TTL > 0, no options,
  * reserved/MF/offset bits clear, valid IP/UDP checksums and DF permitted are
  * eligible. The already enabled ICMPv4 service handles closed-port errors.
