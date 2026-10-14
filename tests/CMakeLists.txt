@@ -633,3 +633,18 @@ if(KER_WITH_DPDK AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set_tests_properties(udp-host PROPERTIES TIMEOUT 30 SKIP_RETURN_CODE 77
         ENVIRONMENT "LD_LIBRARY_PATH=${ker_dpdk_library_path}:$ENV{LD_LIBRARY_PATH}")
 endif()
+
+if(KER_WITH_DPDK)
+    add_executable(ker-tcp-control-test tcp-control.c)
+    target_include_directories(ker-tcp-control-test PRIVATE "${PROJECT_SOURCE_DIR}/src")
+    target_compile_definitions(ker-tcp-control-test PRIVATE _GNU_SOURCE)
+    target_link_libraries(ker-tcp-control-test PRIVATE ker_skb_headers ker_eth_headers ker_neighbor_headers ker_timer_list_port ker_linux_port ker_dpdk_port ker_address_port ker_neighbor_port ker_skb_port ker_tx_export_port ker_tcp_create_port ker_tcp_view_port ker_udp_view_port ker_ipv4_view_port ker_icmpv4_view_port ker_icmp_echo_view_port ker_transport_receive_port ker_receive_port ker_receive_headers ker_eth_port Threads::Threads)
+    target_link_libraries(ker-tcp-control-test PRIVATE ker_tcp_mss_port)
+    add_test(NAME tcp-control COMMAND ker-tcp-control-test)
+    set_tests_properties(tcp-control PROPERTIES TIMEOUT 30
+        ENVIRONMENT "LD_LIBRARY_PATH=${ker_dpdk_library_path}:$ENV{LD_LIBRARY_PATH}")
+    add_test(NAME tcp-mss-import COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tcp-mss-import.py" "${KER_LINUX_DIR}"
+        "${KER_TCP_MSS_MANIFEST}" "${KER_TCP_MSS_IMPORT}"
+        "${PROJECT_SOURCE_DIR}/tools/import-linux-tcp-mss.py")
+endif()

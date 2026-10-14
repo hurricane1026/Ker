@@ -10,7 +10,7 @@ struct ker_ipv4_address;
  * call. The options API uses a 20..60-byte TCP header; the legacy API uses
  * exactly 20-byte IPv4 and TCP headers. Options must be 0..40 bytes, a
  * multiple of four, and non-NULL when nonempty; they are not interpreted. TTL must be nonzero. TCP flags are byte
- * 13 (NS/reserved bits stay zero); URG is rejected because urgent pointer is
+ * 13 (AE/reserved bits stay zero); URG is rejected because urgent pointer is
  * fixed zero. IP ID/DSCP/fragment fields and IP options are absent. Checksums
  * are software-computed; a valid zero TCP checksum remains zero. No address
  * policy, routing, TCP state or TX offload is provided. */
