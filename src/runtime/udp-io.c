@@ -164,10 +164,60 @@ int ker_udp_io_cleanup(struct ker_udp_io *io) {
     return error;
   if (io->peer_count || io->open_channels)
     return -EBUSY;
+  if (io->error_tracker)
+    return -EBUSY;
   if (!io->endpoints->io_refs)
     return -EINVAL;
   --io->endpoints->io_refs;
   *io = (struct ker_udp_io){0};
+  return 0;
+}
+
+int ker_udp_io_attach_error_tracker(struct ker_udp_io *io,
+                                    struct ker_udp_error_tracker *tracker) {
+  int error = io_check(io);
+  if (error)
+    return error;
+  if (!tracker || !tracker->attached || tracker->endpoints != io->endpoints ||
+      tracker->service != io->icmpv4)
+    return -EINVAL;
+  if (tracker->busy)
+    return -EBUSY;
+  if (io->error_tracker)
+    return -EALREADY;
+  if (io->peer_count || io->open_channels)
+    return -EBUSY;
+  if (tracker->io_refs == UINT_MAX)
+    return -EOVERFLOW;
+  io->busy = true;
+  tracker->busy = true;
+  io->error_tracker = tracker;
+  ++tracker->io_refs;
+  tracker->busy = false;
+  io->busy = false;
+  return 0;
+}
+
+int ker_udp_io_detach_error_tracker(struct ker_udp_io *io) {
+  int error = io_check(io);
+  if (error)
+    return error;
+  struct ker_udp_error_tracker *tracker = io->error_tracker;
+  if (!tracker)
+    return -ENOENT;
+  if (tracker->busy)
+    return -EBUSY;
+  if (io->peer_count || io->open_channels || tracker->peer_count ||
+      tracker->queue_count)
+    return -EBUSY;
+  if (!tracker->io_refs)
+    return -EINVAL;
+  io->busy = true;
+  tracker->busy = true;
+  io->error_tracker = NULL;
+  --tracker->io_refs;
+  tracker->busy = false;
+  io->busy = false;
   return 0;
 }
 
@@ -195,7 +245,8 @@ int ker_udp_io_register_peer(struct ker_udp_io *io,
   if (!valid_peer_address(monitor, address) ||
       ker_ipv4_address_is_local(monitor->table->address, address) != 0)
     return -EHOSTUNREACH;
-  if (monitor->udp_adapter_refs == UINT_MAX)
+  unsigned int required_refs = io->error_tracker ? 2U : 1U;
+  if (monitor->udp_adapter_refs > UINT_MAX - required_refs)
     return -EOVERFLOW;
   for (size_t i = 0; i < io->peer_capacity; ++i) {
     struct ker_neighbor_monitor *existing = io->peers[i].monitor;
@@ -209,6 +260,11 @@ int ker_udp_io_register_peer(struct ker_udp_io *io,
   }
   for (size_t i = 0; i < io->peer_capacity; ++i)
     if (!io->peers[i].monitor) {
+      if (io->error_tracker) {
+        error = ker_udp_error_peer_register(io->error_tracker, monitor);
+        if (error)
+          return error;
+      }
       io->peers[i].monitor = monitor;
       ++io->peer_count;
       ++monitor->udp_adapter_refs;
@@ -233,6 +289,11 @@ int ker_udp_io_unregister_peer(struct ker_udp_io *io,
         return -EBUSY;
       if (!monitor->udp_adapter_refs)
         return -EINVAL;
+      if (io->error_tracker) {
+        error = ker_udp_error_peer_unregister(io->error_tracker, monitor);
+        if (error)
+          return error;
+      }
       io->peers[i].monitor = NULL;
       --io->peer_count;
       --monitor->udp_adapter_refs;
@@ -298,15 +359,61 @@ int ker_udp_channel_close(struct ker_udp_channel *channel) {
     return error;
   if (channel->busy)
     return -EBUSY;
+  bool detached_errors = false;
+  if (channel->error_queue.attached) {
+    error = ker_udp_error_queue_detach(channel->io->error_tracker,
+                                       channel->endpoint);
+    if (error)
+      return error;
+    detached_errors = true;
+  }
   error = ker_udp_endpoint_close(channel->io->endpoints, channel->endpoint);
-  if (error && error != -ESTALE && error != -ENOENT)
+  if (error && error != -ESTALE && error != -ENOENT) {
+    if (detached_errors) {
+      int restore = ker_udp_error_queue_attach(channel->io->error_tracker,
+          channel->endpoint, &channel->error_queue, channel->error_events,
+          channel->error_capacity);
+      if (restore)
+        return -EIO;
+    }
     return error;
+  }
   if (!channel->io->open_channels)
     return -EINVAL;
   --channel->io->open_channels;
   memset(channel->slots, 0, channel->capacity * sizeof(*channel->slots));
   *channel = (struct ker_udp_channel){0};
   return 0;
+}
+
+int ker_udp_channel_attach_errors(struct ker_udp_channel *channel,
+                                  struct ker_udp_error_event *events,
+                                  size_t capacity) {
+  int error = channel_check(channel);
+  if (error)
+    return error;
+  if (!channel->io->error_tracker)
+    return -ENXIO;
+  if (!events || !capacity || capacity > SIZE_MAX / sizeof(*events))
+    return capacity > SIZE_MAX / sizeof(*events) ? -EOVERFLOW : -EINVAL;
+  error = ker_udp_error_queue_attach(channel->io->error_tracker,
+      channel->endpoint, &channel->error_queue, events, capacity);
+  if (error)
+    return error;
+  channel->error_events = events;
+  channel->error_capacity = capacity;
+  return 0;
+}
+
+int ker_udp_channel_recv_error(struct ker_udp_channel *channel,
+                               struct ker_udp_error_event *out) {
+  int error = channel_check(channel);
+  if (error)
+    return error;
+  if (!channel->error_queue.attached)
+    return -ENXIO;
+  return ker_udp_error_recv(channel->io->error_tracker, channel->endpoint,
+                            out);
 }
 
 int ker_udp_channel_recv(struct ker_udp_channel *channel, void *buffer,
@@ -407,16 +514,58 @@ static int channel_send(struct ker_udp_channel *channel, __be16 source_port,
   }
   struct ker_ipv4_header_fields fields = {
       .frag_off = htons(0x4000U)};
+  struct ker_udp_error_token error_token = {0};
+  bool reserved = false;
+  struct ker_udp_error_tracker *tracker = channel->io->error_tracker;
+  if (tracker) {
+    if (!channel->error_queue.attached) {
+      error = -ENXIO;
+      goto out;
+    }
+    channel->io->endpoints->busy = false;
+    error = ker_udp_error_reserve(tracker, channel->endpoint, monitor,
+        ifa->ifa_local, source_port, address, port, length, &error_token);
+    channel->io->endpoints->busy = true;
+    if (error)
+      goto out;
+    reserved = true;
+    fields.identification = error_token.identification;
+  }
   struct sk_buff *skb = NULL;
   error = ker_udp_ipv4_create_fields(device->context,
       device->native->dev_addr, snapshot.mac, ifa->ifa_local, address,
       source_port, port,
       channel->io->ttl, &fields, NULL, 0, payload, (unsigned int)length, &skb);
-  if (error)
+  if (error) {
+    if (reserved) {
+      channel->io->endpoints->busy = false;
+      (void)ker_udp_error_cancel(tracker, error_token);
+      channel->io->endpoints->busy = true;
+    }
     goto out;
+  }
+  if (reserved) {
+    channel->io->endpoints->busy = false;
+    error = ker_udp_error_publish(tracker, error_token, skb);
+    channel->io->endpoints->busy = true;
+    if (error) {
+      (void)ker_skb_free(skb);
+      channel->io->endpoints->busy = false;
+      (void)ker_udp_error_cancel(tracker, error_token);
+      channel->io->endpoints->busy = true;
+      goto out;
+    }
+  }
   error = monitor->resolution_enabled
       ? ker_neighbor_monitor_resolve_output(monitor, &skb)
       : ker_neighbor_monitor_output(monitor, monitor->resolution_tx, &skb);
+  if (reserved && error) {
+    channel->io->endpoints->busy = false;
+    int cancel_error = ker_udp_error_cancel(tracker, error_token);
+    channel->io->endpoints->busy = true;
+    if (cancel_error)
+      error = cancel_error;
+  }
   if (skb) {
     int free_error = ker_skb_free(skb);
     if (!error)

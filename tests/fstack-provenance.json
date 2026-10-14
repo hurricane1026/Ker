@@ -366,6 +366,11 @@
         "test_ff_dpdk_if_send_multiseg"
       ],
       "adaptation": "Ker-specific bounded UDP datagram I/O extension, using actual EAL, packet pools, UDP constructors, neighbor output, TX exporter and RX ring dispatcher. Caller-owned RX slots copy tuple and payload and cover truncation, peek, zero-length datagrams, packet/byte limits and recovery. An exact peer registry supports connected send and explicit sendto without changing the receive filter. Real TX ring and queue pressure validate retry and allocation ownership; MTU callback reentry and lifecycle pins are rejected. This is not a F-Stack socket test, host-socket interoperability, NIC/RSS, multicast or fragmentation support."
+    },
+    "udp-error": {
+      "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
+      "source_case": "test_ff_dpdk_if_send_udp_csum",
+      "adaptation": "Ker-specific asynchronous UDP error extension. Real UDP construction, neighbor output, TX copy/sink acceptance and ICMP receive dispatch establish exact quoted IPv4/UDP evidence. Bounded RESERVED/SENT records reject unsent, forged, stale-generation and stale-incarnation errors; per-channel queues expose copied errno/tuple/reporter/MTU data. Tests cover alternate peers, PMTU reduction and expiry, error-queue bounds, reservation recovery and callback/lifetime failures. Sink acceptance is application-level evidence, not NIC completion or peer delivery; this is not a F-Stack upstream socket/ICMP test and does not provide cryptographic ICMP authentication."
     }
   }
 }

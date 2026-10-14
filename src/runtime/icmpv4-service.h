@@ -16,6 +16,10 @@ struct ker_icmpv4_control_event {
 };
 typedef void (*ker_icmpv4_control_event_fn)(
     const struct ker_icmpv4_control_event *, void *);
+/* Return 1 when consumed, 0 to continue legacy handling, a negative errno on
+ * failure. Positive values other than 1 are rejected as -EPROTO. */
+typedef int (*ker_icmpv4_control_observer_fn)(
+    const struct ker_icmpv4_control_event *, void *);
 typedef uint64_t (*ker_icmpv4_monotonic_ms_fn)(void *);
 /* UTC callback returns zero on success or a negative errno; positive statuses
  * are rejected as invalid callback results. */
@@ -38,6 +42,8 @@ struct ker_icmpv4_service {
   struct ker_transport_receiver *receiver;
   struct ker_neighbor_monitor *monitor;
   struct ker_icmpv4_service_config config;
+  ker_icmpv4_control_observer_fn control_observer;
+  void *control_observer_arg;
   uint64_t tokens, last_refill_ms, last_now_ms;
   bool clock_started;
   bool busy;
@@ -53,6 +59,14 @@ int ker_icmpv4_service_enable(struct ker_icmpv4_service *,
                               struct ker_neighbor_monitor *,
                               const struct ker_icmpv4_service_config *);
 int ker_icmpv4_service_disable(struct ker_icmpv4_service *);
+/* One worker-local observer may inspect fully validated error quotations
+ * before the service applies its configured-peer filter. Attach/detach are
+ * owner-only and blocked during receive dispatch. The observer pins service
+ * lifetime until detached. */
+int ker_icmpv4_service_control_observer_attach(
+    struct ker_icmpv4_service *, ker_icmpv4_control_observer_fn, void *);
+int ker_icmpv4_service_control_observer_detach(
+    struct ker_icmpv4_service *, ker_icmpv4_control_observer_fn, void *);
 /* Borrowed offending skb is never consumed. Only a bounded quote is copied. */
 int ker_icmpv4_service_emit_error(struct ker_icmpv4_service *, struct sk_buff *,
                                   uint8_t type, uint8_t code,

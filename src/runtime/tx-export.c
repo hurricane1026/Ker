@@ -120,6 +120,39 @@ int ker_tx_export_enqueue(struct ker_tx_export *tx, struct sk_buff **packet)
     return 0;
 }
 
+int ker_tx_export_observer_attach(
+    struct ker_tx_export *tx, struct ker_tx_export_observer *observer,
+    ker_tx_export_observer_prepare_fn prepare,
+    ker_tx_export_observer_complete_fn complete, void *arg)
+{
+    int rc = valid(tx);
+    if (rc) return rc;
+    if (!observer || !prepare || !complete) return -EINVAL;
+    if (observer->attached || observer->next || observer->prepare ||
+        observer->complete || observer->arg) return -EALREADY;
+    observer->prepare = prepare;
+    observer->complete = complete;
+    observer->arg = arg;
+    observer->attached = true;
+    observer->next = tx->observers;
+    tx->observers = observer;
+    return 0;
+}
+
+int ker_tx_export_observer_detach(struct ker_tx_export *tx,
+                                  struct ker_tx_export_observer *observer)
+{
+    int rc = valid(tx);
+    if (rc) return rc;
+    if (!observer || !observer->attached) return -ENOENT;
+    struct ker_tx_export_observer **link = &tx->observers;
+    while (*link && *link != observer) link = &(*link)->next;
+    if (!*link) return -ESTALE;
+    *link = observer->next;
+    memset(observer, 0, sizeof(*observer));
+    return 0;
+}
+
 static int make_copy(struct ker_tx_export *tx, struct sk_buff *skb, struct rte_mbuf **out)
 {
     if ((tx->mode == KER_TX_EXPORT_CHAIN_SOFTWARE_CHECKSUM ||
@@ -158,7 +191,28 @@ int ker_tx_export_poll(void *arg, unsigned int budget)
         struct rte_mbuf *copy = NULL;
         rc = make_copy(tx, tx->pending, &copy);
         if (rc) { tx->last_error = rc; break; }
+        for (struct ker_tx_export_observer *observer = tx->observers;
+             observer; observer = observer->next) {
+            observer->note.length = 0;
+            rc = observer->prepare(copy, &observer->note, observer->arg);
+            if (rc) {
+                ker_packet_free(copy);
+                tx->last_error = rc > 0 ? -EPROTO : rc;
+                copy = NULL;
+                break;
+            }
+            if (observer->note.length > sizeof(observer->note.bytes)) {
+                ker_packet_free(copy);
+                tx->last_error = -EPROTO;
+                copy = NULL;
+                break;
+            }
+        }
+        if (!copy) break;
         rc = tx->sink(copy, tx->sink_arg);
+        for (struct ker_tx_export_observer *observer = tx->observers;
+             observer; observer = observer->next)
+            observer->complete(&observer->note, rc, observer->arg);
         if (rc != 0) {
             ker_packet_free(copy);
             tx->last_error = rc > 0 ? -EPROTO : rc;
@@ -199,7 +253,7 @@ int ker_tx_export_cleanup(struct ker_tx_export *tx)
 {
     int rc = valid(tx);
     if (rc) return rc;
-    if (tx->resolver_refs || tx->responder_refs || tx->pending || tx->packets || tx->bytes) return -EBUSY;
+    if (tx->resolver_refs || tx->responder_refs || tx->pending || tx->packets || tx->bytes || tx->observers) return -EBUSY;
     rc = ker_skb_queue_cleanup(&tx->queue);
     if (rc) return rc;
     memset(tx, 0, sizeof(*tx));

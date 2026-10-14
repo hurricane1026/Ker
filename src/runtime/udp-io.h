@@ -2,6 +2,7 @@
 #define KER_RUNTIME_UDP_IO_H
 #include "runtime/udp-endpoint.h"
 #include "runtime/udp-create.h"
+#include "runtime/udp-error.h"
 
 struct ker_udp_io_peer {
   struct ker_neighbor_monitor *monitor;
@@ -12,6 +13,7 @@ struct ker_udp_io {
   struct ker_icmpv4_service *icmpv4;
   struct ker_udp_endpoint_table *endpoints;
   struct ker_udp_io_peer *peers;
+  struct ker_udp_error_tracker *error_tracker;
   size_t peer_capacity, peer_count;
   unsigned int open_channels;
   unsigned int owner_lcore;
@@ -38,6 +40,9 @@ struct ker_udp_channel {
   unsigned char *payloads;
   size_t capacity, max_datagram, byte_limit, bytes;
   size_t head, count;
+  struct ker_udp_error_queue error_queue;
+  struct ker_udp_error_event *error_events;
+  size_t error_capacity;
   uint64_t dropped_full;
   bool busy, open;
 };
@@ -54,6 +59,11 @@ int ker_udp_io_init(struct ker_udp_io *, struct ker_transport_receiver *,
 int ker_udp_io_cleanup(struct ker_udp_io *);
 int ker_udp_io_register_peer(struct ker_udp_io *, struct ker_neighbor_monitor *);
 int ker_udp_io_unregister_peer(struct ker_udp_io *, struct ker_neighbor_monitor *);
+/* Attach before registering peers. Peer registration then installs the
+ * per-monitor TX and PMTU observers. */
+int ker_udp_io_attach_error_tracker(struct ker_udp_io *,
+                                    struct ker_udp_error_tracker *);
+int ker_udp_io_detach_error_tracker(struct ker_udp_io *);
 
 /* payloads is capacity consecutive slots of max_datagram bytes. Each received
  * payload is copied before the borrowed transport callback returns. A payload
@@ -64,6 +74,10 @@ int ker_udp_channel_open(struct ker_udp_channel *, struct ker_udp_io *, __be16,
                          size_t capacity, size_t max_datagram, size_t byte_limit,
                          struct ker_udp_endpoint_handle *);
 int ker_udp_channel_close(struct ker_udp_channel *);
+int ker_udp_channel_attach_errors(struct ker_udp_channel *,
+                                  struct ker_udp_error_event *, size_t);
+int ker_udp_channel_recv_error(struct ker_udp_channel *,
+                               struct ker_udp_error_event *);
 /* Returns 1 for a datagram, 0 when empty, or a negative errno. A short buffer
  * consumes one datagram and reports its original/copied lengths. PEEK retains it. */
 int ker_udp_channel_recv(struct ker_udp_channel *, void *, size_t, unsigned int,

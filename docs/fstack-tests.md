@@ -12,6 +12,7 @@ FreeBSD 栈、cmocka mock/stub 或覆盖率脚本。没有通过宿主机 socket
 
 | Ker CTest | 上游场景 | 适配边界 |
 |---|---|---|
+| udp-error | test_ff_dpdk_if_send_udp_csum | Ker-specific 异步错误关联：真实发送副本被 sink 接受后才建立 SENT 证据，ICMP 接收匹配引用 header 与端点/连接代次；验证未发送/伪造/过期错误、有界错误队列、PMTU 降低与到期恢复及回调生命周期。不是 NIC 发送确认、完整 socket 或 F-Stack 上游 ICMP 测试 |
 | udp-io | test_ff_dpdk_if_send_udp_csum / test_ff_dpdk_if_send_multiseg | Ker-specific 有界 datagram 接口：真实 RX ring 复制 tuple/负载，验证截断、PEEK、零长度与包数/字节预算；已注册 peer 上 send/sendto 经邻居输出和 TX ring，覆盖背压重试、MTU 回调重入与生命周期回收。不是 F-Stack socket 或 NIC 互通测试 |
 | fstack-mbuf-release | test_ff_dpdk_pktmbuf_free_basic | 实际 Ker packet pool alloc/free，验证可用对象数恢复 |
 | fstack-clock-monotonic | test_ff_get_tsc_ns_monotonic | Ker CLOCK_MONOTONIC ns，验证非递减，不复制 TSC 算法 |
