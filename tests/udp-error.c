@@ -500,8 +500,17 @@ int main(void)
   CHECK(channel.error_queue.count == 2 && channel.error_queue.dropped == 1);
   CHECK(ker_udp_endpoint_disconnect(&endpoints, handle) == 0);
   CHECK(ker_udp_endpoint_connect(&endpoints, handle, peer_ip, peer_port) == 0);
-  CHECK(ker_udp_channel_recv_error(&channel, &event) == 0 &&
-        channel.error_queue.count == 0);
+  CHECK(ker_udp_send(&channel, payload, sizeof(payload)) == 0);
+  CHECK(ker_tx_export_poll(&tx, 1) == 1 && sent_packet);
+  wire = rte_pktmbuf_mtod(sent_packet, const unsigned char *);
+  memcpy(quote, wire + ETH_HLEN, sizeof(quote));
+  ker_packet_free(sent_packet);
+  sent_packet = NULL;
+  dispatch_error(quote, sizeof(quote), 3, 3, 0);
+  CHECK(channel.error_queue.count == 1 && channel.error_queue.dropped == 1);
+  CHECK(ker_udp_channel_recv_error(&channel, &event) == 1 &&
+        event.error == ECONNREFUSED && event.peer_port == peer_port &&
+        channel.error_queue.count == 0 && channel.error_queue.dropped == 1);
 
   /* Reservations are not evicted while queued for output; resync releases
    * them only after the TX exporter has been drained. */

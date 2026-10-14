@@ -211,6 +211,19 @@ static struct ker_udp_error_queue *find_queue(
   return NULL;
 }
 
+static void purge_stale_queue_head(
+    struct ker_udp_error_queue *queue,
+    const struct ker_udp_endpoint *endpoint) {
+  while (queue->count) {
+    struct ker_udp_error_event *head = &queue->events[queue->head];
+    if (endpoint && head->incarnation == endpoint->incarnation)
+      break;
+    *head = (struct ker_udp_error_event){0};
+    queue->head = (queue->head + 1) % queue->capacity;
+    --queue->count;
+  }
+}
+
 static bool record_matches_quote(
     const struct ker_udp_error_record *record,
     const struct ker_icmpv4_quoted_ipv4_view *quote) {
@@ -344,6 +357,8 @@ static int observe_control(const struct ker_icmpv4_control_event *event,
       find_queue(tracker, matched->endpoint);
   if (queue) {
     queue->busy = true;
+    purge_stale_queue_head(queue,
+        current_endpoint(tracker, queue->endpoint));
     if (queue->count == queue->capacity) {
       if (queue->dropped != UINT64_MAX)
         ++queue->dropped;
@@ -755,17 +770,10 @@ int ker_udp_error_recv(struct ker_udp_error_tracker *tracker,
   struct ker_udp_error_queue *queue = find_queue(tracker, handle);
   if (!queue)
     return -ESTALE;
-  if (!current_endpoint(tracker, handle))
+  struct ker_udp_endpoint *endpoint = current_endpoint(tracker, handle);
+  if (!endpoint)
     return -ESTALE;
-  while (queue->count) {
-    struct ker_udp_error_event *head = &queue->events[queue->head];
-    struct ker_udp_endpoint *endpoint = current_endpoint(tracker, handle);
-    if (endpoint && head->incarnation == endpoint->incarnation)
-      break;
-    *head = (struct ker_udp_error_event){0};
-    queue->head = (queue->head + 1) % queue->capacity;
-    --queue->count;
-  }
+  purge_stale_queue_head(queue, endpoint);
   if (!queue->count)
     return 0;
   *out = queue->events[queue->head];
