@@ -70,3 +70,5 @@ submodule 的许可证以各自源码声明为准。移植前需要确认所选 
 TCP 控制字段与原生 MSS 解析的当前边界见 [TCP control view](tcp-control.md)。连接、监听和握手状态机仍需后续实现。
 
 固定对端的单 worker TCP 被动握手、listen/accept、重试和超时边界见 [TCP listener](tcp-listener.md)。主动连接、流数据传输和正常关闭仍待后续实现。
+
+固定对端的单 worker TCP 主动握手和 Linux 服务端互通验收见 [TCP active handshake](tcp-active.md)。主动与被动握手均已建立有界基础；流数据传输和正常关闭仍待后续实现。

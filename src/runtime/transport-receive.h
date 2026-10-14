@@ -9,6 +9,7 @@ struct ker_icmp_echo_service;
 struct ker_icmpv4_service;
 struct ker_udp_endpoint_table;
 struct ker_tcp_listener;
+struct ker_tcp_active;
 
 enum ker_transport_protocol {
   KER_TRANSPORT_ICMP_ECHO = 1,
@@ -53,6 +54,8 @@ struct ker_transport_receiver {
   ker_transport_service_receive_fn udp_endpoint_receive;
   struct ker_tcp_listener *tcp_listener;
   ker_transport_service_receive_fn tcp_listener_receive;
+  struct ker_tcp_active *tcp_active;
+  ker_transport_service_receive_fn tcp_active_receive;
   bool generic_icmpv4_enabled;
 };
 /* Stable zero-initialized storage; pins device while registered. IPv4

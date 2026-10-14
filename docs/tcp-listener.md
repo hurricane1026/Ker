@@ -63,3 +63,5 @@ ctest --test-dir /path/to/build -R '^(tcp-listener|tcp-host)$' --output-on-failu
 
 See [UDP host interoperability](udp-host-interop.md) for the same TAP/namespace
 prerequisites. Neither test changes persistent host interfaces or routes.
+
+The independent [active handshake adapter](tcp-active.md) can share a receiver on a different local port.

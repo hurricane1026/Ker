@@ -49,6 +49,7 @@ struct ker_tx_export {
     unsigned int resolver_refs;
     unsigned int responder_refs;
     unsigned int listener_refs;
+    unsigned int active_refs;
     int last_error;
     bool polling;
     enum ker_tx_export_mode mode;

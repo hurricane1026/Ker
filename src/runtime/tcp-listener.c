@@ -1,4 +1,5 @@
 #include "runtime/tcp-listener.h"
+#include "runtime/tcp-active.h"
 #include "runtime/tcp-mss.h"
 #include "runtime/tcp-neighbor-create.h"
 #include <errno.h>
@@ -159,6 +160,7 @@ int ker_tcp_listener_init(struct ker_tcp_listener *t, struct ker_transport_recei
     if (t->receiver || t->neighbors || t->tx || t->peer || t->requests ||
         t->capacity || t->count || t->busy || r->tcp_listener ||
         r->tcp_listener_receive) return -EALREADY;
+    if (r->tcp_active && r->tcp_active->config.local_port == cfg->port) return -EADDRINUSE;
     if (rte_lcore_id() != n->lcore || rte_lcore_id() != r->handler.runtime->lcore) return -EXDEV;
     if (r->handler.runtime->dispatching || tx->polling || ker_local_irq_disabled()) return -EBUSY;
     if (capacity > SIZE_MAX / sizeof(*requests) || tx->listener_refs == UINT_MAX) return -EOVERFLOW;
