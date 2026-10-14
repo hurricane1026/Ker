@@ -219,8 +219,11 @@ static int observe_control(const struct ker_icmpv4_control_event *event,
   if (event->type == 3 && event->code == 4) {
     pmtu_status = ker_icmpv4_pmtu_apply(&peer->pmtu, &event->message,
                                         &event->quote);
-    if (!pmtu_status)
-      pmtu_status = ker_icmpv4_pmtu_current_mtu(&peer->pmtu, &current_mtu);
+    if (pmtu_status >= 0) {
+      int mtu_status = ker_icmpv4_pmtu_current_mtu(&peer->pmtu, &current_mtu);
+      if (mtu_status)
+        pmtu_status = mtu_status;
+    }
   }
   struct ker_udp_error_queue *queue =
       find_queue(tracker, matched->endpoint);

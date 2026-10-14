@@ -332,6 +332,28 @@ int main(void)
   ker_packet_free(sent_packet);
   sent_packet = NULL;
 
+  /* A zero-MTU type 3/code 4 report selects the RFC legacy plateau and
+   * publishes the effective value while retaining the successful apply
+   * status. The MTU-derived UDP payload boundary is 1006 - IPv4/UDP 28. */
+  CHECK(ker_udp_send(&channel, jumbo, sizeof(jumbo)) == 0);
+  CHECK(ker_tx_export_poll(&tx, 1) == 1 && sent_packet);
+  wire = rte_pktmbuf_mtod(sent_packet, const unsigned char *);
+  memcpy(quote, wire + ETH_HLEN, sizeof(quote));
+  ker_packet_free(sent_packet);
+  sent_packet = NULL;
+  dispatch_error(quote, sizeof(quote), 3, 4, 0);
+  CHECK(ker_udp_channel_recv_error(&channel, &event) == 1);
+  CHECK(event.error == EMSGSIZE && event.pmtu_status == 1 &&
+        event.next_hop_mtu == 1006);
+  unsigned char plateau_over[979] = {0};
+  unsigned char plateau_fit[978] = {0};
+  CHECK(ker_udp_send(&channel, plateau_over, sizeof(plateau_over)) ==
+        -EMSGSIZE);
+  CHECK(ker_udp_send(&channel, plateau_fit, sizeof(plateau_fit)) == 0);
+  CHECK(ker_tx_export_poll(&tx, 1) == 1 && sent_packet);
+  ker_packet_free(sent_packet);
+  sent_packet = NULL;
+
   /* The per-channel queue drops excess errors without growing its storage. */
   unsigned char overflow_quotes[3][28];
   for (size_t i = 0; i < 3; ++i) {
