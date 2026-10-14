@@ -43,7 +43,7 @@ struct ker_udp_error_record {
   __be16 local_port, peer_port, identification, frag_off;
   uint16_t ip_length;
   __be16 udp_length, udp_checksum;
-  bool accepted_pending;
+  bool accepted_pending, expiry_saturated;
 };
 
 struct ker_udp_error_tracker;

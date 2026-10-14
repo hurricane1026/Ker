@@ -50,6 +50,8 @@ static bool rollback_once, trigger_clock_reentry;
 static bool trigger_tx_reentry, tx_reentry_polling;
 static int clock_tx_result;
 static unsigned int skip_clock_reentry;
+static unsigned int clock_step_countdown;
+static uint64_t clock_step_target;
 static struct ker_udp_endpoint_handle active_handle;
 static int clock_reentry_tracker, clock_reentry_endpoint,
     clock_reentry_service, clock_reentry_init, clock_reentry_pmtu,
@@ -87,6 +89,8 @@ static uint64_t clock_ms(void *arg)
     clock_tx_result = ker_tx_export_poll(&tx, 2);
     tx_reentry_polling = false;
   }
+  if (clock_step_countdown && --clock_step_countdown == 0)
+    now_ms = clock_step_target;
   return now_ms;
 }
 static int fallback(const struct ker_transport_message *m, void *arg)
@@ -453,7 +457,43 @@ int main(void)
   CHECK(ker_udp_channel_recv_error(&channel, &event) == 1);
   CHECK(event.error == EMSGSIZE && event.pmtu_status == 1 &&
         event.next_hop_mtu == 1200);
-  CHECK(ker_udp_send(&channel, jumbo, sizeof(jumbo)) == -EMSGSIZE);
+
+  /* The PMTU helper samples its clock after observe_control's initial read.
+   * Evidence expiring on that second sample cannot install PMTU or enqueue. */
+  unsigned char near_mtu[1100] = {0};
+  CHECK(ker_udp_send(&channel, near_mtu, sizeof(near_mtu)) == 0);
+  CHECK(ker_tx_export_poll(&tx, 1) == 1 && sent_packet);
+  wire = rte_pktmbuf_mtod(sent_packet, const unsigned char *);
+  memcpy(quote, wire + ETH_HLEN, sizeof(quote));
+  __be16 expiring_id;
+  memcpy(&expiring_id, quote + 4, sizeof(expiring_id));
+  struct ker_udp_error_record *expiring = NULL;
+  for (size_t i = 0; i < 8; ++i)
+    if (records[i].state == KER_UDP_ERROR_SENT &&
+        records[i].identification == expiring_id)
+      expiring = &records[i];
+  CHECK(expiring);
+  uint64_t expiry = expiring->expires_ms;
+  uint32_t pmtu_before_expiry = peers[0].pmtu.current_mtu;
+  ker_packet_free(sent_packet);
+  sent_packet = NULL;
+  now_ms = expiry - 1;
+  clock_step_target = expiry;
+  clock_step_countdown = 2;
+  dispatch_error(quote, sizeof(quote), 3, 4, 1000);
+  CHECK(!clock_step_countdown);
+  CHECK(now_ms == expiry);
+  CHECK(expiring->state == KER_UDP_ERROR_TOMBSTONE);
+  CHECK(channel.error_queue.count == 0);
+  /* Refresh may restore the old cache at its own expiry, but this report's
+   * 1000-byte candidate must not be installed from expired evidence. */
+  CHECK(peers[0].pmtu.current_mtu != 1000 &&
+        (peers[0].pmtu.current_mtu == pmtu_before_expiry ||
+         peers[0].pmtu.current_mtu == peers[0].pmtu.initial_mtu));
+  CHECK(ker_udp_send(&channel, jumbo, sizeof(jumbo)) == 0);
+  CHECK(ker_tx_export_poll(&tx, 1) == 1 && sent_packet);
+  ker_packet_free(sent_packet);
+  sent_packet = NULL;
   now_ms += 1000;
   CHECK(ker_udp_send(&channel, jumbo, sizeof(jumbo)) == 0);
   CHECK(ker_tx_export_poll(&tx, 1) == 1 && sent_packet);
@@ -581,7 +621,8 @@ int main(void)
   CHECK(overflow_slot < 8);
   CHECK(ker_tx_export_poll(&tx, 1) == 1 && sent_packet);
   CHECK(records[overflow_slot].state == KER_UDP_ERROR_TOMBSTONE &&
-        records[overflow_slot].expires_ms == UINT64_MAX);
+        records[overflow_slot].expires_ms == UINT64_MAX &&
+        records[overflow_slot].expiry_saturated);
   ker_packet_free(sent_packet);
   sent_packet = NULL;
 
@@ -627,7 +668,18 @@ int main(void)
   CHECK(ker_udp_io_detach_error_tracker(&io) == 0);
   CHECK(ker_udp_error_tracker_cleanup(&errors) == -EBUSY);
   CHECK(stale_record->state == KER_UDP_ERROR_TOMBSTONE);
-  now_ms = UINT64_MAX; /* Includes the fail-closed overflow tombstone. */
+  now_ms = UINT64_MAX;
+  /* An exact UINT64_MAX expiry is still expirable; overflow saturation is
+   * explicitly sticky and keeps cleanup blocked. */
+  stale_record->expires_ms = UINT64_MAX;
+  stale_record->expiry_saturated = false;
+  CHECK(ker_udp_error_tracker_cleanup(&errors) == -EBUSY);
+  CHECK(stale_record->state == KER_UDP_ERROR_FREE);
+  CHECK(records[overflow_slot].state == KER_UDP_ERROR_TOMBSTONE &&
+        records[overflow_slot].expiry_saturated);
+  /* This direct reset is test-fixture cleanup after proving fail-closed
+   * behavior; production has no API to clear a saturated anti-replay ID. */
+  records[overflow_slot] = (struct ker_udp_error_record){0};
   CHECK(ker_udp_error_tracker_cleanup(&errors) == 0);
   CHECK(ker_udp_io_cleanup(&io) == 0);
   CHECK(ker_udp_endpoint_table_disable(&endpoints) == 0);

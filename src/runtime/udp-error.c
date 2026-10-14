@@ -59,8 +59,9 @@ static void flush_accepted(struct ker_udp_error_tracker *tracker,
       uint64_t base = tracker->clock_started && now < tracker->last_now_ms
                           ? tracker->last_now_ms : now;
       tombstone(record);
-      record->expires_ms = base <= UINT64_MAX - tracker->lifetime_ms
-                               ? base + tracker->lifetime_ms : UINT64_MAX;
+      record->expiry_saturated = base > UINT64_MAX - tracker->lifetime_ms;
+      record->expires_ms = record->expiry_saturated
+                               ? UINT64_MAX : base + tracker->lifetime_ms;
       continue;
     }
     if (!endpoint || endpoint->incarnation != record->incarnation) {
@@ -194,6 +195,7 @@ static void expire_sent(struct ker_udp_error_tracker *tracker, uint64_t now) {
     struct ker_udp_error_record *record = &tracker->records[i];
     if ((record->state == KER_UDP_ERROR_SENT ||
          record->state == KER_UDP_ERROR_TOMBSTONE) &&
+        !record->expiry_saturated &&
         now >= record->expires_ms)
       *record = (struct ker_udp_error_record){0};
   }
@@ -257,6 +259,7 @@ static int pmtu_confirm(void *arg, __be32 local, __be32 peer,
     if (record->state != KER_UDP_ERROR_SENT ||
         record->monitor != peer_state->monitor ||
         record->local_address != local || record->peer_address != peer ||
+        tracker->last_now_ms >= record->expires_ms ||
         !record_matches_quote(record, quote))
       continue;
     struct ker_udp_endpoint *endpoint =
@@ -347,6 +350,11 @@ static int observe_control(const struct ker_icmpv4_control_event *event,
   if (event->type == 3 && event->code == 4) {
     pmtu_status = ker_icmpv4_pmtu_apply(&peer->pmtu, &event->message,
                                         &event->quote);
+    if (tracker->last_now_ms >= matched->expires_ms) {
+      tombstone(matched);
+      tracker->busy = false;
+      return 0;
+    }
     if (pmtu_status >= 0) {
       int mtu_status = ker_icmpv4_pmtu_current_mtu(&peer->pmtu, &current_mtu);
       if (mtu_status)
