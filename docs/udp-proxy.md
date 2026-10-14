@@ -79,3 +79,5 @@ ICMP Fragmentation Needed，经 flow inbox 转发至代理 owner。测试检查 
 广播/多播、IPv4 分片重组、完整 socket/epoll 兼容或真实网卡 offload。
 测试使用真实 EAL、packet pool、Linux checksum 和有界 DPDK ring，不能将这些
 结果解释成 NIC/RSS 互通或完整 F-Stack/FreeBSD 栈一致性。
+
+For independent Linux UDP socket validation, see [UDP host interoperability](udp-host-interop.md).
