@@ -77,6 +77,41 @@ static bool key_valid(const struct ker_flow_key *key)
     return true;
 }
 
+/* Steering only: the owner receiver still verifies outer/quoted checksums and
+ * the UDP error tracker requires matching evidence of an accepted transmission.
+ * Only the no-options, unfragmented IPv4 UDP profile used by UDP I/O is admitted.
+ * A minimum ICMP quote contains the entire UDP header, not its full payload. */
+static int quoted_udp_key(const uint8_t *ip, size_t ip_length,
+    size_t available, enum ker_flow_direction direction, struct ker_flow_key *key)
+{
+    if (direction != KER_FLOW_INGRESS || ip[0] != 0x45 ||
+        (be16(ip + 6) & 0xbfff))
+        return -ENOTSUP;
+    if (ip_length < 28 || available < 28)
+        return -EMSGSIZE;
+    const uint8_t *icmp = ip + 20;
+    if (!((icmp[0] == 3 && icmp[1] <= 15) ||
+          (icmp[0] == 11 && icmp[1] <= 1) ||
+          (icmp[0] == 12 && icmp[1] <= 2)))
+        return -ENOTSUP;
+    if (ip_length < 56 || available < 56)
+        return -EMSGSIZE;
+    const uint8_t *quote = icmp + 8;
+    if (quote[0] != 0x45 || quote[9] != IPPROTO_UDP ||
+        (be16(quote + 6) & 0xbfff))
+        return -ENOTSUP;
+    uint16_t total = be16(quote + 2), udp_length = be16(quote + 24);
+    if (total < 28 || udp_length != total - 20 ||
+        memcmp(ip + 16, quote + 12, 4))
+        return -EINVAL;
+    key->protocol = IPPROTO_UDP;
+    memcpy(key->local + 12, quote + 12, 4);
+    memcpy(key->remote + 12, quote + 16, 4);
+    key->local_port = be16(quote + 20);
+    key->remote_port = be16(quote + 22);
+    return 0;
+}
+
 static int parse_packet(const struct rte_mbuf *packet, uint64_t domain,
     enum ker_flow_direction direction, struct ker_flow_key *out)
 {
@@ -141,6 +176,12 @@ static int parse_packet(const struct rte_mbuf *packet, uint64_t domain,
         ip_header_length = 40;
     } else {
         return -ENOTSUP;
+    }
+    if (key.family == 4 && key.protocol == IPPROTO_ICMP) {
+        int error = quoted_udp_key(ip, ip_length, prefix_length - 14,
+            direction, &key);
+        if (!error) *out = key;
+        return error;
     }
     if (key.protocol != IPPROTO_TCP && key.protocol != IPPROTO_UDP)
         return -ENOTSUP;
