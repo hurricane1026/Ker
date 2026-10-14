@@ -11,12 +11,25 @@ struct skb_envelope {
     struct sk_buff skb;
     struct ker_skb_context *owner;
     struct rte_mbuf *backing;
+    uint64_t identity;
     const void *queue;
     unsigned int queued_charge;
 };
 static struct skb_envelope *envelope(struct sk_buff *skb)
 {
     return container_of(skb, struct skb_envelope, skb);
+}
+uint64_t ker_skb_identity(const struct sk_buff *skb)
+{
+    if (!skb) return 0;
+    const struct skb_envelope *desc = container_of(skb, struct skb_envelope, skb);
+    return desc->identity;
+}
+static int assign_identity(struct skb_envelope *desc)
+{
+    if (desc->owner->next_identity == UINT64_MAX) return -EOVERFLOW;
+    desc->identity = ++desc->owner->next_identity;
+    return 0;
 }
 static bool owner_active(struct ker_skb_context *ctx)
 {
@@ -154,6 +167,8 @@ int ker_skb_from_mbuf(struct ker_skb_context *ctx, struct rte_mbuf *packet, stru
     if (!desc)
         return -ENOMEM;
     desc->owner = ctx;
+    error = assign_identity(desc);
+    if (error) { kmem_cache_free(ctx->descriptors, desc); return error; }
     finalize(desc, packet, size);
     skb_reserve(&desc->skb, packet->data_off);
     skb_put(&desc->skb, packet->data_len);
@@ -269,6 +284,8 @@ int ker_skb_clone(struct sk_buff *skb, struct sk_buff **result)
     if (!dst)
         return -ENOMEM;
     dst->owner = src->owner;
+    error = assign_identity(dst);
+    if (error) { kmem_cache_free(src->owner->descriptors, dst); return error; }
     dst->backing = src->backing;
     *result = ker_linux_skb_clone_into(&dst->skb, skb);
     ++src->owner->live;
@@ -646,6 +663,8 @@ int ker_skb_native_queue_clone(struct sk_buff *skb, const void *queue, struct sk
     struct skb_envelope *dst = kmem_cache_zalloc(src->owner->descriptors, GFP_ATOMIC);
     if (!dst) return -ENOMEM;
     dst->owner = src->owner; dst->backing = src->backing;
+    int error = assign_identity(dst);
+    if (error) { kmem_cache_free(src->owner->descriptors, dst); return error; }
     *result = ker_linux_skb_clone_into(&dst->skb, skb);
     ++src->owner->live;
     return 0;

@@ -16,6 +16,7 @@
 
 static struct ker_udp_endpoint *current_endpoint(
     struct ker_udp_error_tracker *, struct ker_udp_endpoint_handle);
+static void tombstone(struct ker_udp_error_record *);
 
 static void flush_accepted(struct ker_udp_error_tracker *tracker,
                            uint64_t now) {
@@ -27,12 +28,22 @@ static void flush_accepted(struct ker_udp_error_tracker *tracker,
       continue;
     struct ker_udp_endpoint *endpoint =
         current_endpoint(tracker, record->endpoint);
-    if (!valid || !endpoint || endpoint->incarnation != record->incarnation) {
-      *record = (struct ker_udp_error_record){0};
+    if (!valid) {
+      uint64_t base = tracker->clock_started && now < tracker->last_now_ms
+                          ? tracker->last_now_ms : now;
+      tombstone(record);
+      record->expires_ms = base <= UINT64_MAX - tracker->lifetime_ms
+                               ? base + tracker->lifetime_ms : UINT64_MAX;
+      continue;
+    }
+    if (!endpoint || endpoint->incarnation != record->incarnation) {
+      tombstone(record);
+      record->expires_ms = now + tracker->lifetime_ms;
       continue;
     }
     record->state = KER_UDP_ERROR_SENT;
     record->skb = NULL;
+    record->skb_identity = 0;
     record->accepted_pending = false;
     record->expires_ms = now + tracker->lifetime_ms;
   }
@@ -346,7 +357,7 @@ static void tx_complete(const struct ker_tx_export_observer_note *note,
   for (size_t i = 0; i < tracker->record_capacity; ++i) {
     struct ker_udp_error_record *record = &tracker->records[i];
     if (record->state != KER_UDP_ERROR_RESERVED || record->accepted_pending ||
-        record->skb != note->skb ||
+        record->skb != note->skb || record->skb_identity != note->skb_identity ||
         record->monitor != peer->monitor ||
         record->local_address != local || record->peer_address != destination ||
         record->identification != identification || record->frag_off != frag_off ||
@@ -355,12 +366,6 @@ static void tx_complete(const struct ker_tx_export_observer_note *note,
         record->udp_length != udp_length ||
         record->udp_checksum != checksum)
       continue;
-    struct ker_udp_endpoint *endpoint =
-        current_endpoint(tracker, record->endpoint);
-    if (!endpoint || endpoint->incarnation != record->incarnation) {
-      *record = (struct ker_udp_error_record){0};
-      return;
-    }
     if (tracker->busy) {
       record->accepted_pending = true;
       return;
@@ -827,6 +832,7 @@ int ker_udp_error_publish(struct ker_udp_error_tracker *tracker,
   record->ip_length = (uint16_t)packet_length;
   record->udp_checksum = checksum;
   record->skb = skb;
+  record->skb_identity = ker_skb_identity(skb);
   return 0;
 }
 

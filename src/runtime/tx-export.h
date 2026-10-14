@@ -12,6 +12,7 @@ struct ker_tx_export_observer_note {
     size_t length;
     /* Valid only through the observer completion callback. */
     const struct sk_buff *skb;
+    uint64_t skb_identity;
 };
 struct ker_tx_export_observer;
 typedef int (*ker_tx_export_observer_prepare_fn)(

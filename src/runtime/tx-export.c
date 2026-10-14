@@ -195,6 +195,7 @@ int ker_tx_export_poll(void *arg, unsigned int budget)
              observer; observer = observer->next) {
             observer->note.length = 0;
             observer->note.skb = tx->pending;
+            observer->note.skb_identity = ker_skb_identity(tx->pending);
             rc = observer->prepare(copy, &observer->note, observer->arg);
             if (rc) {
                 ker_packet_free(copy);

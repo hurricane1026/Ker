@@ -6,12 +6,15 @@
 
 /* Private linear skb bridge. Context/pool objects must be zero initialized,
  * remain at stable addresses and outlive all their descriptors. Only the
- * owning EAL worker may access this context and its skb objects. */
+ * owning EAL worker may access this context and its skb objects. The identity
+ * counter is per-context; cleanup is blocked while descriptors or protocol
+ * users can retain identity-bearing pointers. */
 struct ker_skb_context {
     struct kmem_cache *descriptors;
     struct ker_packet_pool *packets;
     unsigned int lcore;
     size_t live;
+    uint64_t next_identity;
     unsigned int address_live; /* IPv4 address views pin the context */
     unsigned int queue_live; /* initialized bounded queues pin the context */
     unsigned int receive_live; /* protocol runtimes pin the context */
@@ -32,6 +35,10 @@ int ker_skb_copy_from_mbuf_chain(struct ker_skb_context *ctx,
     const struct rte_mbuf *chain, unsigned int headroom, struct sk_buff **result);
 /* Validate a bridge skb and its owning context without taking a reference. */
 int ker_skb_validate(struct sk_buff *skb, struct ker_skb_context *ctx);
+/* Stable identity for a live Ker descriptor, including while queued. This
+ * accessor cannot validate arbitrary or freed pointers. Zero means no
+ * identity was assigned. */
+uint64_t ker_skb_identity(const struct sk_buff *skb);
 /* Queued descriptors reject validate/get/free/clone/export and mutation with
  * EBUSY until dequeued. Raw native fields must not be changed while queued. */
 int ker_skb_get(struct sk_buff *skb);

@@ -38,6 +38,7 @@ struct ker_udp_error_record {
   struct ker_neighbor_monitor *monitor;
   uint64_t token, sequence, incarnation, expires_ms;
   struct sk_buff *skb;
+  uint64_t skb_identity;
   __be32 local_address, peer_address;
   __be16 local_port, peer_port, identification, frag_off;
   uint16_t ip_length;

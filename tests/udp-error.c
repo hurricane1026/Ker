@@ -252,7 +252,8 @@ int main(void)
   CHECK(clock_tx_result == 2 && records[0].state == KER_UDP_ERROR_SENT &&
         records[1].state == KER_UDP_ERROR_SENT &&
         !records[0].accepted_pending && !records[0].skb &&
-        !records[1].accepted_pending && !records[1].skb);
+        !records[0].skb_identity && !records[1].accepted_pending &&
+        !records[1].skb && !records[1].skb_identity);
   CHECK(records[0].state == KER_UDP_ERROR_SENT);
 
   unsigned char altered[28];
@@ -298,33 +299,63 @@ int main(void)
   CHECK(reuse_token.identification != consumed_id);
   CHECK(ker_udp_error_cancel(&errors, reuse_token) == 0);
 
-  /* An identical wire packet queued ahead of the tracked skb cannot claim its
-   * reservation, even though the caller can reproduce every quoted field. */
+  /* Recycled descriptor addresses cannot claim a dropped reservation. */
   CHECK(ker_udp_send(&channel, payload, sizeof(payload)) == 0);
   struct sk_buff *tracked = NULL, *spoof = NULL;
   CHECK(ker_tx_export_cancel(&tx, &tracked) == 1 && tracked);
+  uint64_t tracked_identity = ker_skb_identity(tracked);
   struct rte_mbuf *duplicate = NULL;
   CHECK(ker_skb_to_mbuf(tracked, &duplicate) == 0 && duplicate);
-  CHECK(ker_skb_copy_from_mbuf_chain(&context, duplicate,
-      skb_headroom(tracked), &spoof) == 0 && spoof);
-  ker_packet_free(duplicate);
   struct ker_udp_error_record *tracked_record = NULL;
   for (size_t i = 0; i < 8; ++i)
-    if (records[i].state == KER_UDP_ERROR_RESERVED && records[i].skb == tracked)
+    if (records[i].state == KER_UDP_ERROR_RESERVED && records[i].skb == tracked &&
+        records[i].skb_identity == tracked_identity)
       tracked_record = &records[i];
   CHECK(tracked_record);
+  CHECK(ker_skb_free(tracked) == 0);
+  tracked = NULL;
+  CHECK(ker_skb_copy_from_mbuf_chain(&context, duplicate, 0, &spoof) == 0 && spoof);
+  for (unsigned int i = 0; spoof != tracked_record->skb && i < 64; ++i) {
+    CHECK(ker_skb_free(spoof) == 0);
+    spoof = NULL;
+    CHECK(ker_skb_copy_from_mbuf_chain(&context, duplicate, 0, &spoof) == 0 && spoof);
+  }
+  ker_packet_free(duplicate);
+  CHECK(spoof == tracked_record->skb &&
+        ker_skb_identity(spoof) != tracked_record->skb_identity);
   CHECK(ker_tx_export_enqueue(&tx, &spoof) == 0 && !spoof);
-  CHECK(ker_tx_export_enqueue(&tx, &tracked) == 0 && !tracked);
   CHECK(ker_tx_export_poll(&tx, 1) == 1 && sent_packet);
   CHECK(tracked_record->state == KER_UDP_ERROR_RESERVED &&
         !tracked_record->accepted_pending);
   ker_packet_free(sent_packet);
   sent_packet = NULL;
+  CHECK(ker_udp_error_resync(&errors) == 0);
+
+  /* An accepted packet from a stale endpoint incarnation retains its ID. */
+  CHECK(ker_udp_send(&channel, payload, sizeof(payload)) == 0);
+  struct ker_udp_error_record *stale_accepted = NULL;
+  for (size_t i = 0; i < 8; ++i)
+    if (records[i].state == KER_UDP_ERROR_RESERVED && records[i].skb)
+      stale_accepted = &records[i];
+  CHECK(stale_accepted);
+  __be16 stale_accepted_id = stale_accepted->identification;
+  CHECK(ker_udp_endpoint_disconnect(&endpoints, handle) == 0);
+  CHECK(ker_udp_endpoint_connect(&endpoints, handle, peer_ip, peer_port) == 0);
   CHECK(ker_tx_export_poll(&tx, 1) == 1 && sent_packet);
-  CHECK(tracked_record->state == KER_UDP_ERROR_SENT &&
-        !tracked_record->skb && !tracked_record->accepted_pending);
+  CHECK(stale_accepted->state == KER_UDP_ERROR_TOMBSTONE &&
+        stale_accepted->identification == stale_accepted_id && !stale_accepted->monitor &&
+        !stale_accepted->endpoint.table && !stale_accepted->skb);
+  uint64_t stale_expiry = stale_accepted->expires_ms;
+  CHECK(stale_expiry == now_ms + errors.lifetime_ms);
+  errors.next_identification = ntohs(stale_accepted_id);
+  struct ker_udp_error_token stale_reuse = {0};
+  CHECK(ker_udp_error_reserve(&errors, channel.endpoint, &monitor, local_ip,
+      local_port, peer_ip, peer_port, sizeof(payload), &stale_reuse) == 0);
+  CHECK(stale_reuse.identification != stale_accepted_id);
+  CHECK(ker_udp_error_cancel(&errors, stale_reuse) == 0);
   ker_packet_free(sent_packet);
   sent_packet = NULL;
+  CHECK(ker_udp_error_resync(&errors) == 0);
 
   /* Events already queued for an old connection incarnation are discarded. */
   CHECK(ker_udp_sendto(&channel, peer_ip, rte_cpu_to_be_16(4322), payload,
@@ -483,7 +514,8 @@ int main(void)
   CHECK(rollback_slot < 8);
   uint64_t before_rollback = now_ms;
   CHECK(ker_tx_export_poll(&tx, 1) == 1 && sent_packet);
-  CHECK(records[rollback_slot].state == KER_UDP_ERROR_FREE);
+  CHECK(records[rollback_slot].state == KER_UDP_ERROR_TOMBSTONE &&
+        records[rollback_slot].expires_ms >= before_rollback);
   ker_packet_free(sent_packet);
   sent_packet = NULL;
   now_ms = before_rollback;
@@ -496,7 +528,8 @@ int main(void)
     ++overflow_slot;
   CHECK(overflow_slot < 8);
   CHECK(ker_tx_export_poll(&tx, 1) == 1 && sent_packet);
-  CHECK(records[overflow_slot].state == KER_UDP_ERROR_FREE);
+  CHECK(records[overflow_slot].state == KER_UDP_ERROR_TOMBSTONE &&
+        records[overflow_slot].expires_ms == UINT64_MAX);
   ker_packet_free(sent_packet);
   sent_packet = NULL;
 
@@ -541,7 +574,7 @@ int main(void)
   CHECK(ker_udp_io_detach_error_tracker(&io) == 0);
   CHECK(ker_udp_error_tracker_cleanup(&errors) == -EBUSY);
   CHECK(stale_record->state == KER_UDP_ERROR_TOMBSTONE);
-  now_ms = stale_record->expires_ms;
+  now_ms = UINT64_MAX; /* Includes the fail-closed overflow tombstone. */
   CHECK(ker_udp_error_tracker_cleanup(&errors) == 0);
   CHECK(ker_udp_io_cleanup(&io) == 0);
   CHECK(ker_udp_endpoint_table_disable(&endpoints) == 0);
