@@ -224,6 +224,19 @@ int main(void)
   CHECK(errors.io_refs == 2);
   CHECK(ker_udp_error_tracker_cleanup(&errors) == -EBUSY);
   CHECK(ker_udp_io_register_peer(&io, &monitor) == 0);
+  unsigned int monitor_adapter_refs = monitor.udp_adapter_refs;
+  monitor.udp_adapter_refs = UINT_MAX;
+  CHECK(ker_udp_io_register_peer(&idle_io, &monitor) == -EOVERFLOW);
+  CHECK(idle_io.peer_count == 0 && errors.peers[0].registration_refs == 1);
+  monitor.udp_adapter_refs = monitor_adapter_refs;
+  errors.peers[0].registration_refs = UINT_MAX;
+  CHECK(ker_udp_io_register_peer(&idle_io, &monitor) == -EOVERFLOW);
+  CHECK(idle_io.peer_count == 0 && errors.peers[0].registration_refs == UINT_MAX &&
+        monitor.udp_adapter_refs == monitor_adapter_refs);
+  errors.peers[0].registration_refs = 1;
+  CHECK(ker_udp_io_register_peer(&idle_io, &monitor) == 0);
+  CHECK(errors.peers[0].registration_refs == 2 &&
+        monitor.udp_adapter_refs == monitor_adapter_refs + 1);
   CHECK(ker_neighbor_monitor_resolution_disable(&monitor) == -EBUSY);
   CHECK(ker_neighbor_add(&table, second_peer_ip, peer_mac) == 0);
   CHECK(ker_neighbor_monitor_init(&second_monitor, &table, &timer_runtime,
@@ -241,6 +254,11 @@ int main(void)
   CHECK(ker_udp_endpoint_connect(&endpoints, handle, peer_ip, peer_port) == 0);
   CHECK(ker_udp_channel_attach_errors(&channel, queue_events, 2) == 0);
   CHECK(ker_udp_io_detach_error_tracker(&io) == -EBUSY);
+  CHECK(ker_udp_io_unregister_peer(&idle_io, &monitor) == 0 &&
+        errors.peers[0].registration_refs == 1 &&
+        monitor.udp_adapter_refs == monitor_adapter_refs &&
+        errors.peers[0].pmtu.attached &&
+        errors.peers[0].tx_observer.attached);
   CHECK(ker_udp_io_detach_error_tracker(&idle_io) == 0 && errors.io_refs == 1 &&
         errors.peer_count == 2 && errors.queue_count == 1);
   CHECK(ker_udp_io_detach_error_tracker(&idle_io) == -ENOENT);
@@ -258,22 +276,28 @@ int main(void)
   CHECK(records[0].state == KER_UDP_ERROR_RESERVED);
   unsigned char quote[28];
   memcpy(quote, tx.pending->data + ETH_HLEN, sizeof(quote));
+  trigger_tx_reentry = true;
   dispatch_error(quote, sizeof(quote), 3, 3, 0);
   struct ker_udp_error_event event;
   CHECK(ker_udp_channel_recv_error(&channel, &event) == 0 &&
-        legacy_events == 1);
+        legacy_events == 1 && records[0].state == KER_UDP_ERROR_SENT &&
+        clock_tx_result == 1);
+  dispatch_error(quote, sizeof(quote), 3, 3, 0);
+  CHECK(ker_udp_channel_recv_error(&channel, &event) == 1 &&
+        event.error == ECONNREFUSED);
+  CHECK(ker_udp_send(&channel, payload, sizeof(payload)) == 0);
   CHECK(ker_udp_send(&channel, payload, sizeof(payload)) == 0);
   trigger_tx_reentry = true;
   struct ker_udp_error_token reentry_token = {0};
   CHECK(ker_udp_error_reserve(&errors, channel.endpoint, &monitor, local_ip,
       local_port, peer_ip, peer_port, sizeof(payload), &reentry_token) == 0);
   CHECK(ker_udp_error_cancel(&errors, reentry_token) == 0);
-  CHECK(clock_tx_result == 2 && records[0].state == KER_UDP_ERROR_SENT &&
+  CHECK(clock_tx_result == 2 && records[0].state == KER_UDP_ERROR_TOMBSTONE &&
         records[1].state == KER_UDP_ERROR_SENT &&
-        !records[0].accepted_pending && !records[0].skb &&
-        !records[0].skb_identity && !records[1].accepted_pending &&
-        !records[1].skb && !records[1].skb_identity);
-  CHECK(records[0].state == KER_UDP_ERROR_SENT);
+        !records[1].accepted_pending && !records[1].skb &&
+        !records[1].skb_identity && records[2].state == KER_UDP_ERROR_SENT &&
+        !records[2].accepted_pending && !records[2].skb &&
+        !records[2].skb_identity);
 
   unsigned char altered[28];
   memcpy(altered, quote, sizeof(altered));
@@ -302,8 +326,6 @@ int main(void)
   dispatch_error(altered, sizeof(altered), 3, 3, 0);
   dispatch_error(quote, sizeof(quote) - 1, 3, 3, 0);
   CHECK(channel.error_queue.count == 0);
-  dispatch_error(quote, sizeof(quote), 3, 3, 0);
-  CHECK(ker_udp_channel_recv_error(&channel, &event) == 1);
   CHECK(event.error == ECONNREFUSED && event.type == 3 && event.code == 3 &&
       event.local_address == local_ip && event.peer_address == peer_ip &&
       event.reporter_address == router_ip && event.local_port == local_port &&
@@ -587,6 +609,7 @@ int main(void)
   sent_packet = NULL;
   CHECK(ker_udp_channel_close(&channel) == 0);
   CHECK(ker_udp_io_unregister_peer(&io, &monitor) == 0);
+  CHECK(monitor.udp_adapter_refs == 0);
   CHECK(stale_record->state == KER_UDP_ERROR_TOMBSTONE &&
         stale_record->identification == stale_id && !stale_record->monitor &&
         !stale_record->endpoint.table);

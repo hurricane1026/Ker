@@ -50,6 +50,8 @@ struct ker_udp_error_tracker;
 struct ker_udp_error_peer {
   struct ker_udp_error_tracker *tracker;
   struct ker_neighbor_monitor *monitor;
+  /* IO registrations sharing this monitor within the tracker. */
+  unsigned int registration_refs;
   struct ker_icmpv4_pmtu pmtu;
   struct ker_tx_export_observer tx_observer;
   unsigned int callback_pins;
@@ -91,6 +93,8 @@ int ker_udp_error_tracker_init(
 int ker_udp_error_tracker_cleanup(struct ker_udp_error_tracker *);
 int ker_udp_error_peer_register(struct ker_udp_error_tracker *,
                                 struct ker_neighbor_monitor *);
+bool ker_udp_error_peer_registered(const struct ker_udp_error_tracker *,
+                                  const struct ker_neighbor_monitor *);
 int ker_udp_error_peer_unregister(struct ker_udp_error_tracker *,
                                   struct ker_neighbor_monitor *);
 

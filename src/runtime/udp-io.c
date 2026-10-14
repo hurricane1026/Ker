@@ -244,7 +244,9 @@ int ker_udp_io_register_peer(struct ker_udp_io *io,
   if (!valid_peer_address(monitor, address) ||
       ker_ipv4_address_is_local(monitor->table->address, address) != 0)
     return -EHOSTUNREACH;
-  unsigned int required_refs = io->error_tracker ? 2U : 1U;
+  unsigned int required_refs =
+      io->error_tracker && !ker_udp_error_peer_registered(io->error_tracker,
+                                                          monitor) ? 2U : 1U;
   if (monitor->udp_adapter_refs > UINT_MAX - required_refs)
     return -EOVERFLOW;
   for (size_t i = 0; i < io->peer_capacity; ++i) {

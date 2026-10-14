@@ -143,6 +143,19 @@ static struct ker_udp_error_peer *find_peer(
   return NULL;
 }
 
+bool ker_udp_error_peer_registered(
+    const struct ker_udp_error_tracker *tracker,
+    const struct ker_neighbor_monitor *monitor) {
+  if (!tracker || !monitor)
+    return false;
+  for (size_t i = 0; i < tracker->peer_capacity; ++i)
+    if (tracker->peers[i].tracker == tracker &&
+        tracker->peers[i].monitor == monitor &&
+        tracker->peers[i].registration_refs)
+      return true;
+  return false;
+}
+
 static struct ker_udp_error_record *record_for_token(
     struct ker_udp_error_tracker *tracker, struct ker_udp_error_token token) {
   if (token.tracker != tracker || token.slot >= tracker->record_capacity ||
@@ -266,25 +279,46 @@ static int observe_control(const struct ker_icmpv4_control_event *event,
   else
     return 0;
 
-  int error = read_now(tracker, &(uint64_t){0});
-  if (error)
-    return error;
-  expire_sent(tracker, tracker->last_now_ms);
-  tracker->busy = true;
-  struct ker_udp_error_record *matched = NULL;
+  size_t eligible_slot = tracker->record_capacity;
+  uint64_t eligible_token = 0, eligible_sequence = 0;
+  struct ker_udp_endpoint_handle eligible_endpoint = {0};
+  uint64_t eligible_incarnation = 0;
   for (size_t i = 0; i < tracker->record_capacity; ++i) {
     struct ker_udp_error_record *record = &tracker->records[i];
     if (record->state != KER_UDP_ERROR_SENT ||
         !record_matches_quote(record, &event->quote))
       continue;
+    eligible_slot = i;
+    eligible_token = record->token;
+    eligible_sequence = record->sequence;
+    eligible_endpoint = record->endpoint;
+    eligible_incarnation = record->incarnation;
+    break;
+  }
+
+  int error = read_now(tracker, &(uint64_t){0});
+  if (error)
+    return error;
+  expire_sent(tracker, tracker->last_now_ms);
+  if (eligible_slot == tracker->record_capacity)
+    return 0;
+  tracker->busy = true;
+  struct ker_udp_error_record *matched = NULL;
+  struct ker_udp_error_record *record = &tracker->records[eligible_slot];
+  if (record->state == KER_UDP_ERROR_SENT && record->token == eligible_token &&
+      record->sequence == eligible_sequence &&
+      record->endpoint.table == eligible_endpoint.table &&
+      record->endpoint.slot == eligible_endpoint.slot &&
+      record->endpoint.generation == eligible_endpoint.generation &&
+      record->incarnation == eligible_incarnation &&
+      tracker->last_now_ms < record->expires_ms &&
+      record_matches_quote(record, &event->quote)) {
     struct ker_udp_endpoint *endpoint =
         current_endpoint(tracker, record->endpoint);
-    if (!endpoint || endpoint->incarnation != record->incarnation) {
+    if (!endpoint || endpoint->incarnation != record->incarnation)
       tombstone(record);
-      continue;
-    }
-    matched = record;
-    break;
+    else
+      matched = record;
   }
   if (!matched) {
     tracker->busy = false;
@@ -513,6 +547,19 @@ int ker_udp_error_peer_register(struct ker_udp_error_tracker *tracker,
   if (monitor->table->lcore !=
       tracker->service->receiver->handler.runtime->lcore)
     return -EXDEV;
+  struct ker_udp_error_peer *peer = find_peer(tracker, monitor);
+  if (peer) {
+    if (peer->registration_refs == UINT_MAX)
+      return -EOVERFLOW;
+    if (monitor->busy || monitor->timer.running || monitor->timer.scoping ||
+        !monitor->timer.runtime || monitor->timer.runtime->polling ||
+        monitor->resolution_tx->polling ||
+        monitor->output_mtu_ctx != &peer->pmtu || !peer->pmtu.attached ||
+        !peer->tx_observer.attached)
+      return -EBUSY;
+    ++peer->registration_refs;
+    return 0;
+  }
   if (monitor->udp_adapter_refs == UINT_MAX)
     return -EOVERFLOW;
   if (monitor->busy || monitor->timer.running || monitor->timer.scoping ||
@@ -520,11 +567,9 @@ int ker_udp_error_peer_register(struct ker_udp_error_tracker *tracker,
       monitor->resolution_tx->polling || monitor->output_mtu ||
       monitor->output_mtu_ctx)
     return -EBUSY;
-  if (find_peer(tracker, monitor))
-    return -EALREADY;
   if (tracker->peer_count == tracker->peer_capacity)
     return -ENOSPC;
-  struct ker_udp_error_peer *peer = NULL;
+  peer = NULL;
   for (size_t i = 0; i < tracker->peer_capacity; ++i)
     if (!tracker->peers[i].monitor) {
       peer = &tracker->peers[i];
@@ -534,6 +579,7 @@ int ker_udp_error_peer_register(struct ker_udp_error_tracker *tracker,
     return -ENOSPC;
   peer->tracker = tracker;
   peer->monitor = monitor;
+  peer->registration_refs = 1;
   ++monitor->udp_adapter_refs;
   error = ker_icmpv4_pmtu_init(&peer->pmtu, monitor,
       monitor->entry->dev->mtu, tracker->lifetime_ms, error_clock, tracker,
@@ -597,6 +643,10 @@ int ker_udp_error_peer_unregister(struct ker_udp_error_tracker *tracker,
     return -EBUSY;
   if (!monitor->udp_adapter_refs)
     return -EINVAL;
+  if (peer->registration_refs > 1) {
+    --peer->registration_refs;
+    return 0;
+  }
   uint64_t now;
   error = read_now(tracker, &now);
   if (error)
