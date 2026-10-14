@@ -30,9 +30,10 @@ Valid peer RST and successfully admitted explicit abort discard unread bytes.
 FIN/data+FIN at the contiguous receive boundary (including old overlap) takes
 an explicit unsupported RST path without retaining that segment's payload;
 failed reset admission preserves existing data and state for retransmission.
-There is no graceful EOF, sending API, congestion control, window scaling,
+There is no graceful EOF, congestion control, window scaling,
 SACK, timestamp negotiation or public socket capability in this batch. This is
-an incremental receive-only fixed-peer adapter, not a complete TCP stack.
+an incremental fixed-peer adapter, not a complete TCP stack. Optional sending
+is described in [bounded active TCP sending](tcp-send-stream.md).
 Upstream Linux and DPDK sources remain unchanged.
 
 `tcp-stream` validates wire ACK/window values, sequence wrap, duplicate and
