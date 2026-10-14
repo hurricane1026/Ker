@@ -207,8 +207,7 @@ int ker_udp_io_detach_error_tracker(struct ker_udp_io *io) {
     return -ENOENT;
   if (tracker->busy)
     return -EBUSY;
-  if (io->peer_count || io->open_channels || tracker->peer_count ||
-      tracker->queue_count)
+  if (io->peer_count || io->open_channels)
     return -EBUSY;
   if (!tracker->io_refs)
     return -EINVAL;

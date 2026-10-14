@@ -38,6 +38,8 @@ static struct ker_udp_error_peer peers[2];
 static struct ker_udp_error_event queue_events[2];
 static struct ker_udp_io io;
 static struct ker_udp_io_peer io_peers[2];
+static struct ker_udp_io idle_io;
+static struct ker_udp_io_peer idle_io_peers[1];
 static struct ker_udp_channel channel;
 static struct ker_udp_channel_slot channel_slots[2];
 static unsigned char channel_payloads[2 * 64];
@@ -216,6 +218,10 @@ int main(void)
   CHECK(ker_udp_io_init(&io, &receiver, &service, &endpoints, io_peers, 2,
                         64) == 0);
   CHECK(ker_udp_io_attach_error_tracker(&io, &errors) == 0);
+  CHECK(ker_udp_io_init(&idle_io, &receiver, &service, &endpoints,
+      idle_io_peers, 1, 64) == 0);
+  CHECK(ker_udp_io_attach_error_tracker(&idle_io, &errors) == 0);
+  CHECK(errors.io_refs == 2);
   CHECK(ker_udp_error_tracker_cleanup(&errors) == -EBUSY);
   CHECK(ker_udp_io_register_peer(&io, &monitor) == 0);
   CHECK(ker_neighbor_monitor_resolution_disable(&monitor) == -EBUSY);
@@ -234,6 +240,11 @@ int main(void)
   active_handle = handle;
   CHECK(ker_udp_endpoint_connect(&endpoints, handle, peer_ip, peer_port) == 0);
   CHECK(ker_udp_channel_attach_errors(&channel, queue_events, 2) == 0);
+  CHECK(ker_udp_io_detach_error_tracker(&io) == -EBUSY);
+  CHECK(ker_udp_io_detach_error_tracker(&idle_io) == 0 && errors.io_refs == 1 &&
+        errors.peer_count == 2 && errors.queue_count == 1);
+  CHECK(ker_udp_io_detach_error_tracker(&idle_io) == -ENOENT);
+  CHECK(ker_udp_io_cleanup(&idle_io) == 0);
 
   unsigned char payload[16] = {0};
   const unsigned char *wire = NULL;
