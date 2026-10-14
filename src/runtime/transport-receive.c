@@ -44,6 +44,9 @@ static int transport_receive(struct sk_buff *skb,
     error = ker_tcp_packet_view_init(context, skb, &message.packet.tcp);
     break;
   default:
+    if (receiver->unsupported_protocol_receive)
+      receiver->unsupported_protocol_receive(receiver->icmpv4_service, skb,
+                                               &ip, ip.header[9]);
     error = -EPROTONOSUPPORT;
     break;
   }

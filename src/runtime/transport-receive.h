@@ -34,6 +34,8 @@ typedef int (*ker_transport_receive_fn)(const struct ker_transport_message *,
                                         void *);
 typedef int (*ker_transport_service_receive_fn)(
     void *, struct sk_buff *, const struct ker_transport_message *);
+typedef void (*ker_transport_unsupported_protocol_fn)(
+    void *, struct sk_buff *, const struct ker_ipv4_packet_view *, uint8_t);
 /* Private service-hook result: negative drops, zero passes to the application,
  * positive marks the message handled and suppresses application delivery. */
 struct ker_transport_receiver {
@@ -45,6 +47,7 @@ struct ker_transport_receiver {
   ker_transport_service_receive_fn echo_service_receive;
   struct ker_icmpv4_service *icmpv4_service;
   ker_transport_service_receive_fn icmpv4_service_receive;
+  ker_transport_unsupported_protocol_fn unsupported_protocol_receive;
   struct ker_udp_endpoint_table *udp_endpoint_table;
   ker_transport_service_receive_fn udp_endpoint_receive;
   bool generic_icmpv4_enabled;

@@ -93,6 +93,34 @@ receiver unregister。先解除全部绑定，再关闭表和它的依赖对象�
 邻居输出，但不宣称已经导入依赖 socket、route、XFRM 和 netfilter 的完整
 `udp_rcv`。
 
+## 显式声明不可用的 IPv4 协议
+
+服务配置中的 `unavailable_protocols` 是复制到 worker-local service 的
+256-bit bitmap。第 `p / 8` 字节的 `1U << (p % 8)` 对应协议号 `p`；
+默认全零，不对未知协议自动发送错误。应用必须确认自己不提供该协议，
+再显式声明。已有 ICMP、TCP、UDP（1、6、17）不能被声明为不可用，enable
+返回 `-EINVAL` 且不改变绑定。启用后的配置保持固定；改变声明需先关闭
+服务，再用新配置启用。
+
+receiver 完成 IPv4 长度和 checksum 校验后，仅在没有相应 transport
+解析路径时调用协议不可用 hook。自动响应要求本地单播、IHL 20、TTL 非零、
+无 reserved/MF/offset（DF 允许），并继续应用已有 ICMP 错误发送的源地址、
+MAC、显式 peer、速率、MTU 和资源限制。发送的是 type 3/code 2，引用实际
+原始 IP 报文。原始数据报仍然丢弃，receiver 保留
+`validation_error = -EPROTONOSUPPORT`；服务的 `last_error` 描述错误输出
+是否成功，输出失败不会使报文进入通用回调。
+
+如果 runtime 的全局或本设备链上还有其他匹配的 `ETH_P_IP` handler，
+自动错误会被抑制，避免与 raw/custom consumer 冲突。这个检查不能只看 skb
+引用计数：fanout 前面的 consumer 释放引用后，最后一个 handler 可能重新
+拥有唯一引用。其他设备或非 IPv4 handler 不会阻止本设备的回复。
+
+这里实现的是显式受限的协议可用性声明，不是 Linux 全局 `inet_protos`、
+raw socket 或 XFRM 策略。固定 Linux `net/ipv4/ip_input.c` 的
+`ip_protocol_deliver_rcu` 在协议与 raw consumer 均缺失时发送 protocol
+unreachable；Ker 没有用成功 stub 导入这些依赖。TCP/UDP 校验失败、应用
+主动丢包、未知 ICMP type 都不会因此被转成 code 2。
+
 ## PMTU 的实际作用
 
 零初始化 `ker_icmpv4_pmtu`，为一个显式 peer 绑定初始 MTU、有效期、单调

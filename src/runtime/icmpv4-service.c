@@ -7,6 +7,7 @@
 #include <limits.h>
 #include <linux/if.h>
 #include <linux/irqflags.h>
+#include <linux/container_of.h>
 #include <string.h>
 
 static void inc(uint64_t *v) {
@@ -98,6 +99,61 @@ static int output(struct ker_icmpv4_service *s, struct sk_buff **slot) {
   if (*slot)
     BUG_ON(ker_skb_free(*slot));
   return e;
+}
+
+static bool unavailable_protocol_selected(
+    const struct ker_icmpv4_service_config *config, uint8_t protocol) {
+  return (config->unavailable_protocols[protocol / 8] &
+          (uint8_t)(1U << (protocol % 8))) != 0;
+}
+
+static bool competing_ip_handler(const struct ker_transport_receiver *receiver) {
+  const struct ker_receive_runtime *runtime = receiver->handler.runtime;
+  const struct list_head *head =
+      &runtime->protocols[ETH_P_IP & PTYPE_HASH_MASK];
+  const struct list_head *node;
+  for (node = head->next; node != head; node = node->next) {
+    const struct packet_type *packet =
+        container_of(node, struct packet_type, list);
+    if (packet != &receiver->handler.native &&
+        packet->type == rte_cpu_to_be_16(ETH_P_IP) &&
+        (!packet->dev || packet->dev == receiver->handler.device->native))
+      return true;
+  }
+  head = &receiver->handler.device->native->ptype_specific;
+  for (node = head->next; node != head; node = node->next) {
+    const struct packet_type *packet =
+        container_of(node, struct packet_type, list);
+    if (packet != &receiver->handler.native &&
+        packet->type == rte_cpu_to_be_16(ETH_P_IP) &&
+        packet->dev == receiver->handler.device->native)
+      return true;
+  }
+  return false;
+}
+
+static void unsupported_protocol_receive(
+    void *opaque, struct sk_buff *skb, const struct ker_ipv4_packet_view *ip,
+    uint8_t protocol) {
+  struct ker_icmpv4_service *s = opaque;
+  if (!s || !ip || protocol == 1 || protocol == 6 || protocol == 17 ||
+      !unavailable_protocol_selected(&s->config, protocol))
+    return;
+  uint16_t fragment = ntohs(ip->frag_off);
+  if (ip->header_length != 20 || !ip->header[8] ||
+      (fragment & (0x8000U | 0x2000U | 0x1fffU))) {
+    inc(&s->suppressed);
+    s->last_error = -ENOTSUP;
+    return;
+  }
+  if (competing_ip_handler(s->receiver)) {
+    inc(&s->suppressed);
+    s->last_error = -EOPNOTSUPP;
+    return;
+  }
+  int error = ker_icmpv4_service_emit_error(s, skb, 3, 2, 0);
+  if (error)
+    s->last_error = error;
 }
 
 static int common_checks(struct ker_icmpv4_service *s, struct sk_buff *skb,
@@ -388,6 +444,10 @@ int ker_icmpv4_service_enable(struct ker_icmpv4_service *s,
   if (!s || !r || !m || !c || !c->ttl || !c->burst || !c->refill_ms ||
       !c->monotonic_ms || (c->timestamp_enabled && !c->utc_ms))
     return -EINVAL;
+  if (unavailable_protocol_selected(c, 1) ||
+      unavailable_protocol_selected(c, 6) ||
+      unavailable_protocol_selected(c, 17))
+    return -EINVAL;
   if (s->receiver || s->monitor)
     return -EALREADY;
   if (!r->handler.registered || r->echo_service || r->icmpv4_service ||
@@ -414,6 +474,7 @@ int ker_icmpv4_service_enable(struct ker_icmpv4_service *s,
       .receiver = r, .monitor = m, .config = *c, .tokens = c->burst};
   r->icmpv4_service = s;
   r->icmpv4_service_receive = service_receive;
+  r->unsupported_protocol_receive = unsupported_protocol_receive;
   ++m->echo_service_refs;
   return 0;
 }
@@ -435,6 +496,7 @@ int ker_icmpv4_service_disable(struct ker_icmpv4_service *s) {
     return -EBUSY;
   r->icmpv4_service = NULL;
   r->icmpv4_service_receive = NULL;
+  r->unsupported_protocol_receive = NULL;
   --m->echo_service_refs;
   *s = (struct ker_icmpv4_service){0};
   return 0;
