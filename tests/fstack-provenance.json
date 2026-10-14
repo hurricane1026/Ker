@@ -371,6 +371,19 @@
       "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
       "source_case": "test_ff_dpdk_if_send_udp_csum",
       "adaptation": "Ker-specific asynchronous UDP error extension. Real UDP construction, neighbor output, TX copy/sink acceptance and ICMP receive dispatch establish exact quoted IPv4/UDP evidence. Bounded RESERVED/SENT records reject unsent, forged, stale-generation and stale-incarnation errors; per-channel queues expose copied errno/tuple/reporter/MTU data. Tests cover alternate peers, PMTU reduction and expiry, error-queue bounds, reservation recovery and callback/lifetime failures. Sink acceptance is application-level evidence, not NIC completion or peer delivery; this is not a F-Stack upstream socket/ICMP test and does not provide cryptographic ICMP authentication."
+    },
+    "flow-icmpv4": {
+      "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
+      "source_case": "test_ff_dpdk_if_send_multiseg",
+      "adaptation": "Ker-specific UDP control-flow steering extension: ICMPv4 errors quote an outbound UDP tuple which must resolve to the same flow owner as its response. Real segmented DPDK chains cover every header split, truncated quotes, declared lengths, Ethernet padding, unsupported options/fragments/protocols, wrong quoted local address and ingress-only direction. Steering does not authenticate ICMP or validate checksums; those remain the owner receiver and sent-evidence tracker responsibilities. This is not a F-Stack upstream ICMP test, NIC/RSS, TCP or IPv6 control-plane implementation."
+    },
+    "udp-flow": {
+      "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
+      "source_case": [
+        "test_ff_dpdk_if_send_udp_csum",
+        "test_ff_dpdk_if_send_multiseg"
+      ],
+      "adaptation": "Ker-specific bounded IPv4 UDP proxy composition over two pinned CPUs with distinct packet pools and real flow inboxes. Client and upstream application endpoints share one configured IPv4 peer with separate UDP ports; the proxy runs on the other CPU. Tests use actual UDP I/O, native first-contact ARP discovery and explicit ARP control delivery, owner-matching ephemeral ports, request forwarding, reversed-tuple response steering, reordered replies, deterministic RX queue pressure and cleanup. A real sink-accepted upstream datagram supplies an ICMP quote that traverses the flow inbox to the proxy error queue, applies MTU 576, and rejects a subsequent oversized send. This is not a F-Stack socket test, general multi-worker ARP distribution, NIC/RSS, IPv6, multicast or fragment reassembly."
     }
   }
 }

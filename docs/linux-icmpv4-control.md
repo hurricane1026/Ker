@@ -122,7 +122,7 @@ generation。计数溢出返回 `-EOVERFLOW`，不修改端点。调用者重置
 注册期间 monitor 以及 endpoint table 被适配层 pin；close 丢弃排队 RX，
 但不撤回已进入邻居/TX 的独立报文。已提交 TX 不引用 channel 存储。
 
-错误关联通过可选 tracker 接入；跨 worker proxy 的端到端集成由后续独立批次验证。
+错误关联通过可选 tracker 接入；跨 worker proxy 的组合方式与验证边界见 [UDP 代理适配](udp-proxy.md)。
 
 ## 显式声明不可用的 IPv4 协议
 

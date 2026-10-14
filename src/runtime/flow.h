@@ -70,7 +70,10 @@ struct ker_flow_context {
 /* Parse a validated linear or segmented Ethernet packet without changing it.
  * The key is written only on success; chained bytes are read through a bounded
  * prefix sized for Ethernet, the maximum IPv4 header and minimum TCP header,
- * after the full segment topology and length sum are checked. */
+ * after the full segment topology and length sum are checked. Ingress ICMPv4
+ * errors (3/11/12) quoting the supported no-options, unfragmented IPv4 UDP
+ * profile resolve the original outbound UDP tuple. This is steering, not
+ * checksum validation or authorization to apply an asynchronous error. */
 int ker_flow_parse(const struct rte_mbuf *packet, uint64_t domain,
     enum ker_flow_direction direction, struct ker_flow_key *key);
 int ker_flow_hash(const struct ker_flow_key *key, uint64_t seed, uint32_t *hash);
