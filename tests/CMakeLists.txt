@@ -682,3 +682,20 @@ if(KER_WITH_DPDK)
         ENVIRONMENT "LD_LIBRARY_PATH=${ker_dpdk_library_path}:$ENV{LD_LIBRARY_PATH}")
     set_tests_properties(tcp-active-host PROPERTIES SKIP_RETURN_CODE 77)
 endif()
+
+if(KER_WITH_DPDK)
+    add_executable(ker-tcp-stream-test tcp-stream.c)
+    target_include_directories(ker-tcp-stream-test PRIVATE "${PROJECT_SOURCE_DIR}/src")
+    target_compile_definitions(ker-tcp-stream-test PRIVATE _GNU_SOURCE)
+    target_link_libraries(ker-tcp-stream-test PRIVATE ker_skb_headers ker_eth_headers ker_neighbor_headers ker_timer_list_port ker_linux_port ker_dpdk_port ker_address_port ker_neighbor_port ker_skb_port ker_tx_export_port ker_tcp_create_port ker_tcp_view_port ker_udp_view_port ker_ipv4_view_port ker_icmpv4_view_port ker_icmp_echo_view_port ker_transport_receive_port ker_receive_port ker_receive_headers ker_eth_port Threads::Threads)
+    target_link_libraries(ker-tcp-stream-test PRIVATE ker_tcp_mss_port)
+    target_link_libraries(ker-tcp-stream-test PRIVATE ker_tcp_active_port ker_tcp_listener_port
+        ker_tcp_neighbor_create_port ker_tcp_configured_create_port
+        ker_arp_headers ker_arp_rx_headers ker_arp_port ker_arp_responder_port ker_arp_rx_port ker_tx_ring_port)
+    add_test(NAME tcp-stream COMMAND ker-tcp-stream-test)
+    add_test(NAME tcp-stream-host COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tcp-stream-host.py $<TARGET_FILE:ker-tcp-stream-test>)
+    set_tests_properties(tcp-stream tcp-stream-host PROPERTIES TIMEOUT 30
+        ENVIRONMENT "LD_LIBRARY_PATH=${ker_dpdk_library_path}:$ENV{LD_LIBRARY_PATH}")
+    set_tests_properties(tcp-stream-host PROPERTIES SKIP_RETURN_CODE 77)
+endif()

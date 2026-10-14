@@ -36,9 +36,10 @@ SYN reports `-ECONNREFUSED`; an exact-next-sequence reset after READY reports
 `-ECONNRESET`.
 
 The profile negotiates MSS only. Simultaneous open, ECN negotiation, window
-scaling, SACK, timestamps, authentication, Fast Open, stream read/write,
+scaling, SACK, timestamps, authentication, Fast Open, stream sending,
 congestion control, reassembly, TIME_WAIT and graceful FIN close remain
-subsequent work. Matching data or FIN is explicitly rejected with
+subsequent work. Without opt-in receive storage, matching data is rejected;
+FIN remains explicitly rejected with
 `-EOPNOTSUPP` and RST when TX admission succeeds. `reset` aborts explicitly;
 admission failure preserves state. Cleanup requires RESET or FAILED and an
 empty exporter, conservatively including unrelated queued traffic sharing it.
@@ -64,3 +65,5 @@ ctest --test-dir /path/to/build -R '^(tcp-active|tcp-active-host)$' --output-on-
 ```
 
 See [TCP passive handshake](tcp-listener.md) and [UDP host prerequisites](udp-host-interop.md).
+
+An opt-in receive ring now extends this profile: see [bounded receive stream](tcp-receive-stream.md). Without receive storage, data remains explicitly unsupported.
