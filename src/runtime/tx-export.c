@@ -128,6 +128,7 @@ int ker_tx_export_observer_attach(
     int rc = valid(tx);
     if (rc) return rc;
     if (!observer || !prepare || !complete) return -EINVAL;
+    if (observer->busy) return -EBUSY;
     if (observer->attached || observer->next || observer->prepare ||
         observer->complete || observer->arg) return -EALREADY;
     observer->prepare = prepare;
@@ -145,6 +146,7 @@ int ker_tx_export_observer_detach(struct ker_tx_export *tx,
     int rc = valid(tx);
     if (rc) return rc;
     if (!observer || !observer->attached) return -ENOENT;
+    if (observer->busy) return -EBUSY;
     struct ker_tx_export_observer **link = &tx->observers;
     while (*link && *link != observer) link = &(*link)->next;
     if (!*link) return -ESTALE;

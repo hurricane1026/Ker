@@ -18,6 +18,33 @@ static struct ker_udp_endpoint *current_endpoint(
     struct ker_udp_error_tracker *, struct ker_udp_endpoint_handle);
 static void tombstone(struct ker_udp_error_record *);
 
+static void pin_peer_callbacks(struct ker_udp_error_tracker *tracker) {
+  for (size_t i = 0; i < tracker->peer_capacity; ++i) {
+    struct ker_udp_error_peer *peer = &tracker->peers[i];
+    if (peer->tracker != tracker || !peer->monitor)
+      continue;
+    if (!peer->callback_pins) {
+      peer->callback_pmtu_busy = peer->pmtu.busy;
+      peer->callback_observer_busy = peer->tx_observer.busy;
+      peer->pmtu.busy = true;
+      peer->tx_observer.busy = true;
+    }
+    ++peer->callback_pins;
+  }
+}
+
+static void unpin_peer_callbacks(struct ker_udp_error_tracker *tracker) {
+  for (size_t i = 0; i < tracker->peer_capacity; ++i) {
+    struct ker_udp_error_peer *peer = &tracker->peers[i];
+    if (peer->tracker != tracker || !peer->monitor || !peer->callback_pins)
+      continue;
+    if (!--peer->callback_pins) {
+      peer->pmtu.busy = peer->callback_pmtu_busy;
+      peer->tx_observer.busy = peer->callback_observer_busy;
+    }
+  }
+}
+
 static void flush_accepted(struct ker_udp_error_tracker *tracker,
                            uint64_t now) {
   bool valid = now <= UINT64_MAX - tracker->lifetime_ms &&
@@ -61,8 +88,10 @@ static uint64_t error_clock(void *arg) {
   tracker->busy = true;
   tracker->service->busy = true;
   tracker->endpoints->busy = true;
+  pin_peer_callbacks(tracker);
   uint64_t value = tracker->clock(tracker->clock_arg);
   flush_accepted(tracker, value);
+  unpin_peer_callbacks(tracker);
   tracker->busy = tracker_was_busy;
   tracker->service->busy = service_was_busy;
   tracker->endpoints->busy = endpoints_were_busy;
@@ -90,8 +119,10 @@ static int read_now(struct ker_udp_error_tracker *tracker, uint64_t *now) {
   tracker->busy = true;
   tracker->service->busy = true;
   tracker->endpoints->busy = true;
+  pin_peer_callbacks(tracker);
   uint64_t value = tracker->clock(tracker->clock_arg);
   flush_accepted(tracker, value);
+  unpin_peer_callbacks(tracker);
   tracker->busy = false;
   tracker->service->busy = service_was_busy;
   tracker->endpoints->busy = endpoints_were_busy;

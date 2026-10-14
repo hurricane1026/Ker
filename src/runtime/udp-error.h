@@ -52,6 +52,8 @@ struct ker_udp_error_peer {
   struct ker_neighbor_monitor *monitor;
   struct ker_icmpv4_pmtu pmtu;
   struct ker_tx_export_observer tx_observer;
+  unsigned int callback_pins;
+  bool callback_pmtu_busy, callback_observer_busy;
   bool busy;
 };
 

@@ -50,7 +50,8 @@ static int clock_tx_result;
 static unsigned int skip_clock_reentry;
 static struct ker_udp_endpoint_handle active_handle;
 static int clock_reentry_tracker, clock_reentry_endpoint,
-    clock_reentry_service, clock_reentry_init;
+    clock_reentry_service, clock_reentry_init, clock_reentry_pmtu,
+    clock_reentry_observer;
 static unsigned int legacy_events;
 static const unsigned char local_mac[6] = {2, 0, 0, 0, 0, 1};
 static const unsigned char peer_mac[6] = {2, 0, 0, 0, 0, 2};
@@ -72,6 +73,11 @@ static uint64_t clock_ms(void *arg)
     clock_reentry_service = ker_icmpv4_service_disable(&service);
     clock_reentry_init = ker_udp_error_tracker_init(&errors, &service,
         &endpoints, records, 8, peers, 2, 2, clock_ms, NULL, 1000);
+    if (peers[0].tracker == &errors) {
+      clock_reentry_pmtu = ker_icmpv4_pmtu_cleanup(&peers[0].pmtu);
+      clock_reentry_observer = ker_tx_export_observer_detach(&tx,
+          &peers[0].tx_observer);
+    }
   }
   if (trigger_tx_reentry) {
     trigger_tx_reentry = false;
@@ -234,7 +240,9 @@ int main(void)
   trigger_clock_reentry = true;
   CHECK(ker_udp_send(&channel, payload, sizeof(payload)) == 0);
   CHECK(clock_reentry_tracker == -EBUSY && clock_reentry_endpoint == -EBUSY &&
-        clock_reentry_service == -EBUSY && clock_reentry_init == -EBUSY);
+        clock_reentry_service == -EBUSY && clock_reentry_init == -EBUSY &&
+        clock_reentry_pmtu == -EBUSY && clock_reentry_observer == -EBUSY &&
+        peers[0].pmtu.attached && peers[0].tx_observer.attached);
   CHECK(ker_tx_export_poll(&tx, 1) == -EAGAIN && !sent_packet);
   CHECK(records[0].state == KER_UDP_ERROR_RESERVED);
   unsigned char quote[28];
@@ -383,7 +391,8 @@ int main(void)
   trigger_clock_reentry = true;
   CHECK(ker_tx_export_poll(&tx, 1) == 1 && sent_packet);
   CHECK(clock_reentry_tracker == -EBUSY && clock_reentry_endpoint == -EBUSY &&
-        clock_reentry_service == -EBUSY && clock_reentry_init == -EBUSY);
+        clock_reentry_service == -EBUSY && clock_reentry_init == -EBUSY &&
+        clock_reentry_pmtu == -EBUSY && clock_reentry_observer == -EBUSY);
   wire = rte_pktmbuf_mtod(sent_packet, const unsigned char *);
   memcpy(quote, wire + ETH_HLEN, sizeof(quote));
   ker_packet_free(sent_packet);
@@ -406,7 +415,8 @@ int main(void)
   dispatch_error(quote, sizeof(quote), 3, 4, 1200);
   CHECK(!trigger_clock_reentry && !skip_clock_reentry);
   CHECK(clock_reentry_tracker == -EBUSY && clock_reentry_endpoint == -EBUSY &&
-        clock_reentry_service == -EBUSY && clock_reentry_init == -EBUSY);
+        clock_reentry_service == -EBUSY && clock_reentry_init == -EBUSY &&
+        clock_reentry_pmtu == -EBUSY && clock_reentry_observer == -EBUSY);
   CHECK(ker_udp_channel_recv_error(&channel, &event) == 1);
   CHECK(event.error == EMSGSIZE && event.pmtu_status == 1 &&
         event.next_hop_mtu == 1200);

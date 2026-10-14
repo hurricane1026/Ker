@@ -27,7 +27,8 @@ struct ker_tx_export_observer {
     ker_tx_export_observer_complete_fn complete;
     void *arg;
     struct ker_tx_export_observer_note note;
-    bool attached;
+    /* Lifecycle pin; polling remains permitted while pinned. */
+    bool attached, busy;
 };
 enum ker_tx_export_mode {
     KER_TX_EXPORT_SINGLE,
