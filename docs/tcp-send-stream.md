@@ -1,0 +1,52 @@
+# Bounded active TCP sending
+
+The private fixed-peer active profile accepts an optional caller-owned
+`send_buffer`/`send_capacity`, stable and exclusive until cleanup. The send and
+receive buffers must not overlap. `ker_tcp_active_write()` copies and admits up
+to one segment, capped by negotiated MSS, usable peer window and buffer capacity.
+The source must not overlap either private buffer. A positive result is local
+TX admission; it does not claim delivery. Snapshot `send_bytes` reaches zero
+only after a valid cumulative acknowledgment (or explicit abort/failure).
+
+At most one segment is outstanding. Further writes return `-EAGAIN` until it is
+fully acknowledged. Partial ACKs retire only the acknowledged prefix; retries
+send the retained suffix at `send_unacknowledged`. `send_next` includes all
+admitted bytes. ACKs outside that serial-number interval cannot free storage.
+Only an ACK at the exact next receive sequence updates send progress and the
+peer window edge, computed from that ACK's acknowledgment plus unscaled window.
+ACK and incoming payload are processed together for full duplex. All outgoing
+ACK-bearing data also commits the advertised local receive edge on admission.
+
+Poll with a caller-sampled monotonic clock before RX and application writes,
+including idle iterations. Each admitted write starts a fresh absolute
+`timeout_ms` deadline. Retries begin after `retry_ms`, then double with saturated
+arithmetic. Partial/duplicate ACKs and TX backpressure do not extend the deadline;
+failed retransmission admission still advances the retry schedule. Expiry is
+checked before receive acknowledgment or pending local ACK work, discards private
+send/receive state, and reports `-ETIMEDOUT`. Caller-configured retry/timeout values
+are a private test/deployment policy, not an adaptive TCP RTT/RTO estimator.
+
+A zero peer window prevents new writes without starting a deadline or copying.
+Already-sent unacknowledged suffixes may still be retransmitted. Persist probing
+is not implemented; resuming new writes requires a valid peer window update.
+The single-segment flight limit is deliberately conservative; this profile does
+not implement congestion-window growth, fast retransmit, SACK, adaptive RTO,
+FIN/EOF/TIME_WAIT or public socket capabilities. Normal close remains future work.
+
+Valid peer RST and successfully admitted local reset discard retained bytes and
+retry state. A failed local reset preserves both directions. Cleanup retains the
+existing terminal-state and empty-exporter barrier. Upstream Linux and DPDK
+sources are unchanged; byte construction, checksum and MSS helpers stay behind
+Ker adapters.
+
+`tcp-send` checks exporter admission rollback, capacity/MSS/window clipping,
+wrong-sequence/stale/future/partial ACKs, zero-window updates, sequence wrap,
+private retransmission copies, exponential retry and saturation, absolute timeout,
+read-window reopening by data, full-duplex ACK+payload, reset and cleanup.
+`tcp-send-host` uses a disposable TAP/network namespace and an independent Linux
+server: Linux receives and verifies 8192 binary bytes, echoes them, and Ker
+verifies every byte before an explicit RST. Legacy receive-stream, active/passive
+handshake and UDP host tests remain separate.
+
+See [receive stream](tcp-receive-stream.md), [active handshake](tcp-active.md),
+and [host prerequisites](udp-host-interop.md).

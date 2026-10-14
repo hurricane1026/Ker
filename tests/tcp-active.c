@@ -33,6 +33,7 @@ static __be16 local_port, peer_port;
 static const unsigned char local_mac[6] = {2, 0x10, 0, 0, 0, 1};
 static const unsigned char peer_mac[6] = {2, 0x20, 0, 0, 0, 1};
 static int tap = -1, isn_error;
+static uint16_t injected_window = 1024;
 static bool reenter;
 static int receive_message(const struct ker_transport_message *m, void *arg)
 { (void)m; (void)arg; return NET_RX_DROP; }
@@ -45,6 +46,7 @@ static int next_isn(void *arg, __be16 port, uint32_t *out)
         CHECK(ker_tcp_active_cleanup(&active) == -EBUSY);
         CHECK(ker_tcp_active_poll(&active, active.now_ms) == -EBUSY);
         unsigned char byte; CHECK(ker_tcp_active_read(&active, &byte, 1) == -EBUSY);
+        CHECK(ker_tcp_active_write(&active, &byte, 1) == -EBUSY);
         CHECK(ker_transport_receiver_unregister(&receiver) == -EBUSY);
         CHECK(ker_tx_export_cleanup(&tx) == -EBUSY);
     }
@@ -85,7 +87,7 @@ static void inject(uint32_t seq, uint32_t ack, uint8_t flags, const void *payloa
     struct sk_buff *skb = NULL;
     CHECK(ker_tcp_ipv4_create_options(&context, peer_mac, local_mac, peer_ip, local_ip,
         peer_port, local_port, rte_cpu_to_be_32(seq), rte_cpu_to_be_32(ack),
-        rte_cpu_to_be_16(1024), flags, 64, flags & KER_TCP_SYN ? mss : NULL,
+        rte_cpu_to_be_16(injected_window), flags, 64, flags & KER_TCP_SYN ? mss : NULL,
         flags & KER_TCP_SYN ? sizeof(mss) : 0, payload, length, &skb) == 0);
     struct rte_mbuf *frame = ker_packet_alloc(&pool);
     CHECK(frame);
@@ -126,7 +128,7 @@ static uint64_t now_ms(void)
     struct timespec t; CHECK(clock_gettime(CLOCK_MONOTONIC, &t) == 0);
     return (uint64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000;
 }
-#ifndef KER_TCP_STREAM_TEST
+#if !defined(KER_TCP_STREAM_TEST) && !defined(KER_TCP_SEND_TEST)
 static void test_host(void)
 {
     uint64_t deadline = now_ms() + 10000, reset_at = 0;
@@ -262,6 +264,8 @@ static void test_active(void)
     start(700); drain(KER_TCP_SYN);
     CHECK(ker_tcp_active_reset(&active) == 0); drain(KER_TCP_RST);
 }
+#elif defined(KER_TCP_SEND_TEST)
+#include "tcp-send-cases.h"
 #else
 #include "tcp-stream-cases.h"
 #endif
@@ -293,6 +297,10 @@ int main(int argc, char **argv)
 #ifdef KER_TCP_STREAM_TEST
     config.window = tap < 0 ? 16 : sizeof(stream_ring); config.receive_capacity = config.window;
     config.receive_buffer = stream_ring;
+#endif
+#ifdef KER_TCP_SEND_TEST
+    config.send_buffer = send_storage; config.send_capacity = sizeof(send_storage);
+    config.receive_buffer = receive_storage; config.receive_capacity = config.window;
 #endif
     start(tap < 0 ? 100 : now_ms());
     CHECK(ker_arp_responder_register(&arp, &runtime, &address, &tx) == 0);

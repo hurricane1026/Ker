@@ -20,6 +20,9 @@ struct ker_tcp_active_config {
      * NULL/zero preserves the handshake-only profile. */
     unsigned char *receive_buffer;
     uint16_t receive_capacity;
+    /* Optional exclusive stable storage for one outstanding segment. */
+    unsigned char *send_buffer;
+    uint16_t send_capacity;
 };
 struct ker_tcp_active_snapshot {
     enum ker_tcp_active_state state;
@@ -29,11 +32,13 @@ struct ker_tcp_active_snapshot {
     uint32_t receive_next;
     uint16_t receive_bytes;
     bool ack_pending;
+    uint32_t send_unacknowledged, send_next;
+    uint16_t send_bytes;
 };
 /* Caller owns zero-initialized stable storage until empty-only cleanup. One
  * active tuple per receiver, with a permanent configured IPv4 peer.
  * READY means the final ACK entered the bounded local TX path. Optional receive
- * storage enables in-order data reception; no sending, FIN close, simultaneous
+ * storage enables in-order data reception and one-segment sending; no FIN close, simultaneous
  * open or negotiated options beyond MSS.
  * The peer/table, receiver and exporter stay pinned until cleanup. */
 struct ker_tcp_active {
@@ -47,14 +52,17 @@ struct ker_tcp_active {
     uint64_t now_ms, retry_ms, deadline_ms;
     bool busy, peer_known;
     uint32_t receive_right;
-    uint16_t receive_head;
+    uint16_t receive_head, send_head;
+    uint32_t send_right;
+    uint64_t send_retry_ms, send_deadline_ms, send_backoff_ms;
 };
 int ker_tcp_active_start(struct ker_tcp_active *, struct ker_transport_receiver *,
     struct ker_neighbor_table *, __be32 peer_ip, struct ker_tx_export *,
     const struct ker_tcp_active_config *, uint64_t now_ms);
 /* Caller samples monotonic milliseconds and polls before RX, including idle
  * iterations. Fixed SYN retry interval and absolute deadline; no extension on
- * TX failure. READY also retries pending receive/window ACKs. Returns 1 for
+ * TX failure. READY retries data with exponential backoff/absolute timeout
+ * and pending receive/window ACKs. Returns 1 for
  * a retry/expiry action, 0 otherwise, negative errno
  * for invalid use; retry admission status is also exposed in last_tx_error. */
 int ker_tcp_active_poll(struct ker_tcp_active *, uint64_t now_ms);
@@ -66,5 +74,10 @@ int ker_tcp_active_reset(struct ker_tcp_active *);
  * must not overlap the receive ring. No EOF: FIN is unsupported. Freeing space
  * schedules a window ACK, retried by poll. Reset/refusal invalidates unread data. */
 int ker_tcp_active_read(struct ker_tcp_active *, void *destination, uint16_t capacity);
+/* Copy/admit at most one MSS/window/buffer-sized segment, return accepted bytes.
+ * A positive result means local admission, not peer delivery; snapshot send_bytes
+ * tracks acknowledgment. EAGAIN if a segment is outstanding or window is zero.
+ * Caller polls before writing; source must not overlap either private buffer. */
+int ker_tcp_active_write(struct ker_tcp_active *, const void *source, uint16_t length);
 int ker_tcp_active_cleanup(struct ker_tcp_active *);
 #endif

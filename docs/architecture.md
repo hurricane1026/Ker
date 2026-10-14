@@ -71,6 +71,8 @@ TCP 控制字段与原生 MSS 解析的当前边界见 [TCP control view](tcp-co
 
 固定对端的单 worker TCP 被动握手、listen/accept、重试和超时边界见 [TCP listener](tcp-listener.md)。主动连接和接收流见下文；被动连接的数据路径及正常关闭仍待后续实现。
 
-固定对端的单 worker TCP 主动握手和 Linux 服务端互通验收见 [TCP active handshake](tcp-active.md)。主动与被动握手均已建立有界基础；发送流和正常关闭仍待后续实现。
+固定对端的单 worker TCP 主动握手和 Linux 服务端互通验收见 [TCP active handshake](tcp-active.md)。主动与被动握手均已建立有界基础；发送流基础见下文；正常关闭仍待后续实现。
 
-主动连接的有界接收流、重复片段处理、窗口背压及 Linux 发送端验收见 [TCP receive stream](tcp-receive-stream.md)。发送流、乱序缓存和正常 FIN 关闭仍待后续实现。
+主动连接的有界接收流、重复片段处理、窗口背压及 Linux 发送端验收见 [TCP receive stream](tcp-receive-stream.md)。发送流见下文；乱序缓存和正常 FIN 关闭仍待后续实现。
+
+主动连接的单片段发送、部分确认、重传与双向 Linux 互通验收见 [TCP send stream](tcp-send-stream.md)。拥塞控制扩展、乱序缓存及正常 FIN 关闭仍待后续实现。
