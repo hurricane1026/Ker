@@ -16,6 +16,32 @@ static void open_again(uint64_t now)
 static void test_active(void)
 {
     unsigned char data[4] = {1, 0, 3, 255}, out[4] = {9, 9, 9, 9};
+    /* A first FIN may overlap already received data and still acknowledge our FIN. */
+    drain(KER_TCP_SYN); inject(UINT32_MAX, 0, KER_TCP_SYN | KER_TCP_ACK, NULL, 0); drain(KER_TCP_ACK);
+    active.config.retry_ms = active.config.timeout_ms = 30;
+    inject(0, 0, KER_TCP_ACK | KER_TCP_PSH, data, sizeof(data)); wire_control(0, 4, KER_TCP_ACK);
+    CHECK(active.status.receive_bytes == sizeof(data) && active.status.receive_next == 4);
+    CHECK(ker_tcp_active_shutdown_write(&active) == 0); wire_control(0, 4, KER_TCP_FIN | KER_TCP_ACK);
+    inject(100, 1, KER_TCP_ACK | KER_TCP_FIN, NULL, 0); wire_control(1, 4, KER_TCP_ACK);
+    inject(UINT32_MAX - 1U, 1, KER_TCP_ACK | KER_TCP_FIN, data, 1); wire_control(1, 4, KER_TCP_ACK);
+    CHECK(!active.status.local_fin_acked && !active.status.peer_eof &&
+          active.status.receive_next == 4 && active.status.receive_bytes == sizeof(data));
+    inject(0, 1, KER_TCP_ACK | KER_TCP_FIN, data, sizeof(data));
+    CHECK(active.status.local_fin_acked && active.status.peer_eof &&
+          active.status.state == KER_TCP_ACTIVE_TIME_WAIT && active.status.receive_next == 5 &&
+          active.status.receive_bytes == sizeof(data));
+    wire_control(1, 5, KER_TCP_ACK);
+    inject(0, 1, KER_TCP_ACK | KER_TCP_FIN, data, sizeof(data)); wire_control(1, 5, KER_TCP_ACK);
+    CHECK(active.status.receive_next == 5 && active.status.receive_bytes == sizeof(data));
+    CHECK(ker_tcp_active_poll(&active, active.close_deadline_ms) == 0 && !tx.packets);
+    CHECK(ker_tcp_active_read(&active, out, sizeof(out)) == sizeof(out) && !memcmp(out, data, sizeof(data)));
+    if (active.status.ack_pending) {
+        CHECK(ker_tcp_active_poll(&active, active.now_ms) == 1);
+        wire_control(1, 5, KER_TCP_ACK);
+    }
+    CHECK(ker_tcp_active_poll(&active, active.time_wait_deadline_ms) == 1);
+    CHECK(ker_tcp_active_cleanup(&active) == 0);
+    start(100);
     CHECK(ker_tcp_active_shutdown_write(&active) == -ENOTCONN);
     drain(KER_TCP_SYN); inject(UINT32_MAX, 0, KER_TCP_SYN | KER_TCP_ACK, NULL, 0); drain(KER_TCP_ACK);
     fill_tx(); fill_tx();

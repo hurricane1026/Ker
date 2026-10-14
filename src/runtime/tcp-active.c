@@ -204,7 +204,11 @@ static int receive_active(void *arg, struct sk_buff *skb,
             (p->flags == (KER_TCP_ACK | KER_TCP_FIN) || p->flags == (KER_TCP_ACK | KER_TCP_FIN | KER_TCP_PSH));
         if (t->status.state != KER_TCP_ACTIVE_TIME_WAIT && (ordinary || fin) &&
             (p->sequence == t->status.receive_next ||
-             (fin && t->status.peer_eof && p->sequence + p->payload_length + 1U == t->status.receive_next)) &&
+             (fin && (t->status.peer_eof ?
+                 p->sequence + p->payload_length + 1U == t->status.receive_next :
+                 before(p->sequence, t->status.receive_next) &&
+                 p->sequence + p->payload_length == t->status.receive_next &&
+                 before(t->status.receive_next, t->receive_right)))) &&
             valid_ack(t, p->acknowledgment)) {
             uint32_t acknowledged = p->acknowledgment - t->status.send_unacknowledged;
             if (t->status.local_fin && !t->status.local_fin_acked) {
