@@ -58,7 +58,10 @@ static unsigned int endpoint_a_seen;
 static int endpoint_drop;
 static int endpoint_status = NET_RX_SUCCESS;
 static struct ker_udp_endpoint_table *endpoint_table_under_test;
-static int endpoint_reentrant_bind, endpoint_reentrant_disable;
+static struct ker_udp_endpoint_handle endpoint_handle_under_test;
+static int endpoint_reentrant_bind, endpoint_reentrant_disable,
+    endpoint_reentrant_connect, endpoint_reentrant_disconnect,
+    endpoint_reentrant_close;
 static uint32_t fake_utc = 123456;
 static int fake_utc_status;
 static bool reentry_check;
@@ -238,8 +241,10 @@ static int endpoint_receive(const struct ker_transport_message *message,
   CHECK(message->protocol == KER_TRANSPORT_UDP);
   CHECK(message->packet.udp.destination_port == rte_cpu_to_be_16(9000) ||
         message->packet.udp.destination_port == rte_cpu_to_be_16(9001));
-  CHECK(message->packet.udp.payload_length == sizeof(payload));
-  CHECK(!memcmp(message->packet.udp.payload, payload, sizeof(payload)));
+  CHECK(message->packet.udp.payload_length == 0 ||
+        message->packet.udp.payload_length == sizeof(payload));
+  if (message->packet.udp.payload_length)
+    CHECK(!memcmp(message->packet.udp.payload, payload, sizeof(payload)));
   ++endpoint_seen;
   if (endpoint_table_under_test) {
     endpoint_reentrant_bind =
@@ -247,6 +252,13 @@ static int endpoint_receive(const struct ker_transport_message *message,
                               endpoint_receive, NULL);
     endpoint_reentrant_disable =
         ker_udp_endpoint_table_disable(endpoint_table_under_test);
+    endpoint_reentrant_connect = ker_udp_endpoint_connect(
+        endpoint_table_under_test, endpoint_handle_under_test, aip,
+        rte_cpu_to_be_16(40000));
+    endpoint_reentrant_disconnect = ker_udp_endpoint_disconnect(
+        endpoint_table_under_test, endpoint_handle_under_test);
+    endpoint_reentrant_close = ker_udp_endpoint_close(
+        endpoint_table_under_test, endpoint_handle_under_test);
   }
   if (endpoint_status != NET_RX_SUCCESS)
     return endpoint_status;
@@ -603,10 +615,24 @@ static void run(void) {
   /* A fixed bounded table owns supported local UDP delivery. */
   struct ker_udp_endpoint_table endpoints = {0};
   struct ker_udp_endpoint endpoint_entries[2] = {0};
+  struct ker_udp_endpoint_handle endpoint_handle;
   CHECK(ker_udp_endpoint_table_enable(&endpoints, &brx_transport, &service,
                                       endpoint_entries, 2) == 0);
-  CHECK(ker_udp_endpoint_bind(&endpoints, rte_cpu_to_be_16(9000),
-                              endpoint_receive, NULL) == 0);
+  CHECK(ker_udp_endpoint_bind_ex(&endpoints, rte_cpu_to_be_16(9000),
+                                 endpoint_receive, NULL,
+                                 &endpoint_handle) == 0);
+  endpoint_handle_under_test = endpoint_handle;
+  CHECK(ker_udp_endpoint_connect(&endpoints, endpoint_handle, 0, 0) ==
+        -EINVAL);
+  CHECK(ker_udp_endpoint_connect(&endpoints, endpoint_handle, 0,
+                                 rte_cpu_to_be_16(40000)) == -EINVAL);
+  CHECK(ker_udp_endpoint_connect(&endpoints, endpoint_handle,
+                                 rte_cpu_to_be_32(0xe0000001),
+                                 rte_cpu_to_be_16(40000)) == -EINVAL);
+  CHECK(ker_udp_endpoint_connect(&endpoints, endpoint_handle, aip,
+                                 rte_cpu_to_be_16(40000)) == 0);
+  uint64_t connected_incarnation =
+      endpoint_entries[endpoint_handle.slot].incarnation;
   struct ker_udp_endpoint_table aendpoints = {0};
   struct ker_udp_endpoint aendpoint_entries[1] = {0};
   CHECK(ker_udp_endpoint_table_enable(&aendpoints, &arx_transport, &aservice,
@@ -625,6 +651,46 @@ static void run(void) {
             64, NULL, 0, payload, sizeof(payload), &forward_udp) == 0);
   inject_request(forward_udp);
   CHECK(endpoint_seen == 1 && endpoint_a_seen == 1);
+  struct sk_buff *wrong_source_address = NULL;
+  CHECK(ker_udp_ipv4_create(
+            &actx, amac, bmac, rte_cpu_to_be_32(0xc000020a), bip,
+            rte_cpu_to_be_16(40000), rte_cpu_to_be_16(9000), 64, payload,
+            sizeof(payload), &wrong_source_address) == 0);
+  uint64_t suppressed_peer_errors = service.errors_submitted;
+  inject_request(wrong_source_address);
+  CHECK(endpoint_seen == 1 && service.errors_submitted == suppressed_peer_errors);
+  struct sk_buff *empty_udp = NULL;
+  CHECK(ker_udp_ipv4_create_configured(
+            &aaddr, bmac, bip, rte_cpu_to_be_16(40000),
+            rte_cpu_to_be_16(9000), 64, NULL, 0, NULL, 0, &empty_udp) == 0);
+  inject_request(empty_udp);
+  CHECK(endpoint_seen == 2);
+  CHECK(ker_udp_endpoint_connect(&endpoints, endpoint_handle, aip,
+                                 rte_cpu_to_be_16(40001)) == 0);
+  CHECK(endpoint_entries[endpoint_handle.slot].incarnation !=
+        connected_incarnation);
+  connected_incarnation = endpoint_entries[endpoint_handle.slot].incarnation;
+  CHECK(ker_udp_endpoint_connect(&endpoints, endpoint_handle,
+                                 rte_cpu_to_be_32(0xe0000001),
+                                 rte_cpu_to_be_16(40000)) == -EINVAL);
+  CHECK(endpoint_entries[endpoint_handle.slot].peer_address == aip &&
+        endpoint_entries[endpoint_handle.slot].peer_port ==
+            rte_cpu_to_be_16(40001) &&
+        endpoint_entries[endpoint_handle.slot].incarnation ==
+            connected_incarnation);
+  CHECK(ker_udp_endpoint_disconnect(&endpoints, endpoint_handle) == 0);
+  CHECK(!endpoint_entries[endpoint_handle.slot].connected &&
+        endpoint_entries[endpoint_handle.slot].incarnation !=
+            connected_incarnation);
+  CHECK(ker_udp_endpoint_disconnect(&endpoints, endpoint_handle) ==
+        -ENOTCONN);
+  CHECK(ker_udp_endpoint_connect(&endpoints, endpoint_handle, aip,
+                                 rte_cpu_to_be_16(40000)) == 0);
+  CHECK(endpoint_entries[endpoint_handle.slot].connected &&
+        endpoint_entries[endpoint_handle.slot].peer_port ==
+            rte_cpu_to_be_16(40000) &&
+        endpoint_entries[endpoint_handle.slot].incarnation !=
+            connected_incarnation);
   CHECK(ker_udp_endpoint_unbind(&aendpoints, rte_cpu_to_be_16(9000)) == 0);
   CHECK(ker_udp_endpoint_table_disable(&aendpoints) == 0);
   CHECK(ker_icmpv4_service_disable(&aservice) == 0);
@@ -644,6 +710,10 @@ static void run(void) {
   brx_transport.handler.runtime->lcore = endpoint_owner + 1;
   CHECK(ker_udp_endpoint_bind(&endpoints, rte_cpu_to_be_16(9002),
                               endpoint_receive, NULL) == -EXDEV);
+  CHECK(ker_udp_endpoint_connect(&endpoints, endpoint_handle, aip,
+                                 rte_cpu_to_be_16(40000)) == -EXDEV);
+  CHECK(ker_udp_endpoint_disconnect(&endpoints, endpoint_handle) == -EXDEV);
+  CHECK(ker_udp_endpoint_close(&endpoints, endpoint_handle) == -EXDEV);
   brx_transport.handler.runtime->lcore = endpoint_owner;
   CHECK(ker_udp_endpoint_bind(&endpoints, rte_cpu_to_be_16(9000),
                               endpoint_receive, NULL) == -EADDRINUSE);
@@ -656,20 +726,23 @@ static void run(void) {
             &aaddr, bmac, bip, rte_cpu_to_be_16(40000), rte_cpu_to_be_16(9000),
             64, NULL, 0, payload, sizeof(payload), &udp) == 0);
   inject_request(udp);
-  CHECK(endpoint_seen == 2);
+  CHECK(endpoint_seen == 3);
   CHECK(ker_udp_ipv4_create_configured(
             &aaddr, bmac, bip, rte_cpu_to_be_16(40000), rte_cpu_to_be_16(9001),
             64, NULL, 0, payload, sizeof(payload), &udp) == 0);
   inject_request(udp);
-  CHECK(endpoint_seen == 3);
+  CHECK(endpoint_seen == 4);
   endpoint_drop = 1;
   CHECK(ker_udp_ipv4_create_configured(
             &aaddr, bmac, bip, rte_cpu_to_be_16(40000), rte_cpu_to_be_16(9000),
             64, NULL, 0, payload, sizeof(payload), &udp) == 0);
   inject_request(udp);
-  CHECK(endpoint_seen == 4 && fallback_seen == 0);
+  CHECK(endpoint_seen == 5 && fallback_seen == 0);
   CHECK(endpoint_reentrant_bind == -EBUSY &&
         endpoint_reentrant_disable == -EBUSY &&
+        endpoint_reentrant_connect == -EBUSY &&
+        endpoint_reentrant_disconnect == -EBUSY &&
+        endpoint_reentrant_close == -EBUSY &&
         brx_transport.validation_error == 0 && brt.callback_error == 0);
   endpoint_drop = 0;
   endpoint_table_under_test = NULL;
@@ -745,12 +818,41 @@ static void run(void) {
   CHECK(endpoint_seen == seen_before_invalid + 1 && fallback_seen == 0 &&
         brx_transport.validation_error == 0);
   CHECK(ker_udp_endpoint_unbind(&endpoints, rte_cpu_to_be_16(9000)) == 0);
+  CHECK(ker_udp_endpoint_close(&endpoints, endpoint_handle) == -ESTALE);
+  struct ker_udp_endpoint_handle rebound_handle;
+  CHECK(ker_udp_endpoint_bind_ex(&endpoints, rte_cpu_to_be_16(9000),
+                                 endpoint_receive, NULL,
+                                 &rebound_handle) == 0);
+  CHECK(ker_udp_endpoint_connect(&endpoints, endpoint_handle, aip,
+                                 rte_cpu_to_be_16(40000)) == -ESTALE);
+  CHECK(ker_udp_endpoint_close(&endpoints, endpoint_handle) == -ESTALE);
+  CHECK(ker_udp_endpoint_close(&endpoints, rebound_handle) == 0);
   CHECK(ker_udp_endpoint_unbind(&endpoints, rte_cpu_to_be_16(9001)) == 0);
+  CHECK(ker_udp_endpoint_table_disable(&endpoints) == 0);
+  struct ker_udp_endpoint cycle_entries[2] = {0};
+  CHECK(ker_udp_endpoint_table_enable(&endpoints, &brx_transport, &service,
+                                      cycle_entries, 2) == 0);
+  struct ker_udp_endpoint_handle cycle_handle;
+  CHECK(ker_udp_endpoint_bind_ex(&endpoints, rte_cpu_to_be_16(9000),
+                                 endpoint_receive, NULL, &cycle_handle) == 0);
+  CHECK(ker_udp_endpoint_close(&endpoints, endpoint_handle) == -ESTALE);
+  struct ker_udp_endpoint_handle overflow_out = {
+      .table = &endpoints, .slot = 17, .generation = 23};
+  endpoints.next_generation = UINT64_MAX;
+  CHECK(ker_udp_endpoint_bind_ex(&endpoints, rte_cpu_to_be_16(9001),
+                                 endpoint_receive, NULL,
+                                 &overflow_out) == -EOVERFLOW);
+  CHECK(endpoints.count == 1 && !cycle_entries[1].receive &&
+        overflow_out.table == &endpoints && overflow_out.slot == 17 &&
+        overflow_out.generation == 23);
+  CHECK(ker_udp_endpoint_close(&endpoints, cycle_handle) == 0);
   CHECK(ker_udp_endpoint_table_disable(&endpoints) == 0);
   struct ker_udp_endpoint_table second_table = {0};
   struct ker_udp_endpoint second_entries[1] = {0};
   CHECK(ker_udp_endpoint_table_enable(&second_table, &brx_transport, &service,
                                       second_entries, 1) == 0);
+  CHECK(ker_udp_endpoint_connect(&second_table, endpoint_handle, aip,
+                                 rte_cpu_to_be_16(40000)) == -ESTALE);
   CHECK(ker_udp_endpoint_bind(&second_table, rte_cpu_to_be_16(9000),
                               endpoint_receive, NULL) == 0);
   unsigned int before_second_table = endpoint_seen;
@@ -824,6 +926,28 @@ static void run(void) {
   result = poll_worker(&aworker);
   CHECK(result.rx == 1 && result.tx == 0);
   CHECK(emitted_errors == errors_before_closed + 1 && fallback_seen == 0);
+  struct ker_udp_endpoint_handle mismatch_handle;
+  CHECK(ker_udp_endpoint_bind_ex(&closed_table, rte_cpu_to_be_16(9001),
+                                 endpoint_receive, NULL,
+                                 &mismatch_handle) == 0);
+  CHECK(ker_udp_endpoint_connect(&closed_table, mismatch_handle, aip,
+                                 rte_cpu_to_be_16(40000)) == 0);
+  struct sk_buff *wrong_source_port = NULL;
+  CHECK(ker_udp_ipv4_create_configured(
+            &aaddr, bmac, bip, rte_cpu_to_be_16(40001),
+            rte_cpu_to_be_16(9001), 64, NULL, 0, payload, sizeof(payload),
+            &wrong_source_port) == 0);
+  unsigned int mismatch_errors_before = emitted_errors;
+  expected_endpoint_quote_length = 20 + 8 + sizeof(payload);
+  memcpy(expected_endpoint_quote, skb_network_header(wrong_source_port),
+         expected_endpoint_quote_length);
+  inject_request(wrong_source_port);
+  result = poll_worker(&bworker);
+  CHECK(result.tx == 1 && result.rx == 0);
+  result = poll_worker(&aworker);
+  CHECK(result.rx == 1 && emitted_errors == mismatch_errors_before + 1 &&
+        fallback_seen == 0);
+  CHECK(ker_udp_endpoint_unbind(&closed_table, rte_cpu_to_be_16(9001)) == 0);
   unsigned int unknown_errors_before = emitted_errors;
   expected_emitted_type = 3;
   expected_emitted_code = 2;

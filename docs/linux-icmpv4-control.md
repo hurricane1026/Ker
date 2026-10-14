@@ -70,7 +70,7 @@ UTC 回调提供自 UTC 午夜起的毫秒；服务按一天取模，时间不�
 `udp-endpoint` 为已启用 ICMPv4 service 的 receiver 增加显式、有界的 UDP
 端点表。调用者提供零初始化的表和固定地址的 entry 数组，使用非零、网络
 字节序的目的端口注册同步回调。相同端口只允许一个绑定，容量用尽返回
-`-ENOSPC`；不支持 wildcard、connected UDP、reuseport 或 socket API。
+`-ENOSPC`；支持下述显式 connected peer 过滤；不支持 wildcard、reuseport 或 socket API。
 
 启用后，receiver 先完成 IPv4/UDP 长度和 checksum 校验，再检查本设备、
 本地单播、20 字节 IPv4 头、非零 TTL 和无分片的支持范围。DF 允许；options、
@@ -92,6 +92,24 @@ receiver unregister。先解除全部绑定，再关闭表和它的依赖对象�
 无 socket 时再发送 port-unreachable 的次序。它继续使用原生 checksum 与
 邻居输出，但不宣称已经导入依赖 socket、route、XFRM 和 netfilter 的完整
 `udp_rcv`。
+
+### 已连接 UDP 端点与生命周期
+
+`ker_udp_endpoint_bind_ex` 返回带 table 身份、slot 和 generation 的句柄；
+旧 bind/unbind 接口继续可用。connect 仅接收有效单播 peer IPv4 地址和非零
+网络字节序端口，之后只有完整源地址/端口匹配的报文会交付。disconnect
+恢复本地端口匹配。对端不匹配属于没有匹配端点，按已有安全策略尝试 3/3；
+应用回调返回 DROP 仍不触发错误。
+
+close 或旧 unbind 使旧句柄失效；复用 slot、disable/re-enable 均不会复用
+generation。计数溢出返回 `-EOVERFLOW`，不修改端点。调用者重置整个 table
+内存表示新的对象生命周期，此前的句柄不得继续使用。connect/disconnect
+还推进连接 incarnation，供后续错误交付拒绝旧连接的延迟通知。
+
+当前迭代按 IPv4 单播 L7 proxy 分为四批：端点连接与生命周期、有界接收和
+显式 peer 发送、关联真实发送记录的 ICMP 错误与 PMTU、跨 worker proxy
+集成。完整 BSD socket、广播/多播、IPv4 分片重组和 IPv6 不属于本轮范围。
+后续批次合入前，不宣称仅凭 callback 端点已具备完整 proxy 收发能力。
 
 ## 显式声明不可用的 IPv4 协议
 
