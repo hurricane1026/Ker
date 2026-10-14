@@ -218,6 +218,12 @@ static void test_listener(void)
     CHECK(listener.count == 1); /* Queued TX prevents premature record reuse. */
     drain(KER_TCP_SYN | KER_TCP_ACK); drain(KER_TCP_SYN | KER_TCP_ACK);
     CHECK(ker_tcp_listener_poll(&listener, 204, 1) == 1 && !listener.count);
+    inject(UINT32_MAX, 0, KER_TCP_SYN, NULL, 0); drain(KER_TCP_SYN | KER_TCP_ACK);
+    inject(0, 0, KER_TCP_ACK | KER_TCP_FIN, NULL, 0);
+    CHECK(requests[0].state == KER_TCP_REQUEST_RESET && receiver.validation_error == -EOPNOTSUPP);
+    CHECK(ker_tcp_listener_accept(&listener, &sentinel) == 0);
+    drain(KER_TCP_RST | KER_TCP_ACK);
+    CHECK(ker_tcp_listener_poll(&listener, 205, 1) == 1 && !listener.count);
     listener.next_generation = UINT64_MAX;
     inject(UINT32_MAX, 0, KER_TCP_SYN, NULL, 0);
     CHECK(receiver.validation_error == -EOVERFLOW && !listener.count);

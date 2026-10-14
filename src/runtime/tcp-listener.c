@@ -93,7 +93,8 @@ static int receive_request(void *arg, struct sk_buff *skb,
             if (p->flags == KER_TCP_ACK && !p->payload_length &&
                 p->sequence == r->peer_isn + 1U && p->acknowledgment == r->local_isn + 1U)
                 r->state = KER_TCP_REQUEST_READY;
-            else if (p->payload_length && p->sequence == r->peer_isn + 1U &&
+            else if ((p->payload_length || (p->flags & KER_TCP_FIN)) &&
+                p->sequence == r->peer_isn + 1U &&
                 p->acknowledgment == r->local_isn + 1U && (p->flags & KER_TCP_ACK)) {
                 error = emit(t, r, true);
                 if (!error) {
