@@ -9,7 +9,8 @@ typedef uint64_t (*ker_udp_error_clock_fn)(void *);
 enum ker_udp_error_record_state {
   KER_UDP_ERROR_FREE,
   KER_UDP_ERROR_RESERVED,
-  KER_UDP_ERROR_SENT
+  KER_UDP_ERROR_SENT,
+  KER_UDP_ERROR_TOMBSTONE
 };
 
 struct ker_udp_error_event {
@@ -77,7 +78,8 @@ struct ker_udp_error_tracker {
 };
 
 /* Storage remains caller-owned until cleanup. RESERVED entries are never
- * expired or reused; sent evidence expires after lifetime_ms. */
+ * expired or reused; SENT evidence and consumed-ID tombstones expire after
+ * lifetime_ms. */
 int ker_udp_error_tracker_init(
     struct ker_udp_error_tracker *, struct ker_icmpv4_service *,
     struct ker_udp_endpoint_table *, struct ker_udp_error_record *, size_t,

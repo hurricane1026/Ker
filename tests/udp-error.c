@@ -288,6 +288,15 @@ int main(void)
       event.local_address == local_ip && event.peer_address == peer_ip &&
       event.reporter_address == router_ip && event.local_port == local_port &&
       event.peer_port == peer_port && event.incarnation != 0);
+  CHECK(records[0].state == KER_UDP_ERROR_TOMBSTONE && !records[0].monitor &&
+        !records[0].endpoint.table);
+  __be16 consumed_id = records[0].identification;
+  errors.next_identification = ntohs(consumed_id);
+  struct ker_udp_error_token reuse_token = {0};
+  CHECK(ker_udp_error_reserve(&errors, channel.endpoint, &monitor, local_ip,
+      local_port, peer_ip, peer_port, sizeof(payload), &reuse_token) == 0);
+  CHECK(reuse_token.identification != consumed_id);
+  CHECK(ker_udp_error_cancel(&errors, reuse_token) == 0);
 
   /* An identical wire packet queued ahead of the tracked skb cannot claim its
    * reservation, even though the caller can reproduce every quoted field. */
@@ -423,6 +432,12 @@ int main(void)
   /* Reservations are not evicted while queued for output; resync releases
    * them only after the TX exporter has been drained. */
   now_ms += 1001;
+  errors.next_identification = ntohs(consumed_id);
+  reuse_token = (struct ker_udp_error_token){0};
+  CHECK(ker_udp_error_reserve(&errors, channel.endpoint, &monitor, local_ip,
+      local_port, peer_ip, peer_port, sizeof(payload), &reuse_token) == 0);
+  CHECK(reuse_token.identification == consumed_id);
+  CHECK(ker_udp_error_cancel(&errors, reuse_token) == 0);
   for (size_t i = 0; i < 8; ++i)
     CHECK(ker_udp_send(&channel, payload, sizeof(payload)) == 0);
   CHECK(ker_udp_send(&channel, payload, sizeof(payload)) == -ENOSPC);
@@ -505,11 +520,28 @@ int main(void)
   dispatch_error(quote, sizeof(quote), 3, 3, 0);
   CHECK(channel.error_queue.count == 0);
   CHECK(ker_udp_error_recv(&errors, old_handle, &event) == -ESTALE);
+  CHECK(ker_udp_send(&channel, payload, sizeof(payload)) == 0);
+  CHECK(ker_tx_export_poll(&tx, 1) == 1 && sent_packet);
+  struct ker_udp_error_record *stale_record = NULL;
+  for (size_t i = 0; i < 8; ++i)
+    if (records[i].state == KER_UDP_ERROR_SENT &&
+        records[i].endpoint.generation == channel.endpoint.generation)
+      stale_record = &records[i];
+  CHECK(stale_record);
+  __be16 stale_id = stale_record->identification;
+  ker_packet_free(sent_packet);
+  sent_packet = NULL;
   CHECK(ker_udp_channel_close(&channel) == 0);
+  CHECK(ker_udp_io_unregister_peer(&io, &monitor) == 0);
+  CHECK(stale_record->state == KER_UDP_ERROR_TOMBSTONE &&
+        stale_record->identification == stale_id && !stale_record->monitor &&
+        !stale_record->endpoint.table);
 
   CHECK(ker_udp_io_unregister_peer(&io, &second_monitor) == 0);
-  CHECK(ker_udp_io_unregister_peer(&io, &monitor) == 0);
   CHECK(ker_udp_io_detach_error_tracker(&io) == 0);
+  CHECK(ker_udp_error_tracker_cleanup(&errors) == -EBUSY);
+  CHECK(stale_record->state == KER_UDP_ERROR_TOMBSTONE);
+  now_ms = stale_record->expires_ms;
   CHECK(ker_udp_error_tracker_cleanup(&errors) == 0);
   CHECK(ker_udp_io_cleanup(&io) == 0);
   CHECK(ker_udp_endpoint_table_disable(&endpoints) == 0);

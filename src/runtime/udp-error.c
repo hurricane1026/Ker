@@ -114,6 +114,13 @@ static struct ker_udp_error_record *record_for_token(
              : NULL;
 }
 
+static void tombstone(struct ker_udp_error_record *record) {
+  *record = (struct ker_udp_error_record){
+      .state = KER_UDP_ERROR_TOMBSTONE,
+      .identification = record->identification,
+      .expires_ms = record->expires_ms};
+}
+
 static struct ker_udp_endpoint *current_endpoint(
     struct ker_udp_error_tracker *tracker,
     struct ker_udp_endpoint_handle handle) {
@@ -130,7 +137,9 @@ static struct ker_udp_endpoint *current_endpoint(
 static void expire_sent(struct ker_udp_error_tracker *tracker, uint64_t now) {
   for (size_t i = 0; i < tracker->record_capacity; ++i) {
     struct ker_udp_error_record *record = &tracker->records[i];
-    if (record->state == KER_UDP_ERROR_SENT && now >= record->expires_ms)
+    if ((record->state == KER_UDP_ERROR_SENT ||
+         record->state == KER_UDP_ERROR_TOMBSTONE) &&
+        now >= record->expires_ms)
       *record = (struct ker_udp_error_record){0};
   }
 }
@@ -229,7 +238,7 @@ static int observe_control(const struct ker_icmpv4_control_event *event,
     struct ker_udp_endpoint *endpoint =
         current_endpoint(tracker, record->endpoint);
     if (!endpoint || endpoint->incarnation != record->incarnation) {
-      *record = (struct ker_udp_error_record){0};
+      tombstone(record);
       continue;
     }
     matched = record;
@@ -285,7 +294,7 @@ static int observe_control(const struct ker_icmpv4_control_event *event,
     }
     queue->busy = false;
   }
-  *matched = (struct ker_udp_error_record){0};
+  tombstone(matched);
   tracker->busy = false;
   return 1;
 }
@@ -523,6 +532,20 @@ static bool has_live_peer_record(const struct ker_udp_error_tracker *tracker,
   return false;
 }
 
+static void tombstone_stale_peer_records(
+    struct ker_udp_error_tracker *tracker,
+    const struct ker_neighbor_monitor *monitor) {
+  for (size_t i = 0; i < tracker->record_capacity; ++i) {
+    struct ker_udp_error_record *record = &tracker->records[i];
+    if (record->state != KER_UDP_ERROR_SENT || record->monitor != monitor)
+      continue;
+    struct ker_udp_endpoint *endpoint =
+        current_endpoint(tracker, record->endpoint);
+    if (!endpoint || endpoint->incarnation != record->incarnation)
+      tombstone(record);
+  }
+}
+
 int ker_udp_error_peer_unregister(struct ker_udp_error_tracker *tracker,
                                   struct ker_neighbor_monitor *monitor) {
   int error = tracker_check(tracker);
@@ -543,6 +566,7 @@ int ker_udp_error_peer_unregister(struct ker_udp_error_tracker *tracker,
   if (error)
     return error;
   expire_sent(tracker, now);
+  tombstone_stale_peer_records(tracker, monitor);
   if (has_live_peer_record(tracker, monitor, now))
     return -EBUSY;
   error = ker_tx_export_observer_detach(monitor->resolution_tx,
