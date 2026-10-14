@@ -613,18 +613,31 @@ int main(void)
   now_ms = before_rollback;
 
   /* Expiry arithmetic overflow also fails closed after sink acceptance. */
-  now_ms = UINT64_MAX - 500;
+  now_ms = UINT64_MAX - 1500;
   CHECK(ker_udp_send(&channel, payload, sizeof(payload)) == 0);
   size_t overflow_slot = 0;
   while (overflow_slot < 8 && records[overflow_slot].state == KER_UDP_ERROR_FREE)
     ++overflow_slot;
   CHECK(overflow_slot < 8);
+  now_ms = UINT64_MAX - 500;
   CHECK(ker_tx_export_poll(&tx, 1) == 1 && sent_packet);
   CHECK(records[overflow_slot].state == KER_UDP_ERROR_TOMBSTONE &&
         records[overflow_slot].expires_ms == UINT64_MAX &&
         records[overflow_slot].expiry_saturated);
+  CHECK(errors.last_now_ms == UINT64_MAX - 500);
   ker_packet_free(sent_packet);
   sent_packet = NULL;
+  now_ms = UINT64_MAX - 1000;
+  struct ker_udp_error_token clock_only_token;
+  CHECK(ker_udp_error_reserve(&errors, channel.endpoint, &monitor, local_ip,
+      local_port, peer_ip, peer_port, sizeof(payload), &clock_only_token) ==
+      -ERANGE);
+  CHECK(errors.last_now_ms == UINT64_MAX - 500);
+  now_ms = UINT64_MAX - 400;
+  CHECK(ker_udp_error_reserve(&errors, channel.endpoint, &monitor, local_ip,
+      local_port, peer_ip, peer_port, sizeof(payload), &clock_only_token) == 0);
+  CHECK(errors.last_now_ms == UINT64_MAX - 400);
+  CHECK(ker_udp_error_cancel(&errors, clock_only_token) == 0);
 
   /* A delayed quote from a sent packet cannot target a new slot generation
    * after close and rebind, even when its ledger lifetime has not elapsed. */
@@ -649,8 +662,8 @@ int main(void)
   clock_step_countdown = 2;
   dispatch_error(quote, sizeof(quote), 3, 4, 1000);
   CHECK(!clock_step_countdown && now_ms == UINT64_MAX - 50);
-  CHECK(errors.last_now_ms == UINT64_MAX - 51);
-  CHECK(peers[0].pmtu.last_now_ms == UINT64_MAX - 50);
+  CHECK(errors.last_now_ms == UINT64_MAX - 50 &&
+        peers[0].pmtu.last_now_ms == UINT64_MAX - 50);
   CHECK(near_max_record->state == KER_UDP_ERROR_TOMBSTONE &&
         channel.error_queue.count == 0 &&
         peers[0].pmtu.current_mtu != 1000);

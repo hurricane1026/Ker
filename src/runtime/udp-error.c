@@ -47,17 +47,16 @@ static void unpin_peer_callbacks(struct ker_udp_error_tracker *tracker) {
 
 static void flush_accepted(struct ker_udp_error_tracker *tracker,
                            uint64_t now) {
-  bool valid = now <= UINT64_MAX - tracker->lifetime_ms &&
-               (!tracker->clock_started || now >= tracker->last_now_ms);
+  bool monotonic = !tracker->clock_started || now >= tracker->last_now_ms;
+  bool representable = now <= UINT64_MAX - tracker->lifetime_ms;
   for (size_t i = 0; i < tracker->record_capacity; ++i) {
     struct ker_udp_error_record *record = &tracker->records[i];
     if (!record->accepted_pending)
       continue;
     struct ker_udp_endpoint *endpoint =
         current_endpoint(tracker, record->endpoint);
-    if (!valid) {
-      uint64_t base = tracker->clock_started && now < tracker->last_now_ms
-                          ? tracker->last_now_ms : now;
+    if (!monotonic || !representable) {
+      uint64_t base = monotonic ? now : tracker->last_now_ms;
       tombstone(record);
       record->expiry_saturated = base > UINT64_MAX - tracker->lifetime_ms;
       record->expires_ms = record->expiry_saturated
@@ -75,7 +74,7 @@ static void flush_accepted(struct ker_udp_error_tracker *tracker,
     record->accepted_pending = false;
     record->expires_ms = now + tracker->lifetime_ms;
   }
-  if (valid) {
+  if (monotonic) {
     tracker->clock_started = true;
     tracker->last_now_ms = now;
   }
