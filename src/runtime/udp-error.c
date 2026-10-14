@@ -259,7 +259,7 @@ static int pmtu_confirm(void *arg, __be32 local, __be32 peer,
     if (record->state != KER_UDP_ERROR_SENT ||
         record->monitor != peer_state->monitor ||
         record->local_address != local || record->peer_address != peer ||
-        tracker->last_now_ms >= record->expires_ms ||
+        peer_state->pmtu.last_now_ms >= record->expires_ms ||
         !record_matches_quote(record, quote))
       continue;
     struct ker_udp_endpoint *endpoint =
@@ -350,7 +350,7 @@ static int observe_control(const struct ker_icmpv4_control_event *event,
   if (event->type == 3 && event->code == 4) {
     pmtu_status = ker_icmpv4_pmtu_apply(&peer->pmtu, &event->message,
                                         &event->quote);
-    if (tracker->last_now_ms >= matched->expires_ms) {
+    if (peer->pmtu.last_now_ms >= matched->expires_ms) {
       tombstone(matched);
       tracker->busy = false;
       return 0;

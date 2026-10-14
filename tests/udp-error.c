@@ -629,7 +629,35 @@ int main(void)
   /* A delayed quote from a sent packet cannot target a new slot generation
    * after close and rebind, even when its ledger lifetime has not elapsed. */
   errors.lifetime_ms = 100;
-  now_ms = UINT64_MAX - 500;
+  now_ms = UINT64_MAX - 150;
+  CHECK(ker_udp_send(&channel, near_mtu, sizeof(near_mtu)) == 0);
+  CHECK(ker_tx_export_poll(&tx, 1) == 1 && sent_packet);
+  wire = rte_pktmbuf_mtod(sent_packet, const unsigned char *);
+  memcpy(quote, wire + ETH_HLEN, sizeof(quote));
+  __be16 near_max_id;
+  memcpy(&near_max_id, quote + 4, sizeof(near_max_id));
+  struct ker_udp_error_record *near_max_record = NULL;
+  for (size_t i = 0; i < 8; ++i)
+    if (records[i].state == KER_UDP_ERROR_SENT &&
+        records[i].identification == near_max_id)
+      near_max_record = &records[i];
+  CHECK(near_max_record && near_max_record->expires_ms == UINT64_MAX - 50);
+  ker_packet_free(sent_packet);
+  sent_packet = NULL;
+  now_ms = UINT64_MAX - 51;
+  clock_step_target = UINT64_MAX - 50;
+  clock_step_countdown = 2;
+  dispatch_error(quote, sizeof(quote), 3, 4, 1000);
+  CHECK(!clock_step_countdown && now_ms == UINT64_MAX - 50);
+  CHECK(errors.last_now_ms == UINT64_MAX - 51);
+  CHECK(peers[0].pmtu.last_now_ms == UINT64_MAX - 50);
+  CHECK(near_max_record->state == KER_UDP_ERROR_TOMBSTONE &&
+        channel.error_queue.count == 0 &&
+        peers[0].pmtu.current_mtu != 1000);
+
+  /* Keep a second, unconsumed quote for the close/rebind stale-incarnation
+   * assertion below. */
+  errors.lifetime_ms = 10;
   CHECK(ker_udp_send(&channel, payload, sizeof(payload)) == 0);
   CHECK(ker_tx_export_poll(&tx, 1) == 1 && sent_packet);
   wire = rte_pktmbuf_mtod(sent_packet, const unsigned char *);
