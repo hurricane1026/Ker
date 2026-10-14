@@ -104,7 +104,7 @@ receiver unregister。先解除全部绑定，再关闭表和它的依赖对象�
 close 或旧 unbind 使旧句柄失效；复用 slot、disable/re-enable 均不会复用
 generation。计数溢出返回 `-EOVERFLOW`，不修改端点。调用者重置整个 table
 内存表示新的对象生命周期，此前的句柄不得继续使用。connect/disconnect
-还推进连接 incarnation，供后续错误交付拒绝旧连接的延迟通知。
+还推进连接 incarnation，错误交付据此拒绝旧连接的延迟通知。
 
 当前迭代按 IPv4 单播 L7 proxy 分为四批：端点连接与生命周期、有界接收和
 显式 peer 发送、关联真实发送记录的 ICMP 错误与 PMTU、跨 worker proxy
@@ -122,7 +122,7 @@ generation。计数溢出返回 `-EOVERFLOW`，不修改端点。调用者重置
 注册期间 monitor 以及 endpoint table 被适配层 pin；close 丢弃排队 RX，
 但不撤回已进入邻居/TX 的独立报文。已提交 TX 不引用 channel 存储。
 
-后续错误与跨 worker 批次合入前，不宣称 IO 队列已完成完整 proxy 集成。
+错误关联通过可选 tracker 接入；跨 worker proxy 的端到端集成由后续独立批次验证。
 
 ## 显式声明不可用的 IPv4 协议
 
@@ -188,3 +188,5 @@ options 处理及重组。当前提供可验证的控制接口，不把这些缺
 [RFC 1191](https://www.rfc-editor.org/rfc/rfc1191.html)、
 [RFC 4884](https://www.rfc-editor.org/rfc/rfc4884.html)、
 [RFC 8335](https://www.rfc-editor.org/rfc/rfc8335.html)。
+
+UDP 的异步错误与实际发送证据、PMTU 接入及显式 drain 恢复见 [UDP 错误适配](udp-errors.md)。

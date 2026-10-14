@@ -96,6 +96,28 @@ static void test_clone_and_descriptor_refs(void)
     check_pool(30);
     CHECK(ker_skb_free(clone) == 0 && destructor_count == 1);
     check_pool(31);
+    struct sk_buff *identity_source = NULL;
+    CHECK(ker_skb_alloc(&ctx, 8, 0, &identity_source) == 0);
+    uint64_t saved_identity = ctx.next_identity;
+    ctx.next_identity = UINT64_MAX;
+    struct sk_buff *identity_result = (struct sk_buff *)(uintptr_t)1;
+    CHECK(ker_skb_clone(identity_source, &identity_result) == -EOVERFLOW);
+    CHECK(identity_result == (struct sk_buff *)(uintptr_t)1);
+    ctx.next_identity = saved_identity;
+    CHECK(ker_skb_free(identity_source) == 0);
+    struct rte_mbuf *identity_packet = ker_packet_alloc(&pool);
+    CHECK(identity_packet);
+    struct sk_buff *adopt_result = (struct sk_buff *)(uintptr_t)1;
+    size_t live_before_identity_overflow = ctx.live;
+    saved_identity = ctx.next_identity;
+    ctx.next_identity = UINT64_MAX;
+    CHECK(ker_skb_from_mbuf(&ctx, identity_packet, &adopt_result) == -EOVERFLOW);
+    CHECK(adopt_result == (struct sk_buff *)(uintptr_t)1 &&
+          ctx.live == live_before_identity_overflow &&
+          rte_mbuf_refcnt_read(identity_packet) == 1);
+    ctx.next_identity = saved_identity;
+    ker_packet_free(identity_packet);
+    check_pool(31);
 }
 static void test_headerless_references(void)
 {
