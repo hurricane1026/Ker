@@ -109,7 +109,20 @@ generation。计数溢出返回 `-EOVERFLOW`，不修改端点。调用者重置
 当前迭代按 IPv4 单播 L7 proxy 分为四批：端点连接与生命周期、有界接收和
 显式 peer 发送、关联真实发送记录的 ICMP 错误与 PMTU、跨 worker proxy
 集成。完整 BSD socket、广播/多播、IPv4 分片重组和 IPv6 不属于本轮范围。
-后续批次合入前，不宣称仅凭 callback 端点已具备完整 proxy 收发能力。
+有界 UDP IO 适配使用 caller-owned peer registry 和 channel 接收槽。每个槽
+立即复制 payload 与四元组；`ker_udp_channel_recv` 返回 1 表示一个 datagram
+（包括空报文），0 表示队列为空。PEEK 保留队首；缓冲区不足时报告原长、
+复制长度与 truncated，普通 receive 消费整个 datagram。入队时超出配置的
+单包空间会截断并记录原长；槽数或字节预算不足丢包，不生成端口不可达。
+
+`ker_udp_send` 使用已连接 peer，`ker_udp_sendto` 使用显式目的，不改变连接
+过滤条件。目的必须有同设备、同地址和 worker 的注册 monitor；未知 peer
+明确失败。输出为 DF，超过当前 MTU 返回 `-EMSGSIZE`。payload 只在调用中
+借用并复制；返回成功仅代表本地邻居/TX 队列接受，不代表 wire 或对端送达。
+注册期间 monitor 以及 endpoint table 被适配层 pin；close 丢弃排队 RX，
+但不撤回已进入邻居/TX 的独立报文。已提交 TX 不引用 channel 存储。
+
+后续错误与跨 worker 批次合入前，不宣称 IO 队列已完成完整 proxy 集成。
 
 ## 显式声明不可用的 IPv4 协议
 

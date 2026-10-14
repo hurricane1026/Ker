@@ -29,6 +29,7 @@ struct ker_neighbor_monitor {
     ker_neighbor_output_mtu_fn output_mtu;
     void *output_mtu_ctx;
     unsigned int echo_service_refs;
+    unsigned int udp_adapter_refs;
     bool owns_entry;
     size_t resolution_queue_bytes;
     size_t unresolved_bytes;

@@ -12,6 +12,7 @@ FreeBSD 栈、cmocka mock/stub 或覆盖率脚本。没有通过宿主机 socket
 
 | Ker CTest | 上游场景 | 适配边界 |
 |---|---|---|
+| udp-io | test_ff_dpdk_if_send_udp_csum / test_ff_dpdk_if_send_multiseg | Ker-specific 有界 datagram 接口：真实 RX ring 复制 tuple/负载，验证截断、PEEK、零长度与包数/字节预算；已注册 peer 上 send/sendto 经邻居输出和 TX ring，覆盖背压重试、MTU 回调重入与生命周期回收。不是 F-Stack socket 或 NIC 互通测试 |
 | fstack-mbuf-release | test_ff_dpdk_pktmbuf_free_basic | 实际 Ker packet pool alloc/free，验证可用对象数恢复 |
 | fstack-clock-monotonic | test_ff_get_tsc_ns_monotonic | Ker CLOCK_MONOTONIC ns，验证非递减，不复制 TSC 算法 |
 | fstack-empty-export | test_ff_dpdk_if_send_zero_total | 空 skb copy-export，断言长度和所有权，不宣称网卡发送 |
