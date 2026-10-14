@@ -27,11 +27,11 @@ cumulative ACKs. TX admission is local: callers still have to drain packets to
 the link. The existing tuple validation, owner checks and lifetime pins apply.
 
 Valid peer RST and successfully admitted explicit abort discard unread bytes.
-FIN/data+FIN at the contiguous receive boundary (including old overlap) takes
+With graceful close disabled, FIN/data+FIN at the contiguous receive boundary (including old overlap) takes
 an explicit unsupported RST path without retaining that segment's payload;
 failed reset admission preserves existing data and state for retransmission.
-There is no graceful EOF, congestion control, window scaling,
-SACK, timestamp negotiation or public socket capability in this batch. This is
+Graceful EOF is opt-in; see [FIN close](tcp-fin-close.md). Congestion control, window scaling,
+SACK, timestamp negotiation and public socket capabilities remain unsupported. This is
 an incremental fixed-peer adapter, not a complete TCP stack. Optional sending
 is described in [bounded active TCP sending](tcp-send-stream.md).
 Upstream Linux and DPDK sources remain unchanged.

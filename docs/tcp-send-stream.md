@@ -30,8 +30,9 @@ A zero peer window prevents new writes without starting a deadline or copying.
 Already-sent unacknowledged suffixes may still be retransmitted. Persist probing
 is not implemented; resuming new writes requires a valid peer window update.
 The single-segment flight limit is deliberately conservative; this profile does
-not implement congestion-window growth, fast retransmit, SACK, adaptive RTO,
-FIN/EOF/TIME_WAIT or public socket capabilities. Normal close remains future work.
+not implement congestion-window growth, fast retransmit, SACK, adaptive RTO or
+public socket capabilities. FIN/EOF/TIME_WAIT are opt-in; see
+[normal FIN close](tcp-fin-close.md).
 
 Valid peer RST and successfully admitted local reset discard retained bytes and
 retry state. A failed local reset preserves both directions. Cleanup retains the

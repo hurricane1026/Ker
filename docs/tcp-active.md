@@ -37,12 +37,11 @@ SYN reports `-ECONNREFUSED`; an exact-next-sequence reset after READY reports
 
 The profile negotiates MSS only. Simultaneous open, ECN negotiation, window
 scaling, SACK, timestamps, authentication, Fast Open,
-congestion control, reassembly, TIME_WAIT and graceful FIN close remain
-subsequent work. Without opt-in receive storage, matching data is rejected;
-FIN remains explicitly rejected with
+congestion control and reassembly remain subsequent work. Graceful FIN close
+is opt-in; see [half-close and FIN](tcp-fin-close.md). Without opt-in receive
+storage, matching data is rejected. With graceful close disabled, FIN is rejected with
 `-EOPNOTSUPP` and RST when TX admission succeeds. `reset` aborts explicitly;
-admission failure preserves state. Cleanup requires RESET or FAILED and an
-empty exporter, conservatively including unrelated queued traffic sharing it.
+admission failure preserves state. Cleanup requires RESET, FAILED or drained CLOSED and an empty exporter, conservatively including unrelated queued traffic sharing it.
 Snapshot failures leave output unchanged. Caller-owned state stays stable and
 must not be edited until cleanup. Upstream Linux/DPDK code and public socket
 capabilities remain unchanged.

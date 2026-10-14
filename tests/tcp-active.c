@@ -47,6 +47,7 @@ static int next_isn(void *arg, __be16 port, uint32_t *out)
         CHECK(ker_tcp_active_poll(&active, active.now_ms) == -EBUSY);
         unsigned char byte; CHECK(ker_tcp_active_read(&active, &byte, 1) == -EBUSY);
         CHECK(ker_tcp_active_write(&active, &byte, 1) == -EBUSY);
+        CHECK(ker_tcp_active_shutdown_write(&active) == -EBUSY);
         CHECK(ker_transport_receiver_unregister(&receiver) == -EBUSY);
         CHECK(ker_tx_export_cleanup(&tx) == -EBUSY);
     }
@@ -128,7 +129,7 @@ static uint64_t now_ms(void)
     struct timespec t; CHECK(clock_gettime(CLOCK_MONOTONIC, &t) == 0);
     return (uint64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000;
 }
-#if !defined(KER_TCP_STREAM_TEST) && !defined(KER_TCP_SEND_TEST)
+#if !defined(KER_TCP_STREAM_TEST) && !defined(KER_TCP_SEND_TEST) && !defined(KER_TCP_CLOSE_TEST)
 static void test_host(void)
 {
     uint64_t deadline = now_ms() + 10000, reset_at = 0;
@@ -264,6 +265,8 @@ static void test_active(void)
     start(700); drain(KER_TCP_SYN);
     CHECK(ker_tcp_active_reset(&active) == 0); drain(KER_TCP_RST);
 }
+#elif defined(KER_TCP_CLOSE_TEST)
+#include "tcp-close-cases.h"
 #elif defined(KER_TCP_SEND_TEST)
 #include "tcp-send-cases.h"
 #else
@@ -301,6 +304,11 @@ int main(int argc, char **argv)
 #ifdef KER_TCP_SEND_TEST
     config.send_buffer = send_storage; config.send_capacity = sizeof(send_storage);
     config.receive_buffer = receive_storage; config.receive_capacity = config.window;
+#endif
+#ifdef KER_TCP_CLOSE_TEST
+    config.receive_buffer = close_receive; config.receive_capacity = config.window;
+    config.send_buffer = close_send; config.send_capacity = sizeof(close_send);
+    config.time_wait_ms = 120000;
 #endif
     start(tap < 0 ? 100 : now_ms());
     CHECK(ker_arp_responder_register(&arp, &runtime, &address, &tx) == 0);
