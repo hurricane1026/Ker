@@ -36,7 +36,8 @@ static int emit(struct ker_tcp_active *t, uint8_t flags, uint32_t peer_isn)
     int error = ker_tcp_ipv4_create_neighbor(t->neighbors, t->peer_ip,
         t->config.local_port, t->config.peer_port,
         rte_cpu_to_be_32(flags & KER_TCP_SYN ? t->status.local_isn :
-            t->peer_known ? t->status.send_next : t->status.local_isn + 1U),
+            t->peer_known ? (flags & KER_TCP_FIN ? t->status.send_unacknowledged :
+                t->status.send_next) : t->status.local_isn + 1U),
         flags & KER_TCP_ACK ? rte_cpu_to_be_32(ack) : 0,
         rte_cpu_to_be_16(window), flags, t->config.ttl,
         flags & KER_TCP_SYN ? options : NULL, flags & KER_TCP_SYN ? sizeof(options) : 0,
@@ -44,7 +45,7 @@ static int emit(struct ker_tcp_active *t, uint8_t flags, uint32_t peer_isn)
     if (error) return error;
     error = ker_tx_export_enqueue(t->tx, &skb);
     if (skb) BUG_ON(ker_skb_free(skb));
-    if (!error && t->peer_known && flags == KER_TCP_ACK) {
+    if (!error && t->peer_known && (flags == KER_TCP_ACK || flags == (KER_TCP_FIN | KER_TCP_ACK))) {
         t->receive_right = t->status.receive_next + window;
         t->status.ack_pending = false;
     }
@@ -59,6 +60,8 @@ static void discard_stream(struct ker_tcp_active *t)
     t->status.ack_pending = false;
     t->status.send_bytes = 0; t->send_head = 0;
     t->send_retry_ms = t->send_deadline_ms = t->send_backoff_ms = 0;
+    t->status.local_fin = t->status.local_fin_acked = t->status.peer_eof = false;
+    t->close_deadline_ms = 0;
 }
 static int emit_data(struct ker_tcp_active *t, uint32_t sequence,
                      const void *data, uint16_t length)
@@ -82,9 +85,33 @@ static bool valid_ack(struct ker_tcp_active *t, uint32_t ack)
 {
     return !before(ack, t->status.send_unacknowledged) && !before(t->status.send_next, ack);
 }
+static bool connected(struct ker_tcp_active *t)
+{
+    return t->peer_known && t->status.state != KER_TCP_ACTIVE_RESET &&
+        t->status.state != KER_TCP_ACTIVE_FAILED;
+}
+static void close_state(struct ker_tcp_active *t)
+{
+    if (!t->status.local_fin) {
+        if (t->status.peer_eof) t->status.state = KER_TCP_ACTIVE_CLOSE_WAIT;
+        return;
+    }
+    if (!t->status.local_fin_acked) {
+        t->status.state = t->status.peer_eof ?
+            (t->active_close ? KER_TCP_ACTIVE_CLOSING : KER_TCP_ACTIVE_LAST_ACK) : KER_TCP_ACTIVE_FIN_WAIT_1;
+    } else if (!t->status.peer_eof) t->status.state = KER_TCP_ACTIVE_FIN_WAIT_2;
+    else if (!t->active_close) t->status.state = KER_TCP_ACTIVE_CLOSED;
+    else if (t->status.state != KER_TCP_ACTIVE_TIME_WAIT) {
+        t->status.state = KER_TCP_ACTIVE_TIME_WAIT;
+        t->time_wait_saturated = t->now_ms > UINT64_MAX - t->config.time_wait_ms;
+        t->time_wait_deadline_ms = t->time_wait_saturated ? UINT64_MAX : t->now_ms + t->config.time_wait_ms;
+    }
+}
 static bool expire_send(struct ker_tcp_active *t)
 {
-    if (!t->status.send_bytes || t->now_ms < t->send_deadline_ms) return false;
+    bool close_expired = t->status.local_fin && t->status.state != KER_TCP_ACTIVE_TIME_WAIT &&
+        t->status.state != KER_TCP_ACTIVE_CLOSED && t->now_ms >= t->close_deadline_ms;
+    if (!close_expired && (!t->status.send_bytes || t->now_ms < t->send_deadline_ms)) return false;
     t->status.state = KER_TCP_ACTIVE_FAILED; t->status.error = -ETIMEDOUT;
     discard_stream(t); return true;
 }
@@ -104,6 +131,7 @@ static int receive_data(struct ker_tcp_active *t, const struct ker_tcp_packet_vi
     if (length > available) length = available;
     uint16_t capacity = t->config.receive_capacity;
     if (length > capacity - t->status.receive_bytes) return -EOVERFLOW;
+    if (t->status.peer_eof) length = 0;
     if (length) {
         unsigned int tail = (t->receive_head + t->status.receive_bytes) % capacity;
         unsigned int first = length < capacity - tail ? length : capacity - tail;
@@ -111,6 +139,11 @@ static int receive_data(struct ker_tcp_active *t, const struct ker_tcp_packet_vi
         memcpy(t->config.receive_buffer, p->payload + skip + first, length - first);
         t->status.receive_bytes += length;
         t->status.receive_next += length;
+    }
+    if (t->config.time_wait_ms && (p->flags & KER_TCP_FIN) && !t->status.peer_eof &&
+        p->sequence + p->payload_length == t->status.receive_next &&
+        before(t->status.receive_next, t->receive_right)) {
+        ++t->status.receive_next; t->status.peer_eof = true; close_state(t);
     }
     t->status.ack_pending = true;
     t->status.last_tx_error = emit(t, KER_TCP_ACK, t->status.peer_isn);
@@ -134,8 +167,8 @@ static int receive_active(void *arg, struct sk_buff *skb,
     if (t->status.state == KER_TCP_ACTIVE_SYN && t->now_ms >= t->deadline_ms) {
         t->status.state = KER_TCP_ACTIVE_FAILED; t->status.error = -ETIMEDOUT;
     }
-    if (t->status.state == KER_TCP_ACTIVE_READY) expire_send(t);
-    if (t->status.state == KER_TCP_ACTIVE_FAILED || t->status.state == KER_TCP_ACTIVE_RESET)
+    if (connected(t)) expire_send(t);
+    if (t->status.state == KER_TCP_ACTIVE_FAILED || t->status.state == KER_TCP_ACTIVE_RESET || t->status.state == KER_TCP_ACTIVE_CLOSED)
         return 1;
     t->busy = true;
     int error = 0;
@@ -166,18 +199,28 @@ static int receive_active(void *arg, struct sk_buff *skb,
             }
         } else if (p->flags == KER_TCP_SYN) error = -EOPNOTSUPP; /* simultaneous open */
     } else {
-        if ((p->flags == KER_TCP_ACK || p->flags == (KER_TCP_ACK | KER_TCP_PSH)) &&
-            p->sequence == t->status.receive_next && valid_ack(t, p->acknowledgment)) {
+        bool ordinary = p->flags == KER_TCP_ACK || p->flags == (KER_TCP_ACK | KER_TCP_PSH);
+        bool fin = t->config.time_wait_ms &&
+            (p->flags == (KER_TCP_ACK | KER_TCP_FIN) || p->flags == (KER_TCP_ACK | KER_TCP_FIN | KER_TCP_PSH));
+        if (t->status.state != KER_TCP_ACTIVE_TIME_WAIT && (ordinary || fin) &&
+            (p->sequence == t->status.receive_next ||
+             (fin && t->status.peer_eof && p->sequence + p->payload_length + 1U == t->status.receive_next)) &&
+            valid_ack(t, p->acknowledgment)) {
             uint32_t acknowledged = p->acknowledgment - t->status.send_unacknowledged;
-            t->send_head += acknowledged; t->status.send_bytes -= acknowledged;
+            if (t->status.local_fin && !t->status.local_fin_acked) {
+                if (acknowledged) t->status.local_fin_acked = true;
+            } else { t->send_head += acknowledged; t->status.send_bytes -= acknowledged; }
             t->status.send_unacknowledged = p->acknowledgment;
             t->status.peer_window = p->window; t->send_right = p->acknowledgment + p->window;
-            if (!t->status.send_bytes) {
+            if (!t->status.send_bytes && (!t->status.local_fin || t->status.local_fin_acked)) {
                 t->send_head = 0;
                 t->send_retry_ms = t->send_deadline_ms = t->send_backoff_ms = 0;
             }
+            close_state(t);
         }
-        if ((p->flags & KER_TCP_RST) && p->sequence == t->status.receive_next) {
+        if (t->status.state == KER_TCP_ACTIVE_TIME_WAIT && (p->flags & KER_TCP_RST)) {
+            /* TIME_WAIT cannot be shortened by a reset. */
+        } else if ((p->flags & KER_TCP_RST) && p->sequence == t->status.receive_next) {
             t->status.state = KER_TCP_ACTIVE_FAILED; t->status.error = -ECONNRESET;
             discard_stream(t);
         } else if (p->flags == (KER_TCP_SYN | KER_TCP_ACK) && !p->payload_length &&
@@ -186,11 +229,12 @@ static int receive_active(void *arg, struct sk_buff *skb,
             /* Repair a lost final ACK without restarting the connection. */
             error = emit(t, KER_TCP_ACK, t->status.peer_isn);
             t->status.last_tx_error = error;
-        } else if (t->config.receive_buffer && p->payload_length &&
-                   (p->flags == KER_TCP_ACK || p->flags == (KER_TCP_ACK | KER_TCP_PSH)) &&
+        } else if (t->config.receive_buffer && (p->payload_length || fin) &&
+                   (ordinary || fin) &&
                    valid_ack(t, p->acknowledgment)) {
             error = receive_data(t, p);
-        } else if ((p->payload_length || (p->flags & KER_TCP_FIN)) && (p->flags & KER_TCP_ACK) &&
+        } else if (t->status.state != KER_TCP_ACTIVE_TIME_WAIT &&
+                   (p->payload_length || (p->flags & KER_TCP_FIN)) && (p->flags & KER_TCP_ACK) &&
                    (p->sequence == t->status.receive_next ||
                     (t->config.receive_buffer && (p->flags & KER_TCP_FIN) &&
                      before(p->sequence, t->status.receive_next) &&
@@ -212,6 +256,7 @@ int ker_tcp_active_start(struct ker_tcp_active *t, struct ker_transport_receiver
 {
     if (!t || !r || !n || !tx || !cfg || !cfg->local_port || !cfg->peer_port ||
         !cfg->window ||
+        (cfg->time_wait_ms && !cfg->receive_buffer) ||
         (!!cfg->send_buffer != !!cfg->send_capacity) ||
         (!!cfg->receive_buffer != !!cfg->receive_capacity) ||
         (cfg->receive_buffer && cfg->receive_capacity != cfg->window) || !cfg->mss || !cfg->ttl || !cfg->next_isn || !cfg->retry_ms ||
@@ -253,15 +298,20 @@ int ker_tcp_active_poll(struct ker_tcp_active *t, uint64_t now)
     int error = owner(t); if (error) return error;
     if (now < t->now_ms) return -EINVAL;
     t->now_ms = now;
-    if (t->status.state == KER_TCP_ACTIVE_READY && expire_send(t)) return 1;
-    if (t->status.state == KER_TCP_ACTIVE_READY && t->status.send_bytes && now >= t->send_retry_ms) {
-        t->status.last_tx_error = emit_data(t, t->status.send_unacknowledged,
-            t->config.send_buffer + t->send_head, t->status.send_bytes);
+    if (t->status.state == KER_TCP_ACTIVE_TIME_WAIT && !t->time_wait_saturated &&
+        now >= t->time_wait_deadline_ms) {
+        t->status.state = KER_TCP_ACTIVE_CLOSED; return 1;
+    }
+    if (connected(t) && expire_send(t)) return 1;
+    if (connected(t) && (t->status.send_bytes || (t->status.local_fin && !t->status.local_fin_acked)) &&
+        now >= t->send_retry_ms) {
+        t->status.last_tx_error = t->status.local_fin ? emit(t, KER_TCP_FIN | KER_TCP_ACK, t->status.peer_isn) :
+            emit_data(t, t->status.send_unacknowledged, t->config.send_buffer + t->send_head, t->status.send_bytes);
         t->send_backoff_ms = t->send_backoff_ms > UINT64_MAX / 2 ? UINT64_MAX : t->send_backoff_ms * 2;
         t->send_retry_ms = now > UINT64_MAX - t->send_backoff_ms ? UINT64_MAX : now + t->send_backoff_ms;
         return 1;
     }
-    if (t->status.state == KER_TCP_ACTIVE_READY && t->status.ack_pending) {
+    if (connected(t) && t->status.ack_pending) {
         t->status.last_tx_error = emit(t, KER_TCP_ACK, t->status.peer_isn);
         return 1;
     }
@@ -283,7 +333,8 @@ int ker_tcp_active_snapshot(struct ker_tcp_active *t, struct ker_tcp_active_snap
 int ker_tcp_active_reset(struct ker_tcp_active *t)
 {
     int error = owner(t); if (error) return error;
-    if (t->status.state == KER_TCP_ACTIVE_RESET) return -EALREADY;
+    if (t->status.state == KER_TCP_ACTIVE_TIME_WAIT) return -EBUSY;
+    if (t->status.state == KER_TCP_ACTIVE_RESET || t->status.state == KER_TCP_ACTIVE_CLOSED) return -EALREADY;
     error = emit(t, KER_TCP_RST | (t->peer_known ? KER_TCP_ACK : 0), t->status.peer_isn);
     if (error) return error;
     t->status.state = KER_TCP_ACTIVE_RESET; discard_stream(t); return 0;
@@ -291,8 +342,9 @@ int ker_tcp_active_reset(struct ker_tcp_active *t)
 int ker_tcp_active_cleanup(struct ker_tcp_active *t)
 {
     int error = owner(t); if (error) return error;
-    if ((t->status.state != KER_TCP_ACTIVE_RESET && t->status.state != KER_TCP_ACTIVE_FAILED) ||
-        t->tx->packets) return -EBUSY;
+    if ((t->status.state != KER_TCP_ACTIVE_RESET && t->status.state != KER_TCP_ACTIVE_FAILED && t->status.state != KER_TCP_ACTIVE_CLOSED) ||
+        t->tx->packets || t->status.receive_bytes || t->status.send_bytes || t->status.ack_pending ||
+        (t->status.local_fin && !t->status.local_fin_acked)) return -EBUSY;
     t->receiver->tcp_active = NULL; t->receiver->tcp_active_receive = NULL;
     --t->tx->active_refs;
     BUG_ON(ker_neighbor_release(t->neighbors, t->peer));
@@ -304,10 +356,10 @@ int ker_tcp_active_read(struct ker_tcp_active *t, void *destination, uint16_t ca
     int error = owner(t); if (error) return error;
     if (!t->config.receive_buffer) return -EOPNOTSUPP;
     if (!destination || !capacity) return -EINVAL;
-    if (t->status.state != KER_TCP_ACTIVE_READY)
+    if (!connected(t))
         return t->status.error ? t->status.error : -ENOTCONN;
     uint16_t length = t->status.receive_bytes < capacity ? t->status.receive_bytes : capacity;
-    if (!length) return t->status.error ? t->status.error : -EAGAIN;
+    if (!length) return t->status.peer_eof ? 0 : -EAGAIN;
     uint16_t ring = t->config.receive_capacity;
     uint16_t first = length < ring - t->receive_head ? length : ring - t->receive_head;
     memcpy(destination, t->config.receive_buffer + t->receive_head, first);
@@ -323,7 +375,8 @@ int ker_tcp_active_write(struct ker_tcp_active *t, const void *source, uint16_t 
     int error = owner(t); if (error) return error;
     if (!t->config.send_buffer) return -EOPNOTSUPP;
     if (!source || !length) return -EINVAL;
-    if (t->status.state != KER_TCP_ACTIVE_READY)
+    if (t->status.local_fin || t->status.state == KER_TCP_ACTIVE_CLOSED) return -EPIPE;
+    if (t->status.state != KER_TCP_ACTIVE_READY && t->status.state != KER_TCP_ACTIVE_CLOSE_WAIT)
         return t->status.error ? t->status.error : -ENOTCONN;
     if (t->status.send_bytes || !before(t->status.send_next, t->send_right)) return -EAGAIN;
     if (t->now_ms > UINT64_MAX - t->config.timeout_ms) return -EOVERFLOW;
@@ -339,4 +392,21 @@ int ker_tcp_active_write(struct ker_tcp_active *t, const void *source, uint16_t 
     t->send_retry_ms = t->now_ms + t->config.retry_ms;
     t->send_deadline_ms = t->now_ms + t->config.timeout_ms;
     return length;
+}
+
+int ker_tcp_active_shutdown_write(struct ker_tcp_active *t)
+{
+    int error = owner(t); if (error) return error;
+    if (!t->config.time_wait_ms) return -EOPNOTSUPP;
+    if (t->status.local_fin) return -EALREADY;
+    if (t->status.state != KER_TCP_ACTIVE_READY && t->status.state != KER_TCP_ACTIVE_CLOSE_WAIT)
+        return t->status.error ? t->status.error : -ENOTCONN;
+    if (t->status.send_bytes || !before(t->status.send_next, t->send_right)) return -EAGAIN;
+    if (t->now_ms > UINT64_MAX - t->config.timeout_ms) return -EOVERFLOW;
+    error = emit(t, KER_TCP_FIN | KER_TCP_ACK, t->status.peer_isn);
+    if (error) return error;
+    t->active_close = !t->status.peer_eof; t->status.local_fin = true; ++t->status.send_next;
+    t->send_backoff_ms = t->config.retry_ms; t->send_retry_ms = t->now_ms + t->config.retry_ms;
+    t->send_deadline_ms = t->close_deadline_ms = t->now_ms + t->config.timeout_ms;
+    close_state(t); return 0;
 }
