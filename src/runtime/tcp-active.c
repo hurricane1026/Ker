@@ -129,9 +129,9 @@ static int receive_data(struct ker_tcp_active *t, const struct ker_tcp_packet_vi
     if (seq != next) length = 0;
     uint32_t available = t->receive_right - next;
     if (length > available) length = available;
+    if (t->status.peer_eof) length = 0;
     uint16_t capacity = t->config.receive_capacity;
     if (length > capacity - t->status.receive_bytes) return -EOVERFLOW;
-    if (t->status.peer_eof) length = 0;
     if (length) {
         unsigned int tail = (t->receive_head + t->status.receive_bytes) % capacity;
         unsigned int first = length < capacity - tail ? length : capacity - tail;

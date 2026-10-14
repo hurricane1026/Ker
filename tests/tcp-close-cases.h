@@ -137,6 +137,40 @@ static void test_active(void)
     /* Test-only restoration permits fixture resource accounting; no production escape. */
     active.time_wait_saturated = false;
     CHECK(ker_tcp_active_poll(&active, UINT64_MAX) == 1);
+
+    /* An accepted EOF with a nearly full ring still ACKs later payload without
+     * changing sequence space or unread bytes, even while TX is backpressured. */
+    unsigned char full_data[1023], received_data[1023];
+    for (size_t i = 0; i < sizeof(full_data); ++i) full_data[i] = (unsigned char)i;
+    open_again(200);
+    fill_tx(); fill_tx();
+    inject(0, 0, KER_TCP_ACK | KER_TCP_FIN, full_data, sizeof(full_data));
+    CHECK(active.status.peer_eof && active.status.receive_next == 1024 &&
+          active.status.receive_bytes == sizeof(full_data) &&
+          active.status.ack_pending && active.status.last_tx_error == -ENOSPC);
+    unsigned char extra[4] = {9, 8, 7, 6};
+    inject(1024, 0, KER_TCP_ACK, extra, sizeof(extra));
+    CHECK(active.status.peer_eof && active.status.receive_next == 1024 &&
+          active.status.receive_bytes == sizeof(full_data) &&
+          active.status.ack_pending && active.status.last_tx_error == -ENOSPC);
+    drain(KER_TCP_SYN | KER_TCP_ACK); drain(KER_TCP_SYN | KER_TCP_ACK);
+    CHECK(ker_tcp_active_poll(&active, active.now_ms) == 1);
+    wire_control(0, 1024, KER_TCP_ACK);
+    CHECK(!active.status.ack_pending && active.status.receive_next == 1024 &&
+          active.status.receive_bytes == sizeof(full_data));
+    CHECK(ker_tcp_active_read(&active, received_data, sizeof(received_data)) ==
+          sizeof(received_data));
+    CHECK(!memcmp(received_data, full_data, sizeof(full_data)) &&
+          active.status.receive_next == 1024 && !active.status.receive_bytes &&
+          active.status.peer_eof);
+    CHECK(ker_tcp_active_poll(&active, active.now_ms) == 1);
+    wire_control(0, 1024, KER_TCP_ACK);
+    CHECK(ker_tcp_active_read(&active, received_data, 1) == 0);
+    CHECK(ker_tcp_active_shutdown_write(&active) == 0);
+    wire_control(0, 1024, KER_TCP_FIN | KER_TCP_ACK);
+    inject(1024, 1, KER_TCP_ACK, NULL, 0);
+    CHECK(active.status.state == KER_TCP_ACTIVE_CLOSED &&
+          active.status.peer_eof && active.status.receive_next == 1024);
 }
 static void test_host(void)
 {
