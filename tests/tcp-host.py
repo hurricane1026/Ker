@@ -11,7 +11,7 @@ import subprocess
 import sys
 
 
-def run(binary, server_first=False, local_port=8000):
+def run(binary, server_first=False, local_port=8000, reorder=False):
     try:
         tap = os.open('/dev/net/tun', os.O_RDWR | os.O_NONBLOCK)
         # TUNSETIFF, IFF_TAP | IFF_NO_PI: raw Ethernet frames, no PI header.
@@ -29,7 +29,8 @@ def run(binary, server_first=False, local_port=8000):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as peer:
             peer.bind(('192.0.2.2', local_port))
             peer.settimeout(5)
-            child = subprocess.Popen([binary, str(tap)] + (['server-first'] if server_first else []),
+            mode = 'server-first' if server_first else ('reorder' if reorder else None)
+            child = subprocess.Popen([binary, str(tap)] + ([mode] if mode else []),
                                      pass_fds=(tap,))
             peer.connect(('192.0.2.1', 9000))
             peer.sendall(bytes(range(256)) * 16)
@@ -48,7 +49,8 @@ def run(binary, server_first=False, local_port=8000):
                 # Observe Ker's FIN/EOF before beginning the peer half-close.
                 peer.shutdown(socket.SHUT_WR)
             assert child.wait(timeout=5) == 0
-        print(f'PASS: Linux TCP connect, {"server-first" if server_first else "peer-first"} '
+        print(f'PASS: Linux TCP connect, {"server-first" if server_first else "peer-first"}'
+              f'{" with proven segment reordering" if reorder else ""} '
               'half-close, full-duplex streams and orderly EOF')
         return 0
     finally:
@@ -69,7 +71,10 @@ if __name__ == '__main__':
         result = run(sys.argv[1], False, 8000)
         if result:
             raise SystemExit(result)
-        raise SystemExit(run(sys.argv[1], True, 8001))
+        result = run(sys.argv[1], True, 8001)
+        if result:
+            raise SystemExit(result)
+        raise SystemExit(run(sys.argv[1], False, 8002, reorder=True))
     if not shutil.which('unshare') or not shutil.which('ip'):
         print('SKIP: unshare and ip are required')
         raise SystemExit(77)
