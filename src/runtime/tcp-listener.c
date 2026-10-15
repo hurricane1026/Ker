@@ -30,6 +30,10 @@ static bool stream_enabled(const struct ker_tcp_listener *t)
 { return t->config.receive_storage != NULL; }
 static bool send_enabled(const struct ker_tcp_listener *t)
 { return t->config.send_storage != NULL; }
+static bool reorder_enabled(const struct ker_tcp_listener *t)
+{ return t->config.reorder_storage != NULL; }
+static size_t reorder_stride(const struct ker_tcp_listener *t)
+{ return ((size_t)t->config.receive_capacity + 7U) / 8U; }
 static bool close_enabled(const struct ker_tcp_listener *t)
 { return t->config.time_wait_ms != 0; }
 static uint16_t initial_window(const struct ker_tcp_listener *t)
@@ -52,14 +56,30 @@ static unsigned char *receive_ring(struct ker_tcp_listener *t, struct ker_tcp_re
 { return t->config.receive_storage + (size_t)(r - t->requests) * t->config.receive_capacity; }
 static unsigned char *send_ring(struct ker_tcp_listener *t, struct ker_tcp_request *r)
 { return t->config.send_storage + (size_t)(r - t->requests) * t->config.send_capacity; }
-static void discard_stream_data(struct ker_tcp_request *r)
+static unsigned char *reorder_map(struct ker_tcp_listener *t, struct ker_tcp_request *r)
+{ return t->config.reorder_storage + (size_t)(r - t->requests) * reorder_stride(t); }
+static bool reorder_test(const unsigned char *map, size_t index)
+{ return (map[index >> 3] & (unsigned char)(1U << (index & 7U))) != 0; }
+static void reorder_set(unsigned char *map, size_t index)
+{ map[index >> 3] |= (unsigned char)(1U << (index & 7U)); }
+static void reorder_clear(unsigned char *map, size_t index)
+{ map[index >> 3] &= (unsigned char)~(1U << (index & 7U)); }
+static void clear_reorder(struct ker_tcp_listener *t, struct ker_tcp_request *r)
+{
+    if (reorder_enabled(t))
+        memset(reorder_map(t, r), 0, reorder_stride(t));
+    r->reorder_fin_pending = false;
+    r->reorder_fin_sequence = 0;
+}
+static void discard_stream_data(struct ker_tcp_listener *t, struct ker_tcp_request *r)
 {
     r->receive_bytes = r->receive_head = 0;
     r->ack_pending = false;
+    clear_reorder(t, r);
 }
-static void discard_stream(struct ker_tcp_request *r)
+static void discard_stream(struct ker_tcp_listener *t, struct ker_tcp_request *r)
 {
-    discard_stream_data(r);
+    discard_stream_data(t, r);
     r->receive_next = r->receive_right = 0;
 }
 static void discard_send(struct ker_tcp_request *r)
@@ -71,13 +91,14 @@ static bool valid_send_ack(const struct ker_tcp_request *r, uint32_t ack)
 { return !before(ack, r->send_unacknowledged) && !before(r->send_next, ack); }
 static void acknowledge_send(struct ker_tcp_listener *, struct ker_tcp_request *,
                             const struct ker_tcp_packet_view *);
-static bool expire_send(struct ker_tcp_request *r, uint64_t now)
+static bool expire_send(struct ker_tcp_listener *t, struct ker_tcp_request *r, uint64_t now)
 {
     if ((r->state != KER_TCP_REQUEST_READY && r->state != KER_TCP_REQUEST_CLOSE_WAIT) ||
         !r->send_bytes || now < r->send_deadline_ms)
         return false;
     r->state = KER_TCP_REQUEST_FAILED;
     r->error = -ETIMEDOUT;
+    clear_reorder(t, r);
     discard_send(r);
     return true;
 }
@@ -107,7 +128,7 @@ static bool expire_close(struct ker_tcp_listener *t, struct ker_tcp_request *r, 
     r->state = KER_TCP_REQUEST_FAILED;
     r->error = -ETIMEDOUT;
     ++t->timed_out;
-    discard_stream_data(r);
+    discard_stream_data(t, r);
     discard_send(r);
     return true;
 }
@@ -245,12 +266,77 @@ static void acknowledge_send(struct ker_tcp_listener *t, struct ker_tcp_request 
 }
 static void discard(struct ker_tcp_listener *t, struct ker_tcp_request *r)
 {
+    clear_reorder(t, r);
     *r = (struct ker_tcp_request){0};
     --t->count;
+}
+static int receive_reordered(struct ker_tcp_listener *t, struct ker_tcp_request *r,
+                             const struct ker_tcp_packet_view *p)
+{
+    unsigned char *map = reorder_map(t, r);
+    unsigned char *ring = receive_ring(t, r);
+    const uint16_t capacity = t->config.receive_capacity;
+    uint32_t next = r->receive_next;
+    unsigned int skip = 0;
+    if (before(p->sequence, next)) {
+        skip = next - p->sequence;
+        if (skip >= p->payload_length) skip = p->payload_length;
+    }
+    uint32_t width = r->receive_right - next;
+    for (unsigned int i = skip; i < p->payload_length; ++i) {
+        uint32_t sequence = p->sequence + i;
+        uint32_t offset = sequence - next;
+        if (offset >= width || (r->reorder_fin_pending &&
+            !before(sequence, r->reorder_fin_sequence))) break;
+        /* receive_right and receive_bytes bound this to unused ring slots. */
+        if ((uint32_t)r->receive_bytes + offset >= capacity) break;
+        size_t index = ((size_t)r->receive_head + r->receive_bytes + offset) % capacity;
+        if (!reorder_test(map, index)) {
+            ring[index] = p->payload[i];
+            reorder_set(map, index);
+        }
+        /* Conflicting overlaps preserve the first retained byte. */
+    }
+
+    if ((p->flags & KER_TCP_FIN) && !r->peer_eof) {
+        uint32_t fin_sequence = p->sequence + p->payload_length;
+        uint32_t fin_offset = fin_sequence - next;
+        if (fin_offset < width &&
+            (!r->reorder_fin_pending || r->reorder_fin_sequence == fin_sequence)) {
+            r->reorder_fin_pending = true;
+            r->reorder_fin_sequence = fin_sequence;
+            /* A newly retained FIN bounds and discards any already-held tail. */
+            for (uint32_t offset = fin_offset; offset < width; ++offset) {
+                size_t index = ((size_t)r->receive_head + r->receive_bytes + offset) % capacity;
+                reorder_clear(map, index);
+            }
+        }
+    }
+
+    while (r->receive_bytes < capacity) {
+        size_t index = ((size_t)r->receive_head + r->receive_bytes) % capacity;
+        if (!reorder_test(map, index)) break;
+        reorder_clear(map, index);
+        ++r->receive_bytes;
+        ++r->receive_next;
+    }
+    if (r->reorder_fin_pending && r->receive_next == r->reorder_fin_sequence &&
+        before(r->receive_next, r->receive_right)) {
+        ++r->receive_next;
+        r->peer_eof = true;
+        r->reorder_fin_pending = false;
+        r->reorder_fin_sequence = 0;
+        close_transition(t, r);
+    }
+    r->ack_pending = true;
+    t->last_tx_error = emit(t, r, KER_TCP_ACK);
+    return t->last_tx_error;
 }
 static int receive_data(struct ker_tcp_listener *t, struct ker_tcp_request *r,
                         const struct ker_tcp_packet_view *p)
 {
+    if (reorder_enabled(t) && !r->peer_eof)
+        return receive_reordered(t, r, p);
     uint32_t next = r->receive_next, seq = p->sequence;
     unsigned int skip = 0, length = p->payload_length;
     if (before(seq, next)) {
@@ -320,7 +406,7 @@ static int receive_request(void *arg, struct sk_buff *skb,
             r->error = -ETIMEDOUT;
             ++t->timed_out;
         }
-        if (expire_send(r, t->now_ms) || expire_close(t, r, t->now_ms)) goto done;
+        if (expire_send(t, r, t->now_ms) || expire_close(t, r, t->now_ms)) goto done;
         if (r->state == KER_TCP_REQUEST_RESET || r->state == KER_TCP_REQUEST_FAILED)
             goto done;
         if (r->state == KER_TCP_REQUEST_TIME_WAIT) {
@@ -347,7 +433,7 @@ static int receive_request(void *arg, struct sk_buff *skb,
         if ((p->flags & KER_TCP_RST) && p->sequence == expected_peer_sequence) {
             r->state = KER_TCP_REQUEST_FAILED;
             r->error = -ECONNRESET;
-            discard_stream_data(r);
+            discard_stream_data(t, r);
             discard_send(r);
             goto done;
         }
@@ -380,7 +466,7 @@ static int receive_request(void *arg, struct sk_buff *skb,
                 error = emit(t, r, KER_TCP_RST | KER_TCP_ACK);
                 if (!error) {
                     r->state = KER_TCP_REQUEST_RESET; r->error = -EOPNOTSUPP;
-                    discard_stream(r);
+                    discard_stream(t, r);
                     error = -EOPNOTSUPP;
                 }
             }
@@ -406,8 +492,8 @@ static int receive_request(void *arg, struct sk_buff *skb,
             (p->flags == KER_TCP_ACK || p->flags == (KER_TCP_ACK | KER_TCP_PSH) ||
              p->flags == (KER_TCP_ACK | KER_TCP_FIN) ||
              p->flags == (KER_TCP_ACK | KER_TCP_FIN | KER_TCP_PSH))) {
-            bool eligible = close_segment_eligible(r, p);
-            if (eligible && ack_valid) acknowledge_close(t, r, p);
+            bool ack_eligible = close_segment_eligible(r, p);
+            if (ack_eligible && ack_valid) acknowledge_close(t, r, p);
             if (ack_valid && (p->payload_length || (p->flags & KER_TCP_FIN)))
                 error = receive_data(t, r, p);
             goto done;
@@ -416,7 +502,7 @@ static int receive_request(void *arg, struct sk_buff *skb,
             at_contiguous_edge(p, r->receive_next) && ack_valid && (p->flags & KER_TCP_ACK)) {
             error = emit(t, r, KER_TCP_RST | KER_TCP_ACK);
             if (!error) { r->state = KER_TCP_REQUEST_RESET; r->error = -EOPNOTSUPP;
-                discard_stream(r); discard_send(r); error = -EOPNOTSUPP; }
+                discard_stream(t, r); discard_send(r); error = -EOPNOTSUPP; }
         } else if (stream_enabled(t) && (p->flags == KER_TCP_ACK ||
                 p->flags == (KER_TCP_ACK | KER_TCP_PSH)) && ack_valid && p->payload_length) {
             if (send_ack_eligible(t, r, p)) acknowledge_send(t, r, p);
@@ -426,13 +512,13 @@ static int receive_request(void *arg, struct sk_buff *skb,
             ack_valid && (p->flags & KER_TCP_ACK)) {
             error = emit(t, r, KER_TCP_RST | KER_TCP_ACK);
             if (!error) { r->state = KER_TCP_REQUEST_RESET; r->error = -EOPNOTSUPP;
-                discard_stream(r); discard_send(r); error = -EOPNOTSUPP; }
+                discard_stream(t, r); discard_send(r); error = -EOPNOTSUPP; }
         } else if ((p->payload_length || (p->flags & KER_TCP_FIN)) &&
             p->sequence == expected_peer_sequence &&
             ack_valid && (p->flags & KER_TCP_ACK)) {
             error = emit(t, r, KER_TCP_RST | KER_TCP_ACK);
             if (!error) { r->state = KER_TCP_REQUEST_RESET; r->error = -EOPNOTSUPP;
-                discard_stream(r); discard_send(r); error = -EOPNOTSUPP; }
+                discard_stream(t, r); discard_send(r); error = -EOPNOTSUPP; }
         }
         if (!error && send_enabled(t) && p->flags == KER_TCP_ACK &&
             !p->payload_length && send_ack_eligible(t, r, p))
@@ -492,6 +578,12 @@ int ker_tcp_listener_init(struct ker_tcp_listener *t, struct ker_transport_recei
     if ((!cfg->send_storage && (cfg->send_storage_size || cfg->send_capacity)) ||
         (cfg->send_storage && (!cfg->send_capacity || capacity > SIZE_MAX / cfg->send_capacity ||
          cfg->send_storage_size < capacity * cfg->send_capacity))) return -EINVAL;
+    if ((!cfg->reorder_storage && cfg->reorder_storage_size) ||
+        (cfg->reorder_storage && !cfg->receive_storage)) return -EINVAL;
+    size_t reorder_bytes = ((size_t)cfg->receive_capacity + 7U) / 8U;
+    if (cfg->reorder_storage && capacity > SIZE_MAX / reorder_bytes) return -EOVERFLOW;
+    if (cfg->reorder_storage && cfg->reorder_storage_size < capacity * reorder_bytes)
+        return -EINVAL;
     if (cfg->time_wait_ms && (!cfg->receive_storage || !cfg->send_storage)) return -EINVAL;
     if (t->receiver || t->neighbors || t->tx || t->peer || t->requests ||
         t->capacity || t->count || t->busy || r->tcp_listener ||
@@ -509,7 +601,8 @@ int ker_tcp_listener_init(struct ker_tcp_listener *t, struct ker_transport_recei
             q->peer_window || q->send_bytes || q->send_head ||
             q->send_retry_ms || q->send_deadline_ms || q->send_backoff_ms) return -EINVAL;
         if (q->peer_eof || q->local_fin || q->local_fin_acked || q->active_close ||
-            q->time_wait_saturated || q->close_deadline_ms || q->time_wait_deadline_ms)
+            q->time_wait_saturated || q->close_deadline_ms || q->time_wait_deadline_ms ||
+            q->reorder_fin_pending || q->reorder_fin_sequence)
             return -EINVAL;
     }
     struct neighbour *entry = NULL;
@@ -518,6 +611,7 @@ int ker_tcp_listener_init(struct ker_tcp_listener *t, struct ker_transport_recei
     unsigned char mac[ETH_ALEN];
     error = ker_neighbor_mac(n, entry, mac);
     if (error || (mac[0] & 1)) { ker_neighbor_release(n, entry); return error ? error : -EINVAL; }
+    if (cfg->reorder_storage) memset(cfg->reorder_storage, 0, capacity * reorder_bytes);
     uint64_t generation = t->next_generation;
     *t = (struct ker_tcp_listener){.receiver = r, .neighbors = n, .peer = entry,
         .peer_ip = peer, .tx = tx, .requests = requests, .capacity = capacity,
@@ -552,7 +646,7 @@ int ker_tcp_listener_poll(struct ker_tcp_listener *t, uint64_t now, unsigned int
         if (expire_close(t, r, now)) continue;
         if ((r->state == KER_TCP_REQUEST_READY || r->state == KER_TCP_REQUEST_CLOSE_WAIT) &&
             r->send_bytes) {
-            if (expire_send(r, now)) continue;
+            if (expire_send(t, r, now)) continue;
             if (now >= r->send_retry_ms) {
                 t->last_tx_error = retransmit(t, r);
                 r->send_backoff_ms = r->send_backoff_ms > UINT64_MAX / 2 ?
@@ -632,8 +726,8 @@ int ker_tcp_listener_reset(struct ker_tcp_listener *t, struct ker_tcp_request_ha
     if (r->state == KER_TCP_REQUEST_CLOSED) return -EALREADY;
     error = emit(t, r, KER_TCP_RST | KER_TCP_ACK);
     if (error) return error;
-    if (close_enabled(t)) discard_stream_data(r);
-    else discard_stream(r);
+    if (close_enabled(t)) discard_stream_data(t, r);
+    else discard_stream(t, r);
     discard_send(r);
     r->state = KER_TCP_REQUEST_RESET;
     return 0;

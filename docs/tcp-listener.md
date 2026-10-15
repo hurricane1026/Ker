@@ -42,10 +42,18 @@ even if RX sees them before the next budgeted timeout scan.
 
 `ker_tcp_listener_read` copies contiguous bytes from an accepted handle on the
 owning worker. Each request has an isolated bounded ring. Old duplicate prefixes
-are trimmed, future gaps are discarded, and bytes beyond the last admitted
-window edge are clipped. Reads schedule a window ACK; the edge advances only
-after exporter admission. Retained data survives ACK backpressure and poll
-retries pending ACKs fairly. `ker_tcp_listener_write` copies and admits at most
+are trimmed, and bytes beyond the last admitted window edge are clipped. By
+default future gaps are discarded. Optional `reorder_storage` enables bounded
+gap retention with one validity bit per receive-ring byte; its flat arena must
+cover `request_capacity * ceil(receive_capacity / 8)` bytes, remain stable and
+non-overlapping with the receive arena until cleanup, and is isolated by slot.
+The first retained byte wins conflicting overlaps, and the first accepted
+out-of-order FIN fixes the pending FIN sequence. Only contiguous bytes become
+readable or advance the cumulative ACK. A FIN may wait behind a gap; it is
+consumed once the missing bytes arrive, and bounds/discards retained bytes at or
+after its sequence. Reads schedule a window ACK; the edge advances only after
+exporter admission. Retained data and validity bits survive ACK backpressure
+and poll retries pending ACKs fairly. `ker_tcp_listener_write` copies and admits at most
 one segment, clipped by the peer MSS, advertised window and per-slot send
 capacity. It returns the locally admitted byte count; an outstanding segment or
 zero peer window returns `-EAGAIN`. The private copy is retained for
@@ -84,12 +92,16 @@ socket capabilities remain subsequent work.
 `tcp-listener` tests control state, tuple/ACK checks, duplicate SYN behavior,
 retries, absolute expiry, queue backpressure, callback reentry, output
 transactionality, stale handles, generation exhaustion, per-slot isolation,
-final-ACK data, sequence and ring wrap, clipping, gaps and duplicates.
+final-ACK data, sequence and ring wrap, clipping, default gap discard and opt-in
+gap retention, conflicting overlaps, delayed FIN, and duplicates.
 `tcp-host` runs the same listener against a real Linux `AF_INET/SOCK_STREAM`
 client through TAP in a disposable user/network namespace. It requires an
 actual ARP reply, a successful Linux `connect`/Ker `accept`, byte-verified
 full-duplex transfer, peer-first and server-first half-close, and orderly EOF
-after Ker's FIN. The test has bounded waits and kills its child on
+after Ker's FIN. Its reorder mode holds the first client data segment, dispatches
+the next higher-sequence segment first, verifies the listener retains it without
+advancing the cumulative edge, then releases the first segment and verifies
+promotion. The test has bounded waits and kills its child on
 failure. Missing namespace/TAP facilities produce a CTest skip (exit 77), which
 is not interoperability evidence.
 

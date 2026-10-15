@@ -24,6 +24,8 @@ struct ker_tcp_request {
     int error;
     bool accepted, ack_pending, peer_eof, local_fin, local_fin_acked;
     bool active_close, time_wait_saturated;
+    bool reorder_fin_pending;
+    uint32_t reorder_fin_sequence;
 };
 struct ker_tcp_listener;
 struct ker_tcp_request_handle {
@@ -54,6 +56,11 @@ struct ker_tcp_listener_config {
     uint16_t send_capacity;
     /* Opt-in bounded FIN close; requires both receive and send arenas. */
     uint64_t time_wait_ms;
+    /* Optional per-slot byte-validity bitmap: request_capacity * ceil(receive_capacity/8).
+     * Enables bounded passive gap retention; absent storage preserves gap discard.
+     * Keep this arena stable and non-overlapping with receive_storage until cleanup. */
+    unsigned char *reorder_storage;
+    size_t reorder_storage_size;
 };
 struct ker_tcp_listener {
     struct ker_transport_receiver *receiver;
