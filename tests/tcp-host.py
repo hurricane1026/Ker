@@ -31,15 +31,15 @@ def run(binary):
             peer.settimeout(5)
             child = subprocess.Popen([binary, str(tap)], pass_fds=(tap,))
             peer.connect(('192.0.2.1', 9000))
-            # The handshake-only listener explicitly aborts after accept.
-            # Data transfer and a graceful FIN close are not implemented.
+            peer.sendall(bytes(range(256)) * 16)
+            # Passive receive is supported; graceful FIN close remains unsupported.
             try:
                 data = peer.recv(1)
                 raise AssertionError(f'expected RST, received {data!r}')
             except ConnectionResetError:
                 pass
             assert child.wait(timeout=5) == 0
-        print('PASS: independent Linux TCP connect, Ker accept, ARP and explicit RST')
+        print('PASS: Linux TCP connect, passive stream bytes, ARP and explicit RST')
         return 0
     finally:
         if child is not None and child.poll() is None:
