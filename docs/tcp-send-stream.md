@@ -26,9 +26,16 @@ checked before receive acknowledgment or pending local ACK work, discards privat
 send/receive state, and reports `-ETIMEDOUT`. Caller-configured retry/timeout values
 are a private test/deployment policy, not an adaptive TCP RTT/RTO estimator.
 
-A zero peer window prevents new writes without starting a deadline or copying.
-Already-sent unacknowledged suffixes may still be retransmitted. Persist probing
-is not implemented; resuming new writes requires a valid peer window update.
+A zero peer window prevents new writes by default without starting a deadline or
+copying. With `zero_window_probe` enabled, one application write may admit exactly
+one real caller byte when no segment is outstanding. That byte uses the normal
+copy, retransmit, backoff and fixed-deadline path; it is never synthesized or
+hidden from the caller. An ACK that only reopens the window does not retire it;
+only a cumulative ACK covering that byte does. This is bounded, application-driven
+recovery and still terminates at the configured send deadline. It is not the
+indefinite zero-window persist mechanism described in
+[RFC 9293 §3.8.6.1](https://www.rfc-editor.org/rfc/rfc9293.html#section-3.8.6.1).
+Already-sent unacknowledged suffixes may still be retransmitted.
 The single-segment flight limit is deliberately conservative; this profile does
 not implement congestion-window growth, fast retransmit, SACK, adaptive RTO or
 public socket capabilities. FIN/EOF/TIME_WAIT are opt-in; see
@@ -48,6 +55,12 @@ read-window reopening by data, full-duplex ACK+payload, reset and cleanup.
 server: Linux receives and verifies 8192 binary bytes, echoes them, and Ker
 verifies every byte before an explicit RST. Legacy receive-stream, active/passive
 handshake and UDP host tests remain separate.
+
+`tcp-persist` checks opt-in/default behavior, transactional one-byte admission,
+zero-window ACK and reopened-window retries, deadline ordering and sequence wrap.
+`tcp-persist-host` uses a small Linux receive buffer, drops the first eligible
+nonzero-window ACK while the probe remains outstanding, and verifies later Linux
+acknowledgment and byte-exact transfer.
 
 See [receive stream](tcp-receive-stream.md), [active handshake](tcp-active.md),
 and [host prerequisites](udp-host-interop.md).

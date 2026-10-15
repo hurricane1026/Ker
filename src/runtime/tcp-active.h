@@ -33,6 +33,8 @@ struct ker_tcp_active_config {
      * byte; size is ceil(receive_capacity/8). Absent storage keeps gap discard. */
     unsigned char *reorder_buffer;
     size_t reorder_buffer_size;
+    /* Send one real application byte as a bounded zero-window probe. */
+    bool zero_window_probe;
 };
 struct ker_tcp_active_snapshot {
     enum ker_tcp_active_state state;
