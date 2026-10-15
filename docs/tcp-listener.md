@@ -71,6 +71,17 @@ bytes. Stale duplicates and future gaps cannot change send ACK/window state.
 Retry intervals back off exponentially against a fixed absolute timeout. No
 persist timer is used.
 
+The opt-in `adaptive_rto` configuration applies only to ordinary DATA flights.
+It estimates RTT with x8-scaled SRTT/RTTVAR, starts at 1000 ms, and clamps the
+computed RTO to 1000–60000 ms. A full clean ACK contributes one sample; partial
+advancing ACKs restart the remaining suffix timer without sampling, and
+retransmitted flights follow Karn's rule. Successful DATA retransmissions
+persist exponential RTO backoff until a later clean sample updates the estimate.
+Exporter `ENOSPC` advances that retry attempt conservatively without marking
+the flight retransmitted or changing the connection estimate. The absolute
+application deadline never moves. With adaptation disabled, and for SYN, FIN,
+and zero-window probe flights, the existing fixed retry policy remains in use.
+
 Graceful passive close is opt-in through nonzero `time_wait_ms`, which requires
 both stream arenas. A peer FIN is acknowledged after all contiguous preceding
 bytes are retained; reads return zero only after those bytes are drained. The
@@ -111,9 +122,13 @@ advancing the cumulative edge, then releases the first segment and verifies
 promotion. The test has bounded waits and kills its child on
 failure. Missing namespace/TAP facilities produce a CTest skip (exit 77), which
 is not interoperability evidence.
+`tcp-passive-rto-host` holds a selected clean DATA ACK, drops the next DATA
+flight, and verifies the same sequence and bytes are retried after the learned
+RTO; it then checks Karn backoff and a later clean-sample update against the
+Linux peer.
 
 ```sh
-ctest --test-dir /path/to/build -R '^(tcp-listener|tcp-host)$' --output-on-failure
+ctest --test-dir /path/to/build -R '^(tcp-listener|tcp-host|tcp-passive-rto-host)$' --output-on-failure
 ```
 
 See [UDP host interoperability](udp-host-interop.md) for the same TAP/namespace

@@ -663,10 +663,14 @@ if(KER_WITH_DPDK)
         ${CMAKE_CURRENT_SOURCE_DIR}/tcp-host.py $<TARGET_FILE:ker-tcp-listener-test>)
     add_test(NAME tcp-passive-persist-host COMMAND ${Python3_EXECUTABLE}
         ${CMAKE_CURRENT_SOURCE_DIR}/tcp-host.py $<TARGET_FILE:ker-tcp-listener-test> persist)
+    add_test(NAME tcp-passive-rto-host COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tcp-host.py $<TARGET_FILE:ker-tcp-listener-test> rto)
     set_tests_properties(tcp-listener tcp-host PROPERTIES TIMEOUT 30
         ENVIRONMENT "LD_LIBRARY_PATH=${ker_dpdk_library_path}:$ENV{LD_LIBRARY_PATH}")
     set_tests_properties(tcp-host PROPERTIES SKIP_RETURN_CODE 77)
     set_tests_properties(tcp-passive-persist-host PROPERTIES TIMEOUT 45 SKIP_RETURN_CODE 77
+        ENVIRONMENT "LD_LIBRARY_PATH=${ker_dpdk_library_path}:$ENV{LD_LIBRARY_PATH}")
+    set_tests_properties(tcp-passive-rto-host PROPERTIES TIMEOUT 45 SKIP_RETURN_CODE 77
         ENVIRONMENT "LD_LIBRARY_PATH=${ker_dpdk_library_path}:$ENV{LD_LIBRARY_PATH}")
 endif()
 

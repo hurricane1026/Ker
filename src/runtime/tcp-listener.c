@@ -47,6 +47,59 @@ static uint16_t advertised_window(const struct ker_tcp_listener *t,
 }
 static bool before(uint32_t a, uint32_t b)
 { return (int32_t)(a - b) < 0; }
+#define KER_TCP_RTO_MIN_MS 1000U
+#define KER_TCP_RTO_MAX_MS 60000U
+static uint64_t weighted_average(uint64_t old, uint64_t sample,
+                                 uint64_t old_weight, uint64_t divisor)
+{
+    uint64_t sample_weight = divisor - old_weight;
+    uint64_t whole = (old / divisor) * old_weight +
+        (sample / divisor) * sample_weight;
+    uint64_t remainder = (old % divisor) * old_weight +
+        (sample % divisor) * sample_weight;
+    uint64_t quotient = whole + remainder / divisor;
+    return remainder % divisor && quotient < UINT64_MAX ? quotient + 1 : quotient;
+}
+static uint64_t saturating_add(uint64_t a, uint64_t b)
+{ return a > UINT64_MAX - b ? UINT64_MAX : a + b; }
+static uint64_t adaptive_rto(const struct ker_tcp_request *r)
+{
+    uint64_t variation_x8 = r->rttvar_x8 > UINT64_MAX / 4 ?
+        UINT64_MAX : r->rttvar_x8 * 4;
+    if (variation_x8 < 8) variation_x8 = 8;
+    uint64_t sum_x8 = saturating_add(r->rtt_srtt_x8, variation_x8);
+    uint64_t estimate = sum_x8 / 8 + (sum_x8 % 8 != 0);
+    if (estimate < KER_TCP_RTO_MIN_MS) return KER_TCP_RTO_MIN_MS;
+    if (estimate > KER_TCP_RTO_MAX_MS) return KER_TCP_RTO_MAX_MS;
+    return estimate;
+}
+static void update_rtt_estimator(struct ker_tcp_request *r, uint64_t sample)
+{
+    if (!sample) sample = 1;
+    uint64_t sample_x8 = sample > UINT64_MAX / 8 ? UINT64_MAX : sample * 8;
+    if (!r->rtt_srtt_x8) {
+        r->rtt_srtt_x8 = sample_x8;
+        r->rttvar_x8 = sample_x8 / 2;
+    } else {
+        uint64_t difference = r->rtt_srtt_x8 > sample_x8 ?
+            r->rtt_srtt_x8 - sample_x8 : sample_x8 - r->rtt_srtt_x8;
+        r->rttvar_x8 = weighted_average(r->rttvar_x8, difference, 3, 4);
+        r->rtt_srtt_x8 = weighted_average(r->rtt_srtt_x8, sample_x8, 7, 8);
+    }
+    r->rto_ms = adaptive_rto(r);
+}
+static uint64_t doubled_rto(uint64_t current)
+{
+    if (current >= KER_TCP_RTO_MAX_MS || current > KER_TCP_RTO_MAX_MS / 2)
+        return KER_TCP_RTO_MAX_MS;
+    return current * 2;
+}
+static void clear_rtt_state(struct ker_tcp_request *r)
+{
+    r->rtt_srtt_x8 = r->rttvar_x8 = r->send_first_tx_ms = 0;
+    r->rto_ms = 0;
+    r->send_rtt_eligible = r->send_retransmitted = r->send_zero_window_probe = false;
+}
 static bool at_contiguous_edge(const struct ker_tcp_packet_view *p, uint32_t next)
 {
     return p->sequence == next ||
@@ -86,6 +139,7 @@ static void discard_send(struct ker_tcp_request *r)
 {
     r->send_bytes = r->send_head = 0;
     r->send_retry_ms = r->send_deadline_ms = r->send_backoff_ms = 0;
+    clear_rtt_state(r);
 }
 static bool valid_send_ack(const struct ker_tcp_request *r, uint32_t ack)
 { return !before(ack, r->send_unacknowledged) && !before(r->send_next, ack); }
@@ -252,15 +306,27 @@ static void acknowledge_send(struct ker_tcp_listener *t, struct ker_tcp_request 
                              const struct ker_tcp_packet_view *p)
 {
     if (!send_enabled(t) || !(p->flags & KER_TCP_ACK) || !valid_send_ack(r, p->acknowledgment)) return;
+    uint16_t flight_bytes = r->send_bytes;
+    uint32_t acknowledged = p->acknowledgment - r->send_unacknowledged;
+    bool clean_sample = t->config.adaptive_rto && flight_bytes && !r->local_fin &&
+        r->send_rtt_eligible && !r->send_retransmitted && !r->send_zero_window_probe;
     r->peer_window = p->window;
     r->send_right = p->acknowledgment + p->window;
     if (before(r->send_unacknowledged, p->acknowledgment)) {
-        uint32_t advance = p->acknowledgment - r->send_unacknowledged;
         r->send_unacknowledged = p->acknowledgment;
-        if (advance >= r->send_bytes) discard_send(r);
+        if (acknowledged >= r->send_bytes) {
+            r->send_bytes = r->send_head = 0;
+            r->send_retry_ms = r->send_deadline_ms = r->send_backoff_ms = 0;
+            r->send_rtt_eligible = r->send_retransmitted = r->send_zero_window_probe = false;
+            if (clean_sample && t->now_ms >= r->send_first_tx_ms)
+                update_rtt_estimator(r, t->now_ms - r->send_first_tx_ms);
+            r->send_first_tx_ms = 0;
+        }
         else {
-            r->send_head = (r->send_head + advance) % t->config.send_capacity;
-            r->send_bytes -= advance;
+            r->send_head = (r->send_head + acknowledged) % t->config.send_capacity;
+            r->send_bytes -= acknowledged;
+            if (t->config.adaptive_rto && flight_bytes && !r->local_fin)
+                r->send_retry_ms = saturating_add(t->now_ms, r->send_backoff_ms);
         }
     }
 }
@@ -535,6 +601,7 @@ static int receive_request(void *arg, struct sk_buff *skb,
     }
     struct ker_tcp_request candidate = {.peer_port = p->source_port,
         .peer_isn = p->sequence, .state = KER_TCP_REQUEST_SYN,
+        .rto_ms = t->config.adaptive_rto ? KER_TCP_RTO_MIN_MS : 0,
         .receive_next = (stream_enabled(t) || send_enabled(t)) ? p->sequence + 1U : 0,
         .generation = t->next_generation + 1,
         .retry_ms = t->now_ms + t->config.retry_ms,
@@ -602,7 +669,9 @@ int ker_tcp_listener_init(struct ker_tcp_listener *t, struct ker_transport_recei
             q->send_retry_ms || q->send_deadline_ms || q->send_backoff_ms) return -EINVAL;
         if (q->peer_eof || q->local_fin || q->local_fin_acked || q->active_close ||
             q->time_wait_saturated || q->close_deadline_ms || q->time_wait_deadline_ms ||
-            q->reorder_fin_pending || q->reorder_fin_sequence)
+            q->reorder_fin_pending || q->reorder_fin_sequence || q->rtt_srtt_x8 ||
+            q->rttvar_x8 || q->rto_ms || q->send_first_tx_ms || q->send_rtt_eligible ||
+            q->send_retransmitted || q->send_zero_window_probe)
             return -EINVAL;
     }
     struct neighbour *entry = NULL;
@@ -648,11 +717,20 @@ int ker_tcp_listener_poll(struct ker_tcp_listener *t, uint64_t now, unsigned int
             r->send_bytes) {
             if (expire_send(t, r, now)) continue;
             if (now >= r->send_retry_ms) {
+                bool adaptive_data = t->config.adaptive_rto && r->send_rtt_eligible &&
+                    !r->send_zero_window_probe && !r->local_fin;
                 t->last_tx_error = retransmit(t, r);
-                r->send_backoff_ms = r->send_backoff_ms > UINT64_MAX / 2 ?
-                    UINT64_MAX : r->send_backoff_ms * 2;
-                r->send_retry_ms = now > UINT64_MAX - r->send_backoff_ms ?
-                    UINT64_MAX : now + r->send_backoff_ms;
+                if (adaptive_data) {
+                    if (!t->last_tx_error) {
+                        r->send_retransmitted = true;
+                        r->rto_ms = doubled_rto(r->send_backoff_ms);
+                    }
+                    r->send_backoff_ms = doubled_rto(r->send_backoff_ms);
+                } else {
+                    r->send_backoff_ms = r->send_backoff_ms > UINT64_MAX / 2 ?
+                        UINT64_MAX : r->send_backoff_ms * 2;
+                }
+                r->send_retry_ms = saturating_add(now, r->send_backoff_ms);
                 continue;
             }
         }
@@ -790,8 +868,13 @@ int ker_tcp_listener_write(struct ker_tcp_listener *t, struct ker_tcp_request_ha
     r->send_head = 0;
     r->send_bytes = count;
     r->send_next += count;
-    r->send_backoff_ms = t->config.retry_ms;
-    r->send_retry_ms = t->now_ms + t->config.retry_ms;
+    r->send_zero_window_probe = probe;
+    r->send_rtt_eligible = t->config.adaptive_rto && !probe;
+    r->send_retransmitted = false;
+    r->send_first_tx_ms = r->send_rtt_eligible ? t->now_ms : 0;
+    r->send_backoff_ms = r->send_rtt_eligible ? r->rto_ms : t->config.retry_ms;
+    if (!r->send_backoff_ms) r->send_backoff_ms = KER_TCP_RTO_MIN_MS;
+    r->send_retry_ms = saturating_add(t->now_ms, r->send_backoff_ms);
     r->send_deadline_ms = t->now_ms + t->config.timeout_ms;
     return count;
 }
