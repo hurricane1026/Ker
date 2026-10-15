@@ -12,7 +12,7 @@ import sys
 import time
 
 
-def run(binary, server_first=False, local_port=8000, reorder=False, persist=False):
+def run(binary, server_first=False, local_port=8000, reorder=False, persist=False, rto=False):
     try:
         tap = os.open('/dev/net/tun', os.O_RDWR | os.O_NONBLOCK)
         # TUNSETIFF, IFF_TAP | IFF_NO_PI: raw Ethernet frames, no PI header.
@@ -32,7 +32,8 @@ def run(binary, server_first=False, local_port=8000, reorder=False, persist=Fals
             if persist:
                 peer.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 2048)
             peer.settimeout(5)
-            mode = 'persist' if persist else ('server-first' if server_first else ('reorder' if reorder else None))
+            mode = 'persist' if persist else ('rto' if rto else
+                   ('server-first' if server_first else ('reorder' if reorder else None)))
             child = subprocess.Popen([binary, str(tap)] + ([mode] if mode else []),
                                      pass_fds=(tap,))
             peer.connect(('192.0.2.1', 9000))
@@ -84,7 +85,10 @@ if __name__ == '__main__':
         result = run(sys.argv[1], False, 8002, reorder=True)
         if result:
             raise SystemExit(result)
-        raise SystemExit(run(sys.argv[1], False, 8003, persist=True))
+        result = run(sys.argv[1], False, 8003, persist=True)
+        if result:
+            raise SystemExit(result)
+        raise SystemExit(run(sys.argv[1], False, 8004, rto=True))
     if len(sys.argv) == 3 and sys.argv[2] == 'persist':
         if not shutil.which('unshare') or not shutil.which('ip'):
             raise SystemExit(77)
@@ -95,6 +99,16 @@ if __name__ == '__main__':
             str(Path(__file__).resolve()), str(Path(sys.argv[1]).resolve()), 'persist', '--isolated']))
     if len(sys.argv) == 4 and sys.argv[2:] == ['persist', '--isolated']:
         raise SystemExit(run(sys.argv[1], False, 8003, persist=True))
+    if len(sys.argv) == 3 and sys.argv[2] == 'rto':
+        if not shutil.which('unshare') or not shutil.which('ip'):
+            raise SystemExit(77)
+        probe = subprocess.run(['unshare', '-Urn', 'true'], capture_output=True, text=True)
+        if probe.returncode:
+            raise SystemExit(77)
+        raise SystemExit(subprocess.call(['unshare', '-Urn', sys.executable,
+            str(Path(__file__).resolve()), str(Path(sys.argv[1]).resolve()), 'rto', '--isolated']))
+    if len(sys.argv) == 4 and sys.argv[2:] == ['rto', '--isolated']:
+        raise SystemExit(run(sys.argv[1], False, 8004, rto=True))
     if not shutil.which('unshare') or not shutil.which('ip'):
         print('SKIP: unshare and ip are required')
         raise SystemExit(77)

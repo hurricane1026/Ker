@@ -26,6 +26,8 @@ struct ker_tcp_request {
     bool active_close, time_wait_saturated;
     bool reorder_fin_pending;
     uint32_t reorder_fin_sequence;
+    uint64_t rtt_srtt_x8, rttvar_x8, rto_ms, send_first_tx_ms;
+    bool send_rtt_eligible, send_retransmitted, send_zero_window_probe;
 };
 struct ker_tcp_listener;
 struct ker_tcp_request_handle {
@@ -64,6 +66,9 @@ struct ker_tcp_listener_config {
     /* Opt in to admitting one real application byte when a request's usable
      * send window is exactly zero and no segment is outstanding. */
     bool zero_window_probe;
+    /* Opt in to adaptive RTT estimation/backoff for ordinary DATA flights.
+     * SYN, FIN, and zero-window probes retain fixed retry behavior. */
+    bool adaptive_rto;
 };
 struct ker_tcp_listener {
     struct ker_transport_receiver *receiver;
