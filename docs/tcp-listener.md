@@ -54,8 +54,18 @@ must match the current receive sequence; ACKs with payload may also update the
 send window when their segment overlaps the receive edge and contributes new
 bytes. Stale duplicates and future gaps cannot change send ACK/window state.
 Retry intervals back off exponentially against a fixed absolute timeout. No
-persist timer is used. FIN and data+FIN remain unsupported and take an explicit
-RST path; graceful close is not implemented.
+persist timer is used.
+
+Graceful passive close is opt-in through nonzero `time_wait_ms`, which requires
+both stream arenas. A peer FIN is acknowledged after all contiguous preceding
+bytes are retained; reads return zero only after those bytes are drained. The
+application may continue writing in CLOSE_WAIT, then call
+`ker_tcp_listener_shutdown_write` after its outstanding data is acknowledged.
+Local FIN retransmits against one absolute close deadline. Simultaneous close
+enters a fixed-deadline TIME_WAIT; an exact duplicate FIN is re-ACKed without
+extending that deadline. Call `ker_tcp_listener_release` after CLOSED and EOF
+drain to retire the generation-safe handle. Without this option, FIN remains
+explicitly unsupported and takes an RST path.
 
 The receiver and exporter cannot be destroyed while a listener is attached.
 A retained native neighbor reference pins the peer/table; caller storage must
@@ -63,9 +73,9 @@ remain stable and must not be edited while attached. Request retirement waits
 for the exporter to drain queued frames. This is a conservative barrier across
 that entire exporter, so unrelated traffic sharing it can delay retirement.
 
-This profile supports opt-in bounded passive send/receive and explicit abort
-with RST. It does not support active connect, FIN close, congestion control,
-reassembly, TIME_WAIT, ICMP correlation or cross-worker listener distribution.
+This profile supports opt-in bounded passive send/receive and FIN close, plus
+explicit abort with RST. It does not support active connect, congestion control,
+reassembly, ICMP correlation or cross-worker listener distribution.
 With storage disabled, data remains rejected with `-EOPNOTSUPP` and an RST when
 TX admission succeeds. `reset` is transactional on TX failure; its handle becomes stale when
 poll observes the RESET request after TX drains. Full TCP transport and public
@@ -78,7 +88,8 @@ final-ACK data, sequence and ring wrap, clipping, gaps and duplicates.
 `tcp-host` runs the same listener against a real Linux `AF_INET/SOCK_STREAM`
 client through TAP in a disposable user/network namespace. It requires an
 actual ARP reply, a successful Linux `connect`/Ker `accept`, byte-verified
-full-duplex data transfer, and an explicit RST observed by the Linux client. The test has bounded waits and kills its child on
+full-duplex transfer, peer-first and server-first half-close, and orderly EOF
+after Ker's FIN. The test has bounded waits and kills its child on
 failure. Missing namespace/TAP facilities produce a CTest skip (exit 77), which
 is not interoperability evidence.
 

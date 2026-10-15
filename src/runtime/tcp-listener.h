@@ -4,12 +4,17 @@
 #include "runtime/transport-receive.h"
 #include "runtime/tx-export.h"
 
-/* Fixed-peer profile; optional bounded passive streams, no graceful close. */
+/* Fixed-peer profile; optional bounded passive streams and FIN close. */
 enum ker_tcp_request_state { KER_TCP_REQUEST_FREE, KER_TCP_REQUEST_SYN,
-    KER_TCP_REQUEST_READY, KER_TCP_REQUEST_RESET, KER_TCP_REQUEST_FAILED };
+    KER_TCP_REQUEST_READY, KER_TCP_REQUEST_RESET, KER_TCP_REQUEST_FAILED,
+    KER_TCP_REQUEST_FIN_WAIT_1, KER_TCP_REQUEST_FIN_WAIT_2,
+    KER_TCP_REQUEST_CLOSING, KER_TCP_REQUEST_CLOSE_WAIT,
+    KER_TCP_REQUEST_LAST_ACK, KER_TCP_REQUEST_TIME_WAIT,
+    KER_TCP_REQUEST_CLOSED };
 struct ker_tcp_request {
     uint64_t generation, retry_ms, deadline_ms;
     uint64_t send_retry_ms, send_deadline_ms, send_backoff_ms;
+    uint64_t close_deadline_ms, time_wait_deadline_ms;
     uint32_t local_isn, peer_isn;
     uint32_t receive_next, receive_right;
     uint32_t send_unacknowledged, send_next, send_right;
@@ -17,7 +22,8 @@ struct ker_tcp_request {
     uint16_t send_mss, receive_bytes, receive_head, peer_window, send_bytes, send_head;
     enum ker_tcp_request_state state;
     int error;
-    bool accepted, ack_pending;
+    bool accepted, ack_pending, peer_eof, local_fin, local_fin_acked;
+    bool active_close, time_wait_saturated;
 };
 struct ker_tcp_listener;
 struct ker_tcp_request_handle {
@@ -46,6 +52,8 @@ struct ker_tcp_listener_config {
     unsigned char *send_storage;
     size_t send_storage_size;
     uint16_t send_capacity;
+    /* Opt-in bounded FIN close; requires both receive and send arenas. */
+    uint64_t time_wait_ms;
 };
 struct ker_tcp_listener {
     struct ker_transport_receiver *receiver;
@@ -79,15 +87,19 @@ int ker_tcp_listener_snapshot(struct ker_tcp_listener *, struct ker_tcp_request_
     struct ker_tcp_request *);
 /* Copy available passive-stream bytes. Requires opt-in storage and a live
  * accepted handle; destination must not overlap its receive ring. Returns
- * bytes copied or -EAGAIN if empty; no FIN/EOF API. */
+ * bytes copied, 0 at drained peer EOF, or -EAGAIN if empty before EOF. */
 int ker_tcp_listener_read(struct ker_tcp_listener *, struct ker_tcp_request_handle,
     void *destination, uint16_t capacity);
 /* Copy and admit up to one segment; return bytes locally admitted or negative
  * errno. Requires accepted send storage and a nonzero peer window. */
 int ker_tcp_listener_write(struct ker_tcp_listener *, struct ker_tcp_request_handle,
     const void *source, uint16_t length);
+/* Gracefully half-close the local send direction after all data is ACKed. */
+int ker_tcp_listener_shutdown_write(struct ker_tcp_listener *, struct ker_tcp_request_handle);
+/* Retire a CLOSED request after EOF is observed, bytes drained and TX is empty. */
+int ker_tcp_listener_release(struct ker_tcp_listener *, struct ker_tcp_request_handle);
 /* Abort with RST. Queue failure leaves the request unchanged; successful reset
- * invalidates the handle after poll observes an empty exporter. No FIN API. */
+ * invalidates the handle after poll observes an empty exporter. */
 int ker_tcp_listener_reset(struct ker_tcp_listener *, struct ker_tcp_request_handle);
 int ker_tcp_listener_cleanup(struct ker_tcp_listener *);
 #endif
