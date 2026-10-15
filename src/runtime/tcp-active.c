@@ -57,8 +57,25 @@ static int emit(struct ker_tcp_active *t, uint8_t flags, uint32_t peer_isn)
 /* All live windows are <= 65535, strictly below the serial half-space. */
 static bool before(uint32_t a, uint32_t b)
 { return (int32_t)(a - b) < 0; }
+static size_t reorder_stride(const struct ker_tcp_active *t)
+{ return ((size_t)t->config.receive_capacity + 7U) / 8U; }
+static bool reorder_enabled(const struct ker_tcp_active *t)
+{ return t->config.reorder_buffer != NULL; }
+static bool reorder_test(const struct ker_tcp_active *t, size_t index)
+{ return (t->config.reorder_buffer[index >> 3] & (unsigned char)(1U << (index & 7U))) != 0; }
+static void reorder_set(struct ker_tcp_active *t, size_t index)
+{ t->config.reorder_buffer[index >> 3] |= (unsigned char)(1U << (index & 7U)); }
+static void reorder_clear(struct ker_tcp_active *t, size_t index)
+{ t->config.reorder_buffer[index >> 3] &= (unsigned char)~(1U << (index & 7U)); }
+static void clear_reorder(struct ker_tcp_active *t)
+{
+    if (reorder_enabled(t)) memset(t->config.reorder_buffer, 0, reorder_stride(t));
+    t->reorder_fin_pending = false;
+    t->reorder_fin_sequence = 0;
+}
 static void discard_stream(struct ker_tcp_active *t)
 {
+    clear_reorder(t);
     t->status.receive_bytes = 0; t->receive_head = 0;
     t->status.ack_pending = false;
     t->status.send_bytes = 0; t->send_head = 0;
@@ -120,6 +137,60 @@ static bool expire_send(struct ker_tcp_active *t)
 }
 static int receive_data(struct ker_tcp_active *t, const struct ker_tcp_packet_view *p)
 {
+    if (reorder_enabled(t) && !t->status.peer_eof) {
+        unsigned char *ring = t->config.receive_buffer;
+        const uint16_t capacity = t->config.receive_capacity;
+        uint32_t next = t->status.receive_next;
+        unsigned int skip = 0;
+        if (before(p->sequence, next)) {
+            skip = next - p->sequence;
+            if (skip > p->payload_length) skip = p->payload_length;
+        }
+        uint32_t width = t->receive_right - next;
+        for (unsigned int i = skip; i < p->payload_length; ++i) {
+            uint32_t sequence = p->sequence + i;
+            uint32_t offset = sequence - next;
+            if (offset >= width || (t->reorder_fin_pending &&
+                !before(sequence, t->reorder_fin_sequence))) break;
+            if ((uint32_t)t->status.receive_bytes + offset >= capacity) break;
+            size_t index = ((size_t)t->receive_head + t->status.receive_bytes + offset) % capacity;
+            if (!reorder_test(t, index)) {
+                ring[index] = p->payload[i];
+                reorder_set(t, index);
+            }
+        }
+        if ((p->flags & KER_TCP_FIN) && !t->status.peer_eof) {
+            uint32_t fin_sequence = p->sequence + p->payload_length;
+            uint32_t fin_offset = fin_sequence - next;
+            if (fin_offset < width &&
+                (!t->reorder_fin_pending || t->reorder_fin_sequence == fin_sequence)) {
+                t->reorder_fin_pending = true;
+                t->reorder_fin_sequence = fin_sequence;
+                for (uint32_t offset = fin_offset; offset < width; ++offset) {
+                    size_t index = ((size_t)t->receive_head + t->status.receive_bytes + offset) % capacity;
+                    reorder_clear(t, index);
+                }
+            }
+        }
+        while (t->status.receive_bytes < capacity) {
+            size_t index = ((size_t)t->receive_head + t->status.receive_bytes) % capacity;
+            if (!reorder_test(t, index)) break;
+            reorder_clear(t, index);
+            ++t->status.receive_bytes;
+            ++t->status.receive_next;
+        }
+        if (t->reorder_fin_pending && t->status.receive_next == t->reorder_fin_sequence &&
+            before(t->status.receive_next, t->receive_right)) {
+            ++t->status.receive_next;
+            t->status.peer_eof = true;
+            t->reorder_fin_pending = false;
+            t->reorder_fin_sequence = 0;
+            close_state(t);
+        }
+        t->status.ack_pending = true;
+        t->status.last_tx_error = emit(t, KER_TCP_ACK, t->status.peer_isn);
+        return t->status.last_tx_error;
+    }
     uint32_t next = t->status.receive_next, seq = p->sequence;
     unsigned int skip = 0, length = p->payload_length;
     if (before(seq, next)) {
@@ -269,6 +340,9 @@ int ker_tcp_active_start(struct ker_tcp_active *t, struct ker_transport_receiver
     if (!t || !r || !n || !tx || !cfg || !cfg->local_port || !cfg->peer_port ||
         !cfg->window ||
         (cfg->time_wait_ms && !cfg->receive_buffer) ||
+        (!cfg->reorder_buffer && cfg->reorder_buffer_size) ||
+        (cfg->reorder_buffer && (!cfg->receive_buffer ||
+         cfg->reorder_buffer_size < ((size_t)cfg->receive_capacity + 7U) / 8U)) ||
         (!!cfg->send_buffer != !!cfg->send_capacity) ||
         (!!cfg->receive_buffer != !!cfg->receive_capacity) ||
         (cfg->receive_buffer && cfg->receive_capacity != cfg->window) || !cfg->mss || !cfg->ttl || !cfg->next_isn || !cfg->retry_ms ||
@@ -290,6 +364,8 @@ int ker_tcp_active_start(struct ker_tcp_active *t, struct ker_transport_receiver
     unsigned char mac[ETH_ALEN];
     error = ker_neighbor_mac(n, entry, mac);
     if (error || (mac[0] & 1)) { ker_neighbor_release(n, entry); return error ? error : -EINVAL; }
+    if (cfg->reorder_buffer)
+        memset(cfg->reorder_buffer, 0, ((size_t)cfg->receive_capacity + 7U) / 8U);
     *t = (struct ker_tcp_active){.receiver = r, .neighbors = n, .peer = entry,
         .tx = tx, .peer_ip = peer, .config = *cfg, .now_ms = now,
         .retry_ms = now + cfg->retry_ms, .deadline_ms = now + cfg->timeout_ms, .busy = true};
