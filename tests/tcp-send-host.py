@@ -11,7 +11,7 @@ import subprocess
 import sys
 
 
-def run(binary):
+def run(binary, mode=None):
     try:
         tap = os.open('/dev/net/tun', os.O_RDWR | os.O_NONBLOCK)
         # TUNSETIFF, IFF_TAP | IFF_NO_PI: raw Ethernet frames, no PI header.
@@ -30,7 +30,8 @@ def run(binary):
             server.bind(('192.0.2.2', 8000))
             server.listen(1)
             server.settimeout(5)
-            child = subprocess.Popen([binary, str(tap)], pass_fds=(tap,))
+            child_args = [binary, str(tap)] + ([mode] if mode else [])
+            child = subprocess.Popen(child_args, pass_fds=(tap,))
             peer, address = server.accept()
             with peer:
                 assert address == ('192.0.2.1', 9000), address
@@ -63,10 +64,14 @@ def run(binary):
 
 
 if __name__ == '__main__':
-    if len(sys.argv) not in (2, 3):
-        raise SystemExit('usage: tcp-active-host.py /absolute/path/to/ker-tcp-send-test')
-    if len(sys.argv) == 3 and sys.argv[2] == '--isolated':
-        raise SystemExit(run(sys.argv[1]))
+    if len(sys.argv) not in (2, 3, 4):
+        raise SystemExit('usage: tcp-send-host.py binary [rto] [--isolated]')
+    mode = sys.argv[2] if len(sys.argv) >= 3 and sys.argv[2] != '--isolated' else None
+    isolated = '--isolated' in sys.argv[2:]
+    if mode not in (None, 'rto'):
+        raise SystemExit(f'unknown mode: {mode}')
+    if isolated:
+        raise SystemExit(run(sys.argv[1], mode))
     if not shutil.which('unshare') or not shutil.which('ip'):
         print('SKIP: unshare and ip are required')
         raise SystemExit(77)
@@ -74,5 +79,9 @@ if __name__ == '__main__':
     if probe.returncode:
         print(f'SKIP: user/network namespaces unavailable: {probe.stderr.strip()}')
         raise SystemExit(77)
-    raise SystemExit(subprocess.call(['unshare', '-Urn', sys.executable,
-        str(Path(__file__).resolve()), str(Path(sys.argv[1]).resolve()), '--isolated']))
+    child_args = ['unshare', '-Urn', sys.executable, str(Path(__file__).resolve()),
+        str(Path(sys.argv[1]).resolve())]
+    if mode:
+        child_args.append(mode)
+    child_args.append('--isolated')
+    raise SystemExit(subprocess.call(child_args))

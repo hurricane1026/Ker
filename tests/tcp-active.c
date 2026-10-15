@@ -35,6 +35,16 @@ static const unsigned char peer_mac[6] = {2, 0x20, 0, 0, 0, 1};
 static int tap = -1, isn_error;
 static uint16_t injected_window = 1024;
 static bool reenter;
+static bool host_rto_mode, host_drop_next_data, host_rto_dropped, host_rto_retry_seen;
+static bool host_ack_held, host_ack_released, host_second_ack_held, host_second_ack_released;
+static bool host_karn_verified, host_relearned;
+static unsigned int host_rto_stage;
+static uint32_t host_probe_sequence;
+static unsigned char host_probe_data[8], host_held_ack[2048], host_held_second_ack[2048];
+static size_t host_probe_length, host_held_ack_length, host_held_second_ack_length;
+static uint64_t host_probe_started, host_probe_rto, host_release_ack_at, host_release_second_ack_at;
+static uint64_t now_ms(void);
+static uint32_t be32(const unsigned char *p);
 static int receive_message(const struct ker_transport_message *m, void *arg)
 { (void)m; (void)arg; return NET_RX_DROP; }
 static int next_isn(void *arg, __be16 port, uint32_t *out)
@@ -68,6 +78,38 @@ static int sink(struct rte_mbuf *m, void *arg)
     if (m->pkt_len > sizeof(bytes)) return -EMSGSIZE;
     const void *data = rte_pktmbuf_read(m, 0, m->pkt_len, bytes);
     if (!data) return -EIO;
+    if (data != bytes) memcpy(bytes, data, m->pkt_len);
+    if (host_rto_mode && m->pkt_len >= 54 && bytes[12] == 0x08 && bytes[13] == 0x00 &&
+        (bytes[14] >> 4) == 4 && bytes[23] == 6) {
+        unsigned int ihl = (bytes[14] & 15U) * 4U;
+        unsigned int th = 14U + ihl;
+        unsigned int iplen = ((unsigned int)bytes[16] << 8) | bytes[17];
+        if (ihl < 20 || iplen < ihl + 20 || iplen > m->pkt_len - 14U || m->pkt_len < th + 20U ||
+            bytes[26] != 192 || bytes[27] != 0 || bytes[28] != 2 || bytes[29] != 1 ||
+            bytes[30] != 192 || bytes[31] != 0 || bytes[32] != 2 || bytes[33] != 2)
+            goto normal_sink;
+        unsigned int tcp_len = ((bytes[th + 12] >> 4) & 15U) * 4U;
+        if (tcp_len < 20 || iplen < ihl + tcp_len || bytes[th + 13] != (KER_TCP_ACK | KER_TCP_PSH) ||
+            bytes[th] != 0x23 || bytes[th + 1] != 0x28 || bytes[th + 2] != 0x1f || bytes[th + 3] != 0x40)
+            goto normal_sink;
+        unsigned int plen = iplen - ihl - tcp_len;
+        uint32_t seq = be32(bytes + th + 4);
+        if (host_drop_next_data && plen) {
+            host_drop_next_data = false; host_rto_dropped = true;
+            host_probe_sequence = seq; host_probe_length = plen;
+            CHECK(plen && plen <= sizeof(host_probe_data));
+            memcpy(host_probe_data, bytes + th + tcp_len, plen);
+            host_probe_started = active.send_first_tx_ms; host_probe_rto = active.rto_ms;
+            ker_packet_free(m); return 0;
+        }
+        if (host_rto_dropped && !host_rto_retry_seen && seq == host_probe_sequence &&
+            plen == host_probe_length && !memcmp(bytes + th + tcp_len, host_probe_data, plen)) {
+            uint64_t elapsed = now_ms() - host_probe_started;
+            CHECK(elapsed >= host_probe_rto);
+            host_rto_retry_seen = true;
+        }
+    }
+normal_sink:
     ssize_t n = write(tap, data, m->pkt_len);
     if (n < 0) return -errno;
     if ((size_t)n != m->pkt_len) return -EIO;
@@ -278,12 +320,13 @@ static void test_active(void)
 #endif
 int main(int argc, char **argv)
 {
-    CHECK(argc == 1 || argc == 2);
-    if (argc == 2) {
+    CHECK(argc == 1 || argc == 2 || argc == 3);
+    if (argc >= 2) {
         char *end; errno = 0; long fd = strtol(argv[1], &end, 10);
         CHECK(!errno && end != argv[1] && !*end && fd >= 0 && fd <= INT_MAX);
         tap = (int)fd; CHECK(fcntl(tap, F_SETFL, O_NONBLOCK) == 0);
     }
+    if (argc == 3) { CHECK(!strcmp(argv[2], "rto")); host_rto_mode = true; }
     local_ip = rte_cpu_to_be_32(0xc0000201); peer_ip = rte_cpu_to_be_32(0xc0000202);
     local_port = rte_cpu_to_be_16(9000); peer_port = rte_cpu_to_be_16(8000);
     ker_test_eal_init(); CHECK(ker_memory_init(SOCKET_ID_ANY, 7) == 0);
@@ -308,6 +351,7 @@ int main(int argc, char **argv)
 #ifdef KER_TCP_SEND_TEST
     config.send_buffer = send_storage; config.send_capacity = sizeof(send_storage);
     config.receive_buffer = receive_storage; config.receive_capacity = config.window;
+    if (host_rto_mode) { config.adaptive_rto = true; config.timeout_ms = 30000; }
 #endif
 #ifdef KER_TCP_CLOSE_TEST
     config.receive_buffer = close_receive; config.receive_capacity = config.window;
