@@ -32,14 +32,15 @@ def run(binary):
             child = subprocess.Popen([binary, str(tap)], pass_fds=(tap,))
             peer.connect(('192.0.2.1', 9000))
             peer.sendall(bytes(range(256)) * 16)
-            # Passive receive is supported; graceful FIN close remains unsupported.
-            try:
-                data = peer.recv(1)
-                raise AssertionError(f'expected RST, received {data!r}')
-            except ConnectionResetError:
-                pass
+            received = bytearray()
+            while len(received) < 4096:
+                part = peer.recv(4096 - len(received))
+                if not part:
+                    raise AssertionError('peer closed before full-duplex response')
+                received.extend(part)
+            assert received == bytes((i + 37) & 0xff for i in range(4096))
             assert child.wait(timeout=5) == 0
-        print('PASS: Linux TCP connect, passive stream bytes, ARP and explicit RST')
+        print('PASS: Linux TCP connect, full-duplex passive streams, ARP and explicit RST')
         return 0
     finally:
         if child is not None and child.poll() is None:
