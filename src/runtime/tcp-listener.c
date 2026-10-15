@@ -67,6 +67,15 @@ static void discard_send(struct ker_tcp_request *r)
 }
 static bool valid_send_ack(const struct ker_tcp_request *r, uint32_t ack)
 { return !before(ack, r->send_unacknowledged) && !before(r->send_next, ack); }
+static bool expire_send(struct ker_tcp_request *r, uint64_t now)
+{
+    if (r->state != KER_TCP_REQUEST_READY || !r->send_bytes || now < r->send_deadline_ms)
+        return false;
+    r->state = KER_TCP_REQUEST_FAILED;
+    r->error = -ETIMEDOUT;
+    discard_send(r);
+    return true;
+}
 static bool send_ack_eligible(const struct ker_tcp_listener *t,
                               const struct ker_tcp_request *r,
                               const struct ker_tcp_packet_view *p)
@@ -216,6 +225,7 @@ static int receive_request(void *arg, struct sk_buff *skb,
             r->error = -ETIMEDOUT;
             ++t->timed_out;
         }
+        if (expire_send(r, t->now_ms)) goto done;
         if (r->state == KER_TCP_REQUEST_RESET || r->state == KER_TCP_REQUEST_FAILED)
             goto done;
         uint32_t expected_peer_sequence = (stream_enabled(t) || send_enabled(t)) && r->state == KER_TCP_REQUEST_READY ?
@@ -391,10 +401,7 @@ int ker_tcp_listener_poll(struct ker_tcp_listener *t, uint64_t now, unsigned int
             discard(t, r); continue;
         }
         if (r->state == KER_TCP_REQUEST_READY && r->send_bytes) {
-            if (now >= r->send_deadline_ms) {
-                r->state = KER_TCP_REQUEST_FAILED; r->error = -ETIMEDOUT;
-                discard_send(r); continue;
-            }
+            if (expire_send(r, now)) continue;
             if (now >= r->send_retry_ms) {
                 t->last_tx_error = retransmit(t, r);
                 r->send_backoff_ms = r->send_backoff_ms > UINT64_MAX / 2 ?

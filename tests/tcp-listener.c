@@ -371,7 +371,7 @@ static void test_stream(void)
     CHECK(stream_requests[0].state == KER_TCP_REQUEST_READY &&
           stream_requests[0].receive_next == 3 && stream_requests[0].receive_bytes == 6);
     drain_ack(3, 2);
-    struct ker_tcp_request_handle first, second;
+    struct ker_tcp_request_handle first, second, other;
     char out[16] = {0};
     struct ker_tcp_request_handle unaccepted = {&listener, 0, stream_requests[0].generation};
     CHECK(ker_tcp_listener_read(&listener, unaccepted, out, sizeof(out)) == -EPERM);
@@ -516,12 +516,39 @@ static void test_stream(void)
     drain_data(0, 0, 8, "timeout", 7);
     CHECK(stream_requests[0].send_retry_ms == 350 &&
           stream_requests[0].send_deadline_ms == fixed_deadline);
-    CHECK(ker_tcp_listener_poll(&listener, 350, 2) == 2 &&
-          stream_requests[0].state == KER_TCP_REQUEST_FAILED &&
-          stream_requests[0].error == -ETIMEDOUT && !stream_requests[0].send_bytes);
+
+    /* A separate slot accepts a valid ACK before its own deadline. */
+    peer_port = rte_cpu_to_be_16(8006);
+    inject(UINT32_MAX, 0, KER_TCP_SYN, NULL, 0); drain(KER_TCP_SYN | KER_TCP_ACK);
+    inject(0, 0, KER_TCP_ACK, NULL, 0);
+    CHECK(ker_tcp_listener_accept(&listener, &other) == 1);
+    CHECK(ker_tcp_listener_write(&listener, other, "ok", 2) == 2);
+    drain_data(0, 0, 8, "ok", 2);
+    inject(0, 2, KER_TCP_ACK, NULL, 0);
+    CHECK(stream_requests[1].state == KER_TCP_REQUEST_READY &&
+          stream_requests[1].send_unacknowledged == 2 && !stream_requests[1].send_bytes);
+
+    /* Budgeted polling refreshes now but skips slot zero at its deadline. */
+    listener.cursor = 1;
+    CHECK(ker_tcp_listener_poll(&listener, 350, 1) == 1 &&
+          stream_requests[0].state == KER_TCP_REQUEST_READY && stream_requests[0].send_bytes == 7 &&
+          stream_requests[1].state == KER_TCP_REQUEST_READY);
+    peer_port = rte_cpu_to_be_16(8005);
+    inject(0, 7, KER_TCP_ACK | KER_TCP_PSH, "L", 1);
+    CHECK(stream_requests[0].state == KER_TCP_REQUEST_FAILED &&
+          stream_requests[0].error == -ETIMEDOUT && !stream_requests[0].send_bytes &&
+          stream_requests[0].send_unacknowledged == 0 && stream_requests[0].peer_window == 1024 &&
+          stream_requests[0].send_right == 1024 && stream_requests[0].receive_next == 0 &&
+          stream_requests[0].receive_bytes == 0);
+    CHECK(stream_requests[1].state == KER_TCP_REQUEST_READY &&
+          stream_requests[1].send_unacknowledged == 2 && !stream_requests[1].send_bytes);
     CHECK(ker_tcp_listener_reset(&listener, second) == 0);
-    drain_rst_ack(0);
-    CHECK(ker_tcp_listener_poll(&listener, 351, 2) == 2 && !listener.count);
+    drain_reset_values(7, 0);
+    CHECK(ker_tcp_listener_poll(&listener, 351, 2) == 2 && listener.count == 1);
+    peer_port = rte_cpu_to_be_16(8006);
+    CHECK(ker_tcp_listener_reset(&listener, other) == 0);
+    drain_reset_values(2, 0);
+    CHECK(ker_tcp_listener_poll(&listener, 352, 2) == 2 && !listener.count);
 
     /* Unsupported payload flags and RST matching use progressed stream seq. */
     peer_port = rte_cpu_to_be_16(8002);
@@ -622,6 +649,26 @@ static void test_stream(void)
     CHECK(ker_tcp_listener_reset(&listener, second) == 0);
     drain_reset_values(1, send_only_peer_isn + 1);
     CHECK(ker_tcp_listener_poll(&listener, 368, 2) == 2 && !listener.count);
+    CHECK(ker_tcp_listener_cleanup(&listener) == 0);
+
+    /* Poll still expires an unacknowledged send at its absolute deadline. */
+    CHECK(ker_tcp_listener_init(&listener, &receiver, &neighbors, peer_ip, &tx,
+        stream_requests, 2, &config, 368) == 0);
+    peer_port = rte_cpu_to_be_16(8008);
+    inject(UINT32_MAX, 0, KER_TCP_SYN, NULL, 0);
+    drain_syn_ack(custom_isn_value, 0);
+    inject(0, custom_isn_value + 1U, KER_TCP_ACK, NULL, 0);
+    CHECK(ker_tcp_listener_accept(&listener, &second) == 1);
+    CHECK(ker_tcp_listener_write(&listener, second, "x", 1) == 1);
+    drain_data(custom_isn_value + 1U, 0, 1024, "x", 1);
+    uint64_t poll_deadline = stream_requests[0].send_deadline_ms;
+    listener.cursor = 0;
+    CHECK(ker_tcp_listener_poll(&listener, poll_deadline, 1) == 1 &&
+          stream_requests[0].state == KER_TCP_REQUEST_FAILED &&
+          stream_requests[0].error == -ETIMEDOUT && !stream_requests[0].send_bytes);
+    CHECK(ker_tcp_listener_reset(&listener, second) == 0);
+    drain_reset_values(custom_isn_value + 2U, 0);
+    CHECK(ker_tcp_listener_poll(&listener, poll_deadline + 1, 2) == 2 && !listener.count);
     CHECK(ker_tcp_listener_cleanup(&listener) == 0);
     custom_isn = false;
     config.send_storage = NULL;
