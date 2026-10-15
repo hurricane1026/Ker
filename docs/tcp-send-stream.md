@@ -48,8 +48,8 @@ indefinite zero-window persist mechanism described in
 [RFC 9293 §3.8.6.1](https://www.rfc-editor.org/rfc/rfc9293.html#section-3.8.6.1).
 Already-sent unacknowledged suffixes may still be retransmitted.
 The single-segment flight limit is deliberately conservative; this profile does
-not implement congestion-window growth, fast retransmit, SACK, adaptive RTO or
-public socket capabilities. FIN/EOF/TIME_WAIT are opt-in; see
+not implement congestion-window growth, fast retransmit, SACK or public socket
+capabilities. FIN/EOF/TIME_WAIT are opt-in; see
 [normal FIN close](tcp-fin-close.md).
 
 Valid peer RST and successfully admitted local reset discard retained bytes and
