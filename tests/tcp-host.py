@@ -11,7 +11,7 @@ import subprocess
 import sys
 
 
-def run(binary):
+def run(binary, server_first=False, local_port=8000):
     try:
         tap = os.open('/dev/net/tun', os.O_RDWR | os.O_NONBLOCK)
         # TUNSETIFF, IFF_TAP | IFF_NO_PI: raw Ethernet frames, no PI header.
@@ -27,11 +27,14 @@ def run(binary):
         subprocess.run(['ip', 'addr', 'add', '192.0.2.2/24', 'dev', 'kerhost0'], check=True)
         subprocess.run(['ip', 'link', 'set', 'kerhost0', 'mtu', '1500', 'up'], check=True)
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as peer:
-            peer.bind(('192.0.2.2', 8000))
+            peer.bind(('192.0.2.2', local_port))
             peer.settimeout(5)
-            child = subprocess.Popen([binary, str(tap)], pass_fds=(tap,))
+            child = subprocess.Popen([binary, str(tap)] + (['server-first'] if server_first else []),
+                                     pass_fds=(tap,))
             peer.connect(('192.0.2.1', 9000))
             peer.sendall(bytes(range(256)) * 16)
+            if not server_first:
+                peer.shutdown(socket.SHUT_WR)
             received = bytearray()
             while len(received) < 4096:
                 part = peer.recv(4096 - len(received))
@@ -39,16 +42,14 @@ def run(binary):
                     raise AssertionError('peer closed before full-duplex response')
                 received.extend(part)
             assert received == bytes((i + 37) & 0xff for i in range(4096))
+            if peer.recv(1) != b'':
+                raise AssertionError('expected orderly EOF after passive FIN close')
+            if server_first:
+                # Observe Ker's FIN/EOF before beginning the peer half-close.
+                peer.shutdown(socket.SHUT_WR)
             assert child.wait(timeout=5) == 0
-            try:
-                extra = peer.recv(1)
-            except ConnectionResetError:
-                pass
-            else:
-                if extra:
-                    raise AssertionError('peer received unexpected data instead of RST')
-                raise AssertionError('peer observed orderly EOF instead of explicit RST')
-        print('PASS: Linux TCP connect, full-duplex passive streams, ARP and explicit RST')
+        print(f'PASS: Linux TCP connect, {"server-first" if server_first else "peer-first"} '
+              'half-close, full-duplex streams and orderly EOF')
         return 0
     finally:
         if child is not None and child.poll() is None:
@@ -65,7 +66,10 @@ if __name__ == '__main__':
     if len(sys.argv) not in (2, 3):
         raise SystemExit('usage: tcp-host.py /absolute/path/to/ker-tcp-listener-test')
     if len(sys.argv) == 3 and sys.argv[2] == '--isolated':
-        raise SystemExit(run(sys.argv[1]))
+        result = run(sys.argv[1], False, 8000)
+        if result:
+            raise SystemExit(result)
+        raise SystemExit(run(sys.argv[1], True, 8001))
     if not shutil.which('unshare') or not shutil.which('ip'):
         print('SKIP: unshare and ip are required')
         raise SystemExit(77)
