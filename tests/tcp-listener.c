@@ -39,6 +39,8 @@ static const unsigned char local_mac[6] = {2, 0x10, 0, 0, 0, 1};
 static const unsigned char peer_mac[6] = {2, 0x20, 0, 0, 0, 1};
 static int tap = -1, isn_error;
 static bool reenter;
+static bool reenter_close;
+static struct ker_tcp_request_handle reenter_handle;
 static bool host_server_first;
 static bool custom_isn;
 static uint32_t custom_isn_value;
@@ -53,6 +55,10 @@ static int next_isn(void *arg, __be16 port, uint32_t *out)
         CHECK(ker_tcp_listener_accept(&listener, &h) == -EBUSY);
         CHECK(ker_tcp_listener_cleanup(&listener) == -EBUSY);
         CHECK(ker_tcp_listener_poll(&listener, listener.now_ms, 1) == -EBUSY);
+        if (reenter_close) {
+            CHECK(ker_tcp_listener_shutdown_write(&listener, reenter_handle) == -EBUSY);
+            CHECK(ker_tcp_listener_release(&listener, reenter_handle) == -EBUSY);
+        }
     }
     if (isn_error) return isn_error;
     if (tap < 0) *out = custom_isn ? custom_isn_value : UINT32_MAX; /* Deterministic tests only. */
@@ -730,6 +736,19 @@ static void test_passive_close(void)
     CHECK(ker_tcp_listener_read(&listener, peer_first, bytes, sizeof(bytes)) == 3 &&
           !memcmp(bytes, "abc", 3));
     CHECK(ker_tcp_listener_read(&listener, peer_first, bytes, sizeof(bytes)) == 0);
+    reenter_handle = peer_first;
+    reenter = reenter_close = true;
+    peer_port = rte_cpu_to_be_16(8013);
+    inject(400, 0, KER_TCP_SYN, NULL, 0);
+    reenter = reenter_close = false;
+    drain_syn_ack(custom_isn_value, 401);
+    inject(401, custom_isn_value + 1, KER_TCP_ACK, NULL, 0);
+    struct ker_tcp_request_handle reentry_peer;
+    CHECK(ker_tcp_listener_accept(&listener, &reentry_peer) == 1);
+    CHECK(ker_tcp_listener_reset(&listener, reentry_peer) == 0);
+    drain(KER_TCP_RST | KER_TCP_ACK);
+    CHECK(ker_tcp_listener_poll(&listener, 402, 2) == 2);
+    peer_port = rte_cpu_to_be_16(8010);
     CHECK(ker_tcp_listener_write(&listener, peer_first, "z", 1) == 1);
     drain_data(custom_isn_value + 1, 105, 4, "z", 1);
     uint32_t saved_send_right = stream_requests[0].send_right;
@@ -793,7 +812,7 @@ static void test_passive_close(void)
           stream_requests[0].state == KER_TCP_REQUEST_FIN_WAIT_1);
     drain_close(KER_TCP_ACK | KER_TCP_FIN, custom_isn_value + 1, 209, 0);
     CHECK(ker_tcp_listener_read(&listener, server_first, bytes, 1) == 1 && bytes[0] == '1');
-    CHECK(ker_tcp_listener_poll(&listener, 401, 2) == 2);
+    CHECK(ker_tcp_listener_poll(&listener, 403, 2) == 2);
     drain_ack(209, 1);
     inject(209, custom_isn_value + 2, KER_TCP_ACK, NULL, 0);
     CHECK(stream_requests[0].state == KER_TCP_REQUEST_FIN_WAIT_2);
@@ -821,6 +840,144 @@ static void test_passive_close(void)
           !memcmp(bytes, "345678", 6) && !stream_requests[0].ack_pending && !tx.packets);
     CHECK(ker_tcp_listener_read(&listener, server_first, bytes, sizeof(bytes)) == 0 && !tx.packets);
     CHECK(ker_tcp_listener_release(&listener, server_first) == 0);
+
+    /* An old prefix ending at the edge may carry the first FIN while ACKing ours. */
+    peer_port = rte_cpu_to_be_16(8014);
+    inject(500, 0, KER_TCP_SYN, NULL, 0); drain_syn_ack(custom_isn_value, 501);
+    inject(501, custom_isn_value + 1, KER_TCP_ACK, NULL, 0);
+    struct ker_tcp_request_handle overlap_fin;
+    CHECK(ker_tcp_listener_accept(&listener, &overlap_fin) == 1);
+    inject(501, custom_isn_value + 1, KER_TCP_ACK | KER_TCP_PSH, "abc", 3);
+    drain_ack(504, 5);
+    CHECK(ker_tcp_listener_shutdown_write(&listener, overlap_fin) == 0);
+    drain_close(KER_TCP_ACK | KER_TCP_FIN, custom_isn_value + 1, 504, 5);
+    uint32_t fin_sequence = stream_requests[0].send_next;
+    inject(502, fin_sequence, KER_TCP_ACK | KER_TCP_FIN | KER_TCP_PSH, "bc", 2);
+    drain_ack(505, 4);
+    CHECK(stream_requests[0].peer_eof && stream_requests[0].local_fin_acked &&
+          stream_requests[0].receive_next == 505 && stream_requests[0].receive_bytes == 3 &&
+          stream_requests[0].send_next == fin_sequence &&
+          stream_requests[0].state == KER_TCP_REQUEST_TIME_WAIT);
+    CHECK(ker_tcp_listener_read(&listener, overlap_fin, bytes, sizeof(bytes)) == 3 &&
+          !memcmp(bytes, "abc", 3));
+    CHECK(ker_tcp_listener_poll(&listener, 503, 2) == 2 &&
+          stream_requests[0].state == KER_TCP_REQUEST_CLOSED);
+    CHECK(ker_tcp_listener_release(&listener, overlap_fin) == 0);
+    CHECK(ker_tcp_listener_cleanup(&listener) == 0);
+    /* FIN retry keeps one sequence/edge and the original close deadline. */
+    config.timeout_ms = 60;
+    CHECK(ker_tcp_listener_init(&listener, &receiver, &neighbors, peer_ip, &tx,
+        stream_requests, 2, &config, 600) == 0);
+    peer_port = rte_cpu_to_be_16(8015);
+    inject(600, 0, KER_TCP_SYN, NULL, 0); drain_syn_ack(custom_isn_value, 601);
+    inject(601, custom_isn_value + 1, KER_TCP_ACK, NULL, 0);
+    struct ker_tcp_request_handle retry_close;
+    CHECK(ker_tcp_listener_accept(&listener, &retry_close) == 1);
+    CHECK(ker_tcp_listener_shutdown_write(&listener, retry_close) == 0);
+    uint32_t retry_fin_seq = stream_requests[0].send_unacknowledged;
+    uint32_t retry_receive_edge = stream_requests[0].receive_right;
+    uint64_t retry_close_deadline = stream_requests[0].close_deadline_ms;
+    drain_close(KER_TCP_ACK | KER_TCP_FIN, retry_fin_seq, 601, 8);
+    fill_tx(); fill_tx();
+    CHECK(ker_tcp_listener_poll(&listener, 610, 2) == 2 &&
+          listener.last_tx_error == -ENOSPC && stream_requests[0].send_next == retry_fin_seq + 1 &&
+          stream_requests[0].send_retry_ms == 630 &&
+          stream_requests[0].close_deadline_ms == retry_close_deadline &&
+          stream_requests[0].receive_right == retry_receive_edge);
+    drain(KER_TCP_SYN | KER_TCP_ACK); drain(KER_TCP_SYN | KER_TCP_ACK);
+    CHECK(ker_tcp_listener_poll(&listener, 630, 2) == 2);
+    drain_close(KER_TCP_ACK | KER_TCP_FIN, retry_fin_seq, 601, 8);
+    CHECK(stream_requests[0].send_retry_ms == 670 &&
+          stream_requests[0].close_deadline_ms == retry_close_deadline);
+    CHECK(ker_tcp_listener_poll(&listener, retry_close_deadline, 2) == 2 &&
+          stream_requests[0].state == KER_TCP_REQUEST_FAILED &&
+          stream_requests[0].error == -ETIMEDOUT && !tx.packets);
+    CHECK(ker_tcp_listener_reset(&listener, retry_close) == 0);
+    drain_reset_values(retry_fin_seq + 1, 601);
+    CHECK(ker_tcp_listener_poll(&listener, retry_close_deadline + 1, 2) == 2 &&
+          !listener.count && ker_tcp_listener_cleanup(&listener) == 0);
+    config.timeout_ms = 30;
+    CHECK(ker_tcp_listener_init(&listener, &receiver, &neighbors, peer_ip, &tx,
+        stream_requests, 2, &config, 700) == 0);
+    peer_port = rte_cpu_to_be_16(8016);
+    inject(700, 0, KER_TCP_SYN, NULL, 0); drain_syn_ack(custom_isn_value, 701);
+    inject(701, custom_isn_value + 1, KER_TCP_ACK, NULL, 0);
+    struct ker_tcp_request_handle budget_close;
+    CHECK(ker_tcp_listener_accept(&listener, &budget_close) == 1);
+    peer_port = rte_cpu_to_be_16(8017);
+    inject(800, 0, KER_TCP_SYN, NULL, 0); drain_syn_ack(custom_isn_value, 801);
+    inject(801, custom_isn_value + 1, KER_TCP_ACK, NULL, 0);
+    struct ker_tcp_request_handle budget_other;
+    CHECK(ker_tcp_listener_accept(&listener, &budget_other) == 1);
+    peer_port = rte_cpu_to_be_16(8016);
+    CHECK(ker_tcp_listener_shutdown_write(&listener, budget_close) == 0);
+    drain_close(KER_TCP_ACK | KER_TCP_FIN, custom_isn_value + 1, 701, 8);
+    uint32_t saved_una = stream_requests[0].send_unacknowledged;
+    uint32_t saved_next = stream_requests[0].send_next;
+    uint32_t saved_right = stream_requests[0].send_right;
+    uint32_t saved_receive = stream_requests[0].receive_next;
+    uint16_t saved_window = stream_requests[0].peer_window;
+    uint64_t saved_deadline = stream_requests[0].close_deadline_ms;
+    listener.cursor = 1;
+    CHECK(ker_tcp_listener_poll(&listener, saved_deadline, 1) == 1 &&
+          stream_requests[0].state == KER_TCP_REQUEST_FIN_WAIT_1);
+    inject(701, saved_next, KER_TCP_ACK | KER_TCP_FIN, NULL, 0);
+    CHECK(stream_requests[0].state == KER_TCP_REQUEST_FAILED &&
+          stream_requests[0].error == -ETIMEDOUT && !stream_requests[0].peer_eof &&
+          !stream_requests[0].local_fin_acked && stream_requests[0].send_unacknowledged == saved_una &&
+          stream_requests[0].send_next == saved_next && stream_requests[0].send_right == saved_right &&
+          stream_requests[0].peer_window == saved_window &&
+          stream_requests[0].receive_next == saved_receive && !stream_requests[0].receive_bytes &&
+          !tx.packets);
+    CHECK(ker_tcp_listener_reset(&listener, budget_close) == 0);
+    drain_reset_values(saved_next, saved_receive);
+    CHECK(ker_tcp_listener_reset(&listener, budget_other) == 0);
+    drain_reset_values(custom_isn_value + 1, 801);
+    CHECK(ker_tcp_listener_poll(&listener, saved_deadline + 1, 2) == 2 &&
+          !listener.count && ker_tcp_listener_cleanup(&listener) == 0);
+    /* Shutdown overflow is transactional even though the connection is otherwise writable. */
+    const uint64_t max_clock = UINT64_MAX;
+    CHECK(ker_tcp_listener_init(&listener, &receiver, &neighbors, peer_ip, &tx,
+        stream_requests, 2, &config, max_clock - 40) == 0);
+    peer_port = rte_cpu_to_be_16(8018);
+    inject(900, 0, KER_TCP_SYN, NULL, 0); drain_syn_ack(custom_isn_value, 901);
+    inject(901, custom_isn_value + 1, KER_TCP_ACK, NULL, 0);
+    struct ker_tcp_request_handle overflow_close;
+    CHECK(ker_tcp_listener_accept(&listener, &overflow_close) == 1);
+    CHECK(ker_tcp_listener_poll(&listener, max_clock - 29, 2) == 2);
+    uint32_t overflow_send_next = stream_requests[0].send_next;
+    CHECK(ker_tcp_listener_shutdown_write(&listener, overflow_close) == -EOVERFLOW &&
+          stream_requests[0].state == KER_TCP_REQUEST_READY && !stream_requests[0].local_fin &&
+          stream_requests[0].send_next == overflow_send_next && !tx.packets);
+    CHECK(ker_tcp_listener_reset(&listener, overflow_close) == 0);
+    drain_reset_values(overflow_send_next, 901);
+    CHECK(ker_tcp_listener_poll(&listener, max_clock - 28, 2) == 2 &&
+          !listener.count && ker_tcp_listener_cleanup(&listener) == 0);
+
+    /* A saturated TIME_WAIT expiry fails closed and pins the ID until fixture teardown. */
+    CHECK(ker_tcp_listener_init(&listener, &receiver, &neighbors, peer_ip, &tx,
+        stream_requests, 2, &config, max_clock - 100) == 0);
+    peer_port = rte_cpu_to_be_16(8019);
+    inject(1000, 0, KER_TCP_SYN, NULL, 0); drain_syn_ack(custom_isn_value, 1001);
+    inject(1001, custom_isn_value + 1, KER_TCP_ACK, NULL, 0);
+    struct ker_tcp_request_handle saturated_close;
+    CHECK(ker_tcp_listener_accept(&listener, &saturated_close) == 1);
+    CHECK(ker_tcp_listener_poll(&listener, max_clock - 60, 2) == 2);
+    CHECK(ker_tcp_listener_shutdown_write(&listener, saturated_close) == 0);
+    uint32_t saturated_fin_next = stream_requests[0].send_next;
+    drain_close(KER_TCP_ACK | KER_TCP_FIN, saturated_fin_next - 1, 1001, 8);
+    CHECK(ker_tcp_listener_poll(&listener, max_clock - 49, 2) == 2);
+    drain_close(KER_TCP_ACK | KER_TCP_FIN, saturated_fin_next - 1, 1001, 8);
+    inject(1001, saturated_fin_next, KER_TCP_ACK | KER_TCP_FIN, NULL, 0);
+    drain_ack(1002, 7);
+    CHECK(stream_requests[0].state == KER_TCP_REQUEST_TIME_WAIT &&
+          stream_requests[0].time_wait_saturated &&
+          stream_requests[0].time_wait_deadline_ms == UINT64_MAX &&
+          ker_tcp_listener_release(&listener, saturated_close) == -EBUSY &&
+          ker_tcp_listener_cleanup(&listener) == -EBUSY);
+    /* Intentional non-expiring fixture: restore storage directly after asserting fail-closed guards. */
+    memset(&stream_requests[0], 0, sizeof(stream_requests[0]));
+    listener.count = 0;
     CHECK(ker_tcp_listener_cleanup(&listener) == 0);
     config.time_wait_ms = 0;
     custom_isn = false;
