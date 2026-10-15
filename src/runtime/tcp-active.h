@@ -38,6 +38,9 @@ struct ker_tcp_active_config {
      * preserves -EAGAIN. The byte follows the ordinary retry and fixed-timeout
      * policy. */
     bool zero_window_probe;
+    /* Opt in to RFC 6298-style RTT estimation/backoff for ordinary DATA flights.
+     * SYN, FIN and zero-window probes retain the fixed retry policy. */
+    bool adaptive_rto;
 };
 struct ker_tcp_active_snapshot {
     enum ker_tcp_active_state state;
@@ -75,6 +78,8 @@ struct ker_tcp_active {
     bool active_close, time_wait_saturated;
     bool reorder_fin_pending;
     uint32_t reorder_fin_sequence;
+    uint64_t rtt_srtt_x8, rttvar_x8, rto_ms, send_first_tx_ms;
+    bool send_rtt_eligible, send_retransmitted, send_zero_window_probe;
 };
 int ker_tcp_active_start(struct ker_tcp_active *, struct ker_transport_receiver *,
     struct ker_neighbor_table *, __be32 peer_ip, struct ker_tx_export *,

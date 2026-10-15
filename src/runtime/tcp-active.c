@@ -57,6 +57,62 @@ static int emit(struct ker_tcp_active *t, uint8_t flags, uint32_t peer_isn)
 /* All live windows are <= 65535, strictly below the serial half-space. */
 static bool before(uint32_t a, uint32_t b)
 { return (int32_t)(a - b) < 0; }
+#define KER_TCP_RTO_MIN_MS 1000U
+#define KER_TCP_RTO_MAX_MS 60000U
+#define KER_TCP_RTO_GRANULARITY_MS 1U
+static uint64_t weighted_average(uint64_t old, uint64_t sample,
+                                 uint64_t old_weight, uint64_t divisor)
+{
+    /* Split quotient/remainder so multiplication cannot overflow. */
+    uint64_t sample_weight = divisor - old_weight;
+    uint64_t whole = (old / divisor) * old_weight +
+        (sample / divisor) * sample_weight;
+    uint64_t remainder = (old % divisor) * old_weight +
+        (sample % divisor) * sample_weight;
+    uint64_t quotient = whole + remainder / divisor;
+    return remainder % divisor && quotient < UINT64_MAX ? quotient + 1 : quotient;
+}
+static uint64_t saturating_add(uint64_t a, uint64_t b)
+{ return a > UINT64_MAX - b ? UINT64_MAX : a + b; }
+static uint64_t adaptive_rto(const struct ker_tcp_active *t)
+{
+    uint64_t variation_x8 = t->rttvar_x8 > (UINT64_MAX / 4) ?
+        UINT64_MAX : t->rttvar_x8 * 4;
+    if (variation_x8 < KER_TCP_RTO_GRANULARITY_MS * 8U)
+        variation_x8 = KER_TCP_RTO_GRANULARITY_MS * 8U;
+    uint64_t sum_x8 = saturating_add(t->rtt_srtt_x8, variation_x8);
+    uint64_t estimate = sum_x8 / 8U + (sum_x8 % 8U != 0);
+    if (estimate < KER_TCP_RTO_MIN_MS) return KER_TCP_RTO_MIN_MS;
+    if (estimate > KER_TCP_RTO_MAX_MS) return KER_TCP_RTO_MAX_MS;
+    return estimate;
+}
+static void update_rtt_estimator(struct ker_tcp_active *t, uint64_t sample)
+{
+    if (!sample) sample = 1;
+    uint64_t sample_x8 = sample > UINT64_MAX / 8U ? UINT64_MAX : sample * 8U;
+    if (!t->rtt_srtt_x8) {
+        t->rtt_srtt_x8 = sample_x8;
+        t->rttvar_x8 = sample_x8 / 2U;
+    } else {
+        uint64_t difference = t->rtt_srtt_x8 > sample_x8 ?
+            t->rtt_srtt_x8 - sample_x8 : sample_x8 - t->rtt_srtt_x8;
+        t->rttvar_x8 = weighted_average(t->rttvar_x8, difference, 3, 4);
+        t->rtt_srtt_x8 = weighted_average(t->rtt_srtt_x8, sample_x8, 7, 8);
+    }
+    t->rto_ms = adaptive_rto(t);
+}
+static uint64_t doubled_rto(uint64_t current)
+{
+    if (current >= KER_TCP_RTO_MAX_MS || current > KER_TCP_RTO_MAX_MS / 2)
+        return KER_TCP_RTO_MAX_MS;
+    return current * 2;
+}
+static void clear_rtt_state(struct ker_tcp_active *t)
+{
+    t->rtt_srtt_x8 = t->rttvar_x8 = t->send_first_tx_ms = 0;
+    t->rto_ms = 0;
+    t->send_rtt_eligible = t->send_retransmitted = t->send_zero_window_probe = false;
+}
 static size_t reorder_stride(const struct ker_tcp_active *t)
 { return ((size_t)t->config.receive_capacity + 7U) / 8U; }
 static bool reorder_enabled(const struct ker_tcp_active *t)
@@ -82,6 +138,7 @@ static void discard_stream(struct ker_tcp_active *t)
     t->send_retry_ms = t->send_deadline_ms = t->send_backoff_ms = 0;
     t->status.local_fin = t->status.local_fin_acked = t->status.peer_eof = false;
     t->close_deadline_ms = 0;
+    clear_rtt_state(t);
 }
 static int emit_data(struct ker_tcp_active *t, uint32_t sequence,
                      const void *data, uint16_t length)
@@ -284,15 +341,30 @@ static int receive_active(void *arg, struct sk_buff *skb,
                  p->sequence + p->payload_length == t->status.receive_next &&
                  before(t->status.receive_next, t->receive_right)))) &&
             valid_ack(t, p->acknowledgment)) {
+            uint16_t flight_bytes = t->status.send_bytes;
+            bool clean_rtt_sample = t->config.adaptive_rto && flight_bytes &&
+                !t->status.local_fin && t->send_rtt_eligible &&
+                !t->send_retransmitted && !t->send_zero_window_probe;
             uint32_t acknowledged = p->acknowledgment - t->status.send_unacknowledged;
             if (t->status.local_fin && !t->status.local_fin_acked) {
                 if (acknowledged) t->status.local_fin_acked = true;
             } else { t->send_head += acknowledged; t->status.send_bytes -= acknowledged; }
             t->status.send_unacknowledged = p->acknowledgment;
             t->status.peer_window = p->window; t->send_right = p->acknowledgment + p->window;
+            if (t->config.adaptive_rto && flight_bytes && !t->status.local_fin && acknowledged) {
+                if (!t->status.send_bytes) {
+                    if (clean_rtt_sample && t->now_ms >= t->send_first_tx_ms)
+                        update_rtt_estimator(t, t->now_ms - t->send_first_tx_ms);
+                } else {
+                    /* Advancing partial ACKs restart the remaining DATA flight timer. */
+                    t->send_retry_ms = saturating_add(t->now_ms, t->send_backoff_ms);
+                }
+            }
             if (!t->status.send_bytes && (!t->status.local_fin || t->status.local_fin_acked)) {
                 t->send_head = 0;
                 t->send_retry_ms = t->send_deadline_ms = t->send_backoff_ms = 0;
+                t->send_first_tx_ms = 0;
+                t->send_rtt_eligible = t->send_retransmitted = t->send_zero_window_probe = false;
             }
             close_state(t);
         }
@@ -368,7 +440,8 @@ int ker_tcp_active_start(struct ker_tcp_active *t, struct ker_transport_receiver
         memset(cfg->reorder_buffer, 0, ((size_t)cfg->receive_capacity + 7U) / 8U);
     *t = (struct ker_tcp_active){.receiver = r, .neighbors = n, .peer = entry,
         .tx = tx, .peer_ip = peer, .config = *cfg, .now_ms = now,
-        .retry_ms = now + cfg->retry_ms, .deadline_ms = now + cfg->timeout_ms, .busy = true};
+        .retry_ms = now + cfg->retry_ms, .deadline_ms = now + cfg->timeout_ms,
+        .rto_ms = cfg->adaptive_rto ? KER_TCP_RTO_MIN_MS : 0, .busy = true};
     ++tx->active_refs;
     r->tcp_active = t; r->tcp_active_receive = receive_active;
     error = t->config.next_isn(t->config.arg, cfg->peer_port, &t->status.local_isn);
@@ -393,10 +466,21 @@ int ker_tcp_active_poll(struct ker_tcp_active *t, uint64_t now)
     if (connected(t) && expire_send(t)) return 1;
     if (connected(t) && (t->status.send_bytes || (t->status.local_fin && !t->status.local_fin_acked)) &&
         now >= t->send_retry_ms) {
+        bool adaptive_data = t->config.adaptive_rto && t->status.send_bytes &&
+            !t->status.local_fin && t->send_rtt_eligible && !t->send_zero_window_probe;
         t->status.last_tx_error = t->status.local_fin ? emit(t, KER_TCP_FIN | KER_TCP_ACK, t->status.peer_isn) :
             emit_data(t, t->status.send_unacknowledged, t->config.send_buffer + t->send_head, t->status.send_bytes);
-        t->send_backoff_ms = t->send_backoff_ms > UINT64_MAX / 2 ? UINT64_MAX : t->send_backoff_ms * 2;
-        t->send_retry_ms = now > UINT64_MAX - t->send_backoff_ms ? UINT64_MAX : now + t->send_backoff_ms;
+        if (adaptive_data) {
+            if (!t->status.last_tx_error) {
+                t->send_retransmitted = true;
+                t->rto_ms = doubled_rto(t->send_backoff_ms);
+            }
+            t->send_backoff_ms = doubled_rto(t->send_backoff_ms);
+        } else {
+            t->send_backoff_ms = t->send_backoff_ms > UINT64_MAX / 2 ?
+                UINT64_MAX : t->send_backoff_ms * 2;
+        }
+        t->send_retry_ms = saturating_add(now, t->send_backoff_ms);
         return 1;
     }
     if (connected(t) && t->status.ack_pending) {
@@ -481,8 +565,13 @@ int ker_tcp_active_write(struct ker_tcp_active *t, const void *source, uint16_t 
     if (error) return error;
     memcpy(t->config.send_buffer, source, length);
     t->send_head = 0; t->status.send_bytes = length; t->status.send_next += length;
-    t->send_backoff_ms = t->config.retry_ms;
-    t->send_retry_ms = t->now_ms + t->config.retry_ms;
+    t->send_zero_window_probe = probe;
+    t->send_rtt_eligible = t->config.adaptive_rto && !probe;
+    t->send_retransmitted = false;
+    t->send_first_tx_ms = t->send_rtt_eligible ? t->now_ms : 0;
+    t->send_backoff_ms = t->send_rtt_eligible ? t->rto_ms : t->config.retry_ms;
+    if (!t->send_backoff_ms) t->send_backoff_ms = KER_TCP_RTO_MIN_MS;
+    t->send_retry_ms = saturating_add(t->now_ms, t->send_backoff_ms);
     t->send_deadline_ms = t->now_ms + t->config.timeout_ms;
     return length;
 }

@@ -24,7 +24,18 @@ arithmetic. Partial/duplicate ACKs and TX backpressure do not extend the deadlin
 failed retransmission admission still advances the retry schedule. Expiry is
 checked before receive acknowledgment or pending local ACK work, discards private
 send/receive state, and reports `-ETIMEDOUT`. Caller-configured retry/timeout values
-are a private test/deployment policy, not an adaptive TCP RTT/RTO estimator.
+remain the policy when adaptive estimation is disabled (the default).
+
+With `adaptive_rto`, ordinary DATA flights start at 1000 ms and use RFC 6298
+RTT sampling with a 1000–60000 ms RTO range. A clean full-flight ACK updates the
+integer fixed-point SRTT/RTTVAR estimator; partial advancing ACKs restart only the
+remaining suffix timer without sampling. Successful retransmission applies Karn
+exclusion and persists exponential backoff into later DATA flights until a fresh
+clean sample updates the estimator. Failed retransmission admission backs off
+that attempt without making the flight RTT-ineligible. SYN, FIN and the explicit
+zero-window one-byte probe keep the fixed `retry_ms` policy. The absolute
+`timeout_ms` deadline remains unchanged. See
+[RFC 6298](https://www.rfc-editor.org/rfc/rfc6298.html).
 
 A zero peer window prevents new writes by default without starting a deadline or
 copying. With `zero_window_probe` enabled, one application write may admit exactly
@@ -55,6 +66,11 @@ read-window reopening by data, full-duplex ACK+payload, reset and cleanup.
 server: Linux receives and verifies 8192 binary bytes, echoes them, and Ker
 verifies every byte before an explicit RST. Legacy receive-stream, active/passive
 handshake and UDP host tests remain separate.
+
+`tcp-send-rto-host` delays a clean Linux ACK to learn an RTO above the floor,
+drops a selected outbound DATA flight, and checks that its same-sequence/same-byte
+retry waits for the learned RTO. It then checks Karn backoff and a later clean
+flight sample before completing byte-exact transfer.
 
 `tcp-persist` checks opt-in/default behavior, transactional one-byte admission,
 zero-window ACK and reopened-window retries, deadline ordering and sequence wrap.

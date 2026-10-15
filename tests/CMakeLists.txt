@@ -716,9 +716,11 @@ if(KER_WITH_DPDK)
     add_test(NAME tcp-send COMMAND ker-tcp-send-test)
     add_test(NAME tcp-send-host COMMAND ${Python3_EXECUTABLE}
         ${CMAKE_CURRENT_SOURCE_DIR}/tcp-send-host.py $<TARGET_FILE:ker-tcp-send-test>)
-    set_tests_properties(tcp-send tcp-send-host PROPERTIES TIMEOUT 30
+    add_test(NAME tcp-send-rto-host COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tcp-send-host.py $<TARGET_FILE:ker-tcp-send-test> rto)
+    set_tests_properties(tcp-send tcp-send-host tcp-send-rto-host PROPERTIES TIMEOUT 30
         ENVIRONMENT "LD_LIBRARY_PATH=${ker_dpdk_library_path}:$ENV{LD_LIBRARY_PATH}")
-    set_tests_properties(tcp-send-host PROPERTIES SKIP_RETURN_CODE 77)
+    set_tests_properties(tcp-send-host tcp-send-rto-host PROPERTIES SKIP_RETURN_CODE 77)
 endif()
 
 if(KER_WITH_DPDK)
