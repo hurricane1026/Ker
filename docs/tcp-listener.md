@@ -8,11 +8,12 @@ neighbor table and bounded TX exporter. Upstream Linux and DPDK remain unchanged
 
 A valid payload-free SYN allocates a request only after its SYN-ACK is admitted
 to the exporter. The listener advertises a configured unscaled window and MSS.
-An optional caller-owned flat receive arena enables bounded passive data reads;
-it must cover `request_capacity * receive_capacity` bytes and remain stable
-until cleanup. Receive capacity is per slot. The initial advertised window is
-the smaller of `window` and `receive_capacity`; with no arena the prior
-handshake-only behavior and configured window remain unchanged.
+Optional caller-owned flat receive and send arenas enable bounded passive
+streams. Each must cover `request_capacity * its_capacity` bytes and remain
+stable until cleanup. Capacity is isolated per slot. Receive window is capped
+by receive capacity; without receive storage, the prior handshake-only receive
+behavior and configured window remain unchanged. Send storage enables the
+accepted application to send one outstanding segment at a time.
 Peer MSS parsing follows the imported Linux helper; an absent MSS uses 536,
 capped by the configured MSS. ECE/CWR offers are declined. Window scaling,
 SACK, timestamps, Fast Open and TCP authentication are not negotiated.
@@ -44,8 +45,17 @@ owning worker. Each request has an isolated bounded ring. Old duplicate prefixes
 are trimmed, future gaps are discarded, and bytes beyond the last admitted
 window edge are clipped. Reads schedule a window ACK; the edge advances only
 after exporter admission. Retained data survives ACK backpressure and poll
-retries pending ACKs fairly. FIN and data+FIN remain unsupported and take an
-explicit RST path; passive send and graceful close are not implemented.
+retries pending ACKs fairly. `ker_tcp_listener_write` copies and admits at most
+one segment, clipped by the peer MSS, advertised window and per-slot send
+capacity. It returns the locally admitted byte count; an outstanding segment or
+zero peer window returns `-EAGAIN`. The private copy is retained for
+retransmission, and cumulative ACKs trim only the acknowledged prefix. Pure ACKs
+must match the current receive sequence; ACKs with payload may also update the
+send window when their segment overlaps the receive edge and contributes new
+bytes. Stale duplicates and future gaps cannot change send ACK/window state.
+Retry intervals back off exponentially against a fixed absolute timeout. No
+persist timer is used. FIN and data+FIN remain unsupported and take an explicit
+RST path; graceful close is not implemented.
 
 The receiver and exporter cannot be destroyed while a listener is attached.
 A retained native neighbor reference pins the peer/table; caller storage must
@@ -53,8 +63,8 @@ remain stable and must not be edited while attached. Request retirement waits
 for the exporter to drain queued frames. This is a conservative barrier across
 that entire exporter, so unrelated traffic sharing it can delay retirement.
 
-This profile supports bounded passive receive and explicit abort with RST. It
-does not support passive send, active connect, FIN close, congestion control,
+This profile supports opt-in bounded passive send/receive and explicit abort
+with RST. It does not support active connect, FIN close, congestion control,
 reassembly, TIME_WAIT, ICMP correlation or cross-worker listener distribution.
 With storage disabled, data remains rejected with `-EOPNOTSUPP` and an RST when
 TX admission succeeds. `reset` is transactional on TX failure; its handle becomes stale when
@@ -68,7 +78,7 @@ final-ACK data, sequence and ring wrap, clipping, gaps and duplicates.
 `tcp-host` runs the same listener against a real Linux `AF_INET/SOCK_STREAM`
 client through TAP in a disposable user/network namespace. It requires an
 actual ARP reply, a successful Linux `connect`/Ker `accept`, byte-verified
-passive data transfer, and an explicit RST observed by the Linux client. The test has bounded waits and kills its child on
+full-duplex data transfer, and an explicit RST observed by the Linux client. The test has bounded waits and kills its child on
 failure. Missing namespace/TAP facilities produce a CTest skip (exit 77), which
 is not interoperability evidence.
 

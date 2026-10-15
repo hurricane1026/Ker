@@ -4,16 +4,17 @@
 #include "runtime/transport-receive.h"
 #include "runtime/tx-export.h"
 
-/* Fixed-peer profile; optional bounded passive receive, no passive send or
- * graceful close. */
+/* Fixed-peer profile; optional bounded passive streams, no graceful close. */
 enum ker_tcp_request_state { KER_TCP_REQUEST_FREE, KER_TCP_REQUEST_SYN,
     KER_TCP_REQUEST_READY, KER_TCP_REQUEST_RESET, KER_TCP_REQUEST_FAILED };
 struct ker_tcp_request {
     uint64_t generation, retry_ms, deadline_ms;
+    uint64_t send_retry_ms, send_deadline_ms, send_backoff_ms;
     uint32_t local_isn, peer_isn;
     uint32_t receive_next, receive_right;
+    uint32_t send_unacknowledged, send_next, send_right;
     __be16 peer_port;
-    uint16_t send_mss, receive_bytes, receive_head;
+    uint16_t send_mss, receive_bytes, receive_head, peer_window, send_bytes, send_head;
     enum ker_tcp_request_state state;
     int error;
     bool accepted, ack_pending;
@@ -40,6 +41,11 @@ struct ker_tcp_listener_config {
     unsigned char *receive_storage;
     size_t receive_storage_size;
     uint16_t receive_capacity;
+    /* Optional flat arena: at least request_capacity * send_capacity bytes,
+     * one retransmit ring per slot. Enables one outstanding send segment. */
+    unsigned char *send_storage;
+    size_t send_storage_size;
+    uint16_t send_capacity;
 };
 struct ker_tcp_listener {
     struct ker_transport_receiver *receiver;
@@ -76,6 +82,10 @@ int ker_tcp_listener_snapshot(struct ker_tcp_listener *, struct ker_tcp_request_
  * bytes copied or -EAGAIN if empty; no FIN/EOF API. */
 int ker_tcp_listener_read(struct ker_tcp_listener *, struct ker_tcp_request_handle,
     void *destination, uint16_t capacity);
+/* Copy and admit up to one segment; return bytes locally admitted or negative
+ * errno. Requires accepted send storage and a nonzero peer window. */
+int ker_tcp_listener_write(struct ker_tcp_listener *, struct ker_tcp_request_handle,
+    const void *source, uint16_t length);
 /* Abort with RST. Queue failure leaves the request unchanged; successful reset
  * invalidates the handle after poll observes an empty exporter. No FIN API. */
 int ker_tcp_listener_reset(struct ker_tcp_listener *, struct ker_tcp_request_handle);
