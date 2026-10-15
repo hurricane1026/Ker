@@ -444,8 +444,22 @@ static void test_stream(void)
     memcpy(outgoing, "XXXXXXXXXXX", sizeof(outgoing));
     drain_data(0, 1, 8, "abcdefgh", 8);
     CHECK(stream_requests[1].send_next == 8 && stream_requests[1].send_bytes == 8);
+    uint32_t saved_right = stream_requests[1].send_right;
+    uint16_t saved_window = stream_requests[1].peer_window;
+    inject_window(0, 3, 0, KER_TCP_ACK, NULL, 0); /* stale sequence cannot ACK send data */
+    inject_window(2, 3, 0, KER_TCP_ACK, NULL, 0); /* future sequence cannot ACK either */
+    CHECK(stream_requests[1].send_unacknowledged == 0 && stream_requests[1].send_bytes == 8 &&
+          stream_requests[1].peer_window == saved_window &&
+          stream_requests[1].send_right == saved_right);
+    inject(2, 3, KER_TCP_ACK | KER_TCP_PSH, "G", 1); /* receive gap is not ACK-eligible */
+    drain_ack(1, 8);
+    inject(0, 3, KER_TCP_ACK | KER_TCP_PSH, "Z", 1); /* wholly old duplicate */
+    drain_ack(1, 8);
+    CHECK(stream_requests[1].send_unacknowledged == 0 && stream_requests[1].send_bytes == 8 &&
+          stream_requests[1].peer_window == saved_window &&
+          stream_requests[1].send_right == saved_right);
     /* Partial ACK advances UNA and retransmits only the preserved suffix. */
-    inject(1, 3, KER_TCP_ACK | KER_TCP_PSH, "R", 1);
+    inject(0, 3, KER_TCP_ACK | KER_TCP_PSH, "XR", 2); /* valid overlap reaches receive_next */
     CHECK(stream_requests[1].send_unacknowledged == 3 && stream_requests[1].send_bytes == 5 &&
           stream_requests[1].receive_next == 2 && stream_requests[1].receive_bytes == 1);
     drain_ack(2, 7);

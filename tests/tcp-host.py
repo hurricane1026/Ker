@@ -40,6 +40,14 @@ def run(binary):
                 received.extend(part)
             assert received == bytes((i + 37) & 0xff for i in range(4096))
             assert child.wait(timeout=5) == 0
+            try:
+                extra = peer.recv(1)
+            except ConnectionResetError:
+                pass
+            else:
+                if extra:
+                    raise AssertionError('peer received unexpected data instead of RST')
+                raise AssertionError('peer observed orderly EOF instead of explicit RST')
         print('PASS: Linux TCP connect, full-duplex passive streams, ARP and explicit RST')
         return 0
     finally:

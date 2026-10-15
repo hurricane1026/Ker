@@ -67,6 +67,17 @@ static void discard_send(struct ker_tcp_request *r)
 }
 static bool valid_send_ack(const struct ker_tcp_request *r, uint32_t ack)
 { return !before(ack, r->send_unacknowledged) && !before(r->send_next, ack); }
+static bool send_ack_eligible(const struct ker_tcp_listener *t,
+                              const struct ker_tcp_request *r,
+                              const struct ker_tcp_packet_view *p)
+{
+    if (!(p->flags & KER_TCP_ACK)) return false;
+    if (!p->payload_length) return p->sequence == r->receive_next;
+    if (!stream_enabled(t) || r->receive_right == r->receive_next) return false;
+    if (p->sequence == r->receive_next) return true;
+    if (!before(p->sequence, r->receive_next)) return false;
+    return r->receive_next - p->sequence < p->payload_length;
+}
 static int emit(struct ker_tcp_listener *t, struct ker_tcp_request *r, uint8_t flags)
 {
     unsigned char options[4] = {2, 4, (unsigned char)(t->config.mss >> 8),
@@ -260,7 +271,7 @@ static int receive_request(void *arg, struct sk_buff *skb,
                 discard_stream(r); discard_send(r); error = -EOPNOTSUPP; }
         } else if (stream_enabled(t) && (p->flags == KER_TCP_ACK ||
                 p->flags == (KER_TCP_ACK | KER_TCP_PSH)) && ack_valid && p->payload_length) {
-            acknowledge_send(t, r, p);
+            if (send_ack_eligible(t, r, p)) acknowledge_send(t, r, p);
             error = receive_data(t, r, p);
         } else if (stream_enabled(t) && p->payload_length &&
             at_contiguous_edge(p, r->receive_next) &&
@@ -275,7 +286,8 @@ static int receive_request(void *arg, struct sk_buff *skb,
             if (!error) { r->state = KER_TCP_REQUEST_RESET; r->error = -EOPNOTSUPP;
                 discard_stream(r); discard_send(r); error = -EOPNOTSUPP; }
         }
-        if (!error && send_enabled(t) && p->flags == KER_TCP_ACK && !p->payload_length)
+        if (!error && send_enabled(t) && p->flags == KER_TCP_ACK &&
+            !p->payload_length && send_ack_eligible(t, r, p))
             acknowledge_send(t, r, p);
         goto done;
     }
