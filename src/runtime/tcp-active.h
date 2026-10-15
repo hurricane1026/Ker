@@ -33,6 +33,11 @@ struct ker_tcp_active_config {
      * byte; size is ceil(receive_capacity/8). Absent storage keeps gap discard. */
     unsigned char *reorder_buffer;
     size_t reorder_buffer_size;
+    /* Opt in to admitting one real application byte when the usable send
+     * window is exactly zero and no segment is outstanding. Default false
+     * preserves -EAGAIN. The byte follows the ordinary retry and fixed-timeout
+     * policy. */
+    bool zero_window_probe;
 };
 struct ker_tcp_active_snapshot {
     enum ker_tcp_active_state state;
@@ -93,8 +98,13 @@ int ker_tcp_active_reset(struct ker_tcp_active *);
 int ker_tcp_active_read(struct ker_tcp_active *, void *destination, uint16_t capacity);
 /* Copy/admit at most one MSS/window/buffer-sized segment, return accepted bytes.
  * A positive result means local admission, not peer delivery; snapshot send_bytes
- * tracks acknowledgment. EAGAIN if a segment is outstanding or window is zero.
- * Caller polls before writing; source must not overlap either private buffer. */
+ * tracks acknowledgment. EAGAIN if a segment is outstanding or there is no
+ * usable send window, except that zero_window_probe opts into admitting exactly
+ * one real caller byte at an exactly zero usable send window. It returns 1 and
+ * consumes that byte only after TX admission; failure leaves caller data/state
+ * unchanged. Retransmission and timeout use the normal one-flight policy. This
+ * opt-in does not make a zero-window FIN admissible. Caller polls before writing;
+ * source must not overlap either private buffer. */
 int ker_tcp_active_write(struct ker_tcp_active *, const void *source, uint16_t length);
 /* Opt-in half-close; no outstanding data and a nonzero peer window required.
  * Successful FIN admission permanently disables writes. Poll handles FIN

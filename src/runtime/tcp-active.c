@@ -466,12 +466,17 @@ int ker_tcp_active_write(struct ker_tcp_active *t, const void *source, uint16_t 
     if (t->status.local_fin || t->status.state == KER_TCP_ACTIVE_CLOSED) return -EPIPE;
     if (t->status.state != KER_TCP_ACTIVE_READY && t->status.state != KER_TCP_ACTIVE_CLOSE_WAIT)
         return t->status.error ? t->status.error : -ENOTCONN;
-    if (t->status.send_bytes || !before(t->status.send_next, t->send_right)) return -EAGAIN;
-    if (t->now_ms > UINT64_MAX - t->config.timeout_ms) return -EOVERFLOW;
+    if (t->status.send_bytes) return -EAGAIN;
     uint32_t window = t->send_right - t->status.send_next;
-    if (length > t->status.send_mss) length = t->status.send_mss;
-    if (length > t->config.send_capacity) length = t->config.send_capacity;
-    if (length > window) length = window;
+    bool probe = window == 0 && t->config.zero_window_probe;
+    if (!probe && !before(t->status.send_next, t->send_right)) return -EAGAIN;
+    if (t->now_ms > UINT64_MAX - t->config.timeout_ms) return -EOVERFLOW;
+    if (probe) length = 1;
+    else {
+        if (length > t->status.send_mss) length = t->status.send_mss;
+        if (length > t->config.send_capacity) length = t->config.send_capacity;
+        if (length > window) length = window;
+    }
     error = emit_data(t, t->status.send_next, source, length);
     if (error) return error;
     memcpy(t->config.send_buffer, source, length);
