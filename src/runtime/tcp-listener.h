@@ -61,6 +61,9 @@ struct ker_tcp_listener_config {
      * Keep this arena stable and non-overlapping with receive_storage until cleanup. */
     unsigned char *reorder_storage;
     size_t reorder_storage_size;
+    /* Opt in to admitting one real application byte when a request's usable
+     * send window is exactly zero and no segment is outstanding. */
+    bool zero_window_probe;
 };
 struct ker_tcp_listener {
     struct ker_transport_receiver *receiver;
@@ -98,7 +101,10 @@ int ker_tcp_listener_snapshot(struct ker_tcp_listener *, struct ker_tcp_request_
 int ker_tcp_listener_read(struct ker_tcp_listener *, struct ker_tcp_request_handle,
     void *destination, uint16_t capacity);
 /* Copy and admit up to one segment; return bytes locally admitted or negative
- * errno. Requires accepted send storage and a nonzero peer window. */
+ * errno. Requires accepted send storage. No usable send window returns EAGAIN,
+ * except zero_window_probe allows exactly one real caller byte at an exactly
+ * zero usable send window. It is consumed only after TX admission; retries and
+ * timeout use the normal one-flight policy. FIN still needs nonzero window. */
 int ker_tcp_listener_write(struct ker_tcp_listener *, struct ker_tcp_request_handle,
     const void *source, uint16_t length);
 /* Gracefully half-close the local send direction after all data is ACKed. */

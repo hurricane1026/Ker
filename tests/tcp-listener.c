@@ -43,8 +43,12 @@ static int tap = -1, isn_error;
 static bool reenter;
 static bool reenter_close;
 static struct ker_tcp_request_handle reenter_handle;
-static bool host_server_first;
+static bool host_server_first, host_persist_mode;
 static bool host_reorder_mode, host_reorder_held, host_reorder_exercised;
+static bool host_persist_zero_seen, host_persist_probe_sent, host_persist_reopen_dropped,
+    host_persist_recovered;
+static uint32_t host_persist_probe_sequence, host_persist_reopen_ack;
+static uint16_t host_persist_reopen_window, host_persist_recovery_window;
 static unsigned char host_held_frame[2048];
 static size_t host_held_length;
 static uint32_t host_held_sequence;
@@ -250,6 +254,8 @@ static uint64_t now_ms(void)
 }
 static void test_host(void)
 {
+    const size_t request_goal = 4096;
+    const size_t response_goal = host_persist_mode ? 65536 : 4096;
     uint64_t deadline = now_ms() + 10000;
     struct ker_tcp_request_handle handle;
     bool accepted = false, shutdown = false, closed = false, peer_eof = false;
@@ -262,34 +268,86 @@ static void test_host(void)
         ssize_t n = read(tap, bytes, sizeof(bytes));
         if (n < 0) CHECK(errno == EAGAIN || errno == EINTR);
         if (n > 0) {
-            uint32_t sequence = 0;
-            uint16_t payload_length = 0;
-            if (host_reorder_mode && !host_reorder_exercised &&
-                peer_tcp_payload(bytes, (size_t)n, &sequence, &payload_length)) {
-                if (!host_reorder_held) {
-                    CHECK((size_t)n <= sizeof(host_held_frame));
-                    memcpy(host_held_frame, bytes, (size_t)n);
-                    host_held_length = (size_t)n;
-                    host_held_sequence = sequence;
-                    host_held_payload_length = payload_length;
-                    host_reorder_held = true;
-                    continue;
-                }
-                if (sequence == host_held_sequence + host_held_payload_length) {
-                    /* Deliver a later sequence first, prove it is retained but not ACKed through. */
-                    dispatch_bytes(bytes, (size_t)n);
-                    CHECK(listener.requests[0].receive_next == host_held_sequence &&
-                          memcmp(host_reorder_storage, (unsigned char[128]){0},
-                                 sizeof(host_reorder_storage)) != 0);
-                    dispatch_bytes(host_held_frame, host_held_length);
-                    CHECK(listener.requests[0].receive_next == sequence + payload_length &&
-                          memcmp(host_reorder_storage, (unsigned char[128]){0},
-                                 sizeof(host_reorder_storage)) == 0);
-                    host_reorder_exercised = true;
-                    continue;
+            bool drop_frame = false, dispatch_done = false;
+            if (host_persist_mode && accepted &&
+                n >= 54 && bytes[12] == 8 && bytes[13] == 0 && bytes[23] == 6 &&
+                bytes[26] == 192 && bytes[27] == 0 && bytes[28] == 2 && bytes[29] == 2 &&
+                bytes[30] == 192 && bytes[31] == 0 && bytes[32] == 2 && bytes[33] == 1) {
+                size_t ihl = (size_t)(bytes[14] & 15) * 4, tcp = 14 + ihl;
+                size_t ip_length = ((size_t)bytes[16] << 8) | bytes[17];
+                if ((bytes[14] >> 4) == 4 && bytes[23] == 6 && ihl >= 20 &&
+                    ip_length >= ihl + 20 && ip_length <= (size_t)n - 14 &&
+                    tcp + 20 <= 14 + ip_length && bytes[tcp] == 0x1f && bytes[tcp + 1] == 0x43 &&
+                    bytes[tcp + 2] == 0x23 && bytes[tcp + 3] == 0x28 &&
+                    (bytes[tcp + 12] >> 4) >= 5 &&
+                    tcp + (((size_t)bytes[tcp + 12] >> 4) * 4) <= 14 + ip_length) {
+                    struct ker_tcp_request *r = &listener.requests[handle.slot];
+                    uint32_t sequence = be32(bytes + tcp + 4);
+                    uint32_t acknowledgment = be32(bytes + tcp + 8);
+                    uint16_t window = ((uint16_t)bytes[tcp + 14] << 8) | bytes[tcp + 15];
+                    if (!host_persist_reopen_dropped && r->send_bytes == 1 &&
+                        r->peer_window == 0 && host_persist_probe_sent &&
+                        r->send_right == host_persist_probe_sequence &&
+                        r->send_next == host_persist_probe_sequence + 1U &&
+                        sequence == r->receive_next && bytes[tcp + 13] == KER_TCP_ACK && window &&
+                        acknowledgment == host_persist_probe_sequence) {
+                        host_persist_reopen_ack = acknowledgment;
+                        host_persist_reopen_window = window;
+                        host_persist_reopen_dropped = true;
+                        drop_frame = true;
+                    }
+                    if (!drop_frame && host_persist_reopen_dropped && !host_persist_recovered &&
+                        r->send_bytes == 1 && r->peer_window == 0 &&
+                        sequence == r->receive_next && bytes[tcp + 13] == KER_TCP_ACK && window &&
+                        acknowledgment == host_persist_probe_sequence + 1U) {
+                        uint32_t recovery_ack = acknowledgment;
+                        host_persist_recovery_window = window;
+                        dispatch_bytes(bytes, (size_t)n);
+                        CHECK(!r->send_bytes && r->send_unacknowledged == recovery_ack &&
+                            r->peer_window == host_persist_recovery_window &&
+                            r->send_right == recovery_ack + host_persist_recovery_window);
+                        host_persist_recovered = true;
+                        if (!r->peer_window && r->send_right == r->send_next)
+                            host_persist_zero_seen = true;
+                        dispatch_done = true;
+                    }
                 }
             }
-            dispatch_bytes(bytes, (size_t)n);
+            if (!drop_frame && !dispatch_done) {
+                uint32_t sequence = 0;
+                uint16_t payload_length = 0;
+                if (host_reorder_mode && !host_reorder_exercised &&
+                    peer_tcp_payload(bytes, (size_t)n, &sequence, &payload_length)) {
+                    if (!host_reorder_held) {
+                        CHECK((size_t)n <= sizeof(host_held_frame));
+                        memcpy(host_held_frame, bytes, (size_t)n);
+                        host_held_length = (size_t)n;
+                        host_held_sequence = sequence;
+                        host_held_payload_length = payload_length;
+                        host_reorder_held = true;
+                        continue;
+                    }
+                    if (sequence == host_held_sequence + host_held_payload_length) {
+                        /* Deliver a later sequence first, prove it is retained but not ACKed through. */
+                        dispatch_bytes(bytes, (size_t)n);
+                        CHECK(listener.requests[0].receive_next == host_held_sequence &&
+                              memcmp(host_reorder_storage, (unsigned char[128]){0},
+                                     sizeof(host_reorder_storage)) != 0);
+                        dispatch_bytes(host_held_frame, host_held_length);
+                        CHECK(listener.requests[0].receive_next == sequence + payload_length &&
+                              memcmp(host_reorder_storage, (unsigned char[128]){0},
+                                     sizeof(host_reorder_storage)) == 0);
+                        host_reorder_exercised = true;
+                        continue;
+                    }
+                }
+                dispatch_bytes(bytes, (size_t)n);
+                if (host_persist_mode && accepted &&
+                    !listener.requests[handle.slot].peer_window &&
+                    listener.requests[handle.slot].send_right ==
+                        listener.requests[handle.slot].send_next)
+                    host_persist_zero_seen = true;
+            }
         }
         if (!accepted && ker_tcp_listener_accept(&listener, &handle) == 1) {
             struct ker_tcp_request snapshot;
@@ -306,18 +364,25 @@ static void test_host(void)
                 received += (size_t)n;
             } else if (n == 0) peer_eof = true;
             else CHECK(n == -EAGAIN);
-            if (!listener.requests[0].send_bytes && sent < 4096) {
+            if (!listener.requests[handle.slot].send_bytes && sent < response_goal) {
                 unsigned char payload[1024];
                 size_t amount = sizeof(payload);
-                if (amount > 4096 - sent) amount = 4096 - sent;
+                if (amount > response_goal - sent) amount = response_goal - sent;
                 for (size_t i = 0; i < amount; ++i) payload[i] = (unsigned char)((sent + i + 37) & 0xff);
                 int written = ker_tcp_listener_write(&listener, handle, payload, (uint16_t)amount);
-                if (written > 0) sent += (size_t)written;
+                if (written > 0) {
+                    if (host_persist_mode && !host_persist_probe_sent &&
+                        listener.requests[handle.slot].peer_window == 0 && written == 1) {
+                        host_persist_probe_sent = true;
+                        host_persist_probe_sequence = listener.requests[handle.slot].send_unacknowledged;
+                    }
+                    sent += (size_t)written;
+                }
                 else CHECK(written == -EAGAIN);
             }
         }
         if (accepted && (peer_eof || host_server_first) && !shutdown &&
-            received == 4096 && sent == 4096 &&
+            received == request_goal && sent == response_goal &&
             !listener.requests[0].send_bytes) {
             if (host_server_first) {
                 CHECK(!listener.requests[handle.slot].peer_eof &&
@@ -344,6 +409,14 @@ static void test_host(void)
     }
     CHECK(arp.replies_enqueued > 0);
     if (host_reorder_mode) CHECK(host_reorder_exercised);
+    if (host_persist_mode && !(host_persist_zero_seen && host_persist_probe_sent &&
+        host_persist_reopen_dropped && host_persist_recovered)) {
+        fprintf(stderr, "persist proof zero=%d probe=%d dropped=%d recovered=%d seq=%u ack=%u win=%u recwin=%u\n",
+            host_persist_zero_seen, host_persist_probe_sent, host_persist_reopen_dropped,
+            host_persist_recovered, host_persist_probe_sequence, host_persist_reopen_ack,
+            host_persist_reopen_window, host_persist_recovery_window);
+        CHECK(false);
+    }
 }
 static void test_listener(void)
 {
@@ -772,8 +845,176 @@ static void test_stream(void)
     CHECK(ker_tcp_listener_reset(&listener, second) == 0);
     drain_reset_values(custom_isn_value + 2U, 0);
     CHECK(ker_tcp_listener_poll(&listener, poll_deadline + 1, 2) == 2 && !listener.count);
+
+    /* Opt-in passive zero-window recovery admits one real byte transactionally. */
+    CHECK(ker_tcp_listener_cleanup(&listener) == 0);
+    config.receive_storage = stream_storage;
+    config.receive_storage_size = sizeof(stream_storage);
+    config.receive_capacity = 8;
+    config.window = 8;
+    config.zero_window_probe = false;
+    CHECK(ker_tcp_listener_init(&listener, &receiver, &neighbors, peer_ip, &tx,
+        stream_requests, 2, &config, poll_deadline + 1) == 0);
+    peer_port = rte_cpu_to_be_16(8009);
+    custom_isn = true; custom_isn_value = UINT32_MAX - 1U;
+    memset(stream_send_storage, 0xcc, sizeof(stream_send_storage));
+    inject(50, 0, KER_TCP_SYN, NULL, 0);
+    drain_syn_ack(custom_isn_value, 51);
+    inject(51, custom_isn_value + 1U, KER_TCP_ACK, NULL, 0);
+    struct ker_tcp_request_handle persist_peer;
+    CHECK(ker_tcp_listener_accept(&listener, &persist_peer) == 1);
+    inject_window(51, UINT32_MAX, 0, KER_TCP_ACK, NULL, 0);
+    CHECK(stream_requests[persist_peer.slot].peer_window == 0 &&
+          stream_requests[persist_peer.slot].send_right == UINT32_MAX &&
+          stream_requests[persist_peer.slot].send_next == UINT32_MAX);
+    unsigned char probe_source[] = {0xa5, 0xb6, 0xc7};
+    CHECK(ker_tcp_listener_write(&listener, persist_peer, probe_source,
+        sizeof(probe_source)) == -EAGAIN); /* Legacy default remains closed. */
+    stream_requests[persist_peer.slot].send_right = UINT32_MAX - 1U;
+    listener.config.zero_window_probe = true;
+    CHECK(ker_tcp_listener_write(&listener, persist_peer, probe_source,
+        sizeof(probe_source)) == -EAGAIN); /* Serial-negative edge is not zero. */
+    stream_requests[persist_peer.slot].send_right = UINT32_MAX;
+    fill_tx(); fill_tx();
+    uint32_t old_next = stream_requests[persist_peer.slot].send_next;
+    uint32_t old_una = stream_requests[persist_peer.slot].send_unacknowledged;
+    uint32_t persist_old_right = stream_requests[persist_peer.slot].send_right;
+    memset(stream_send_storage, 0xcc, sizeof(stream_send_storage));
+    CHECK(ker_tcp_listener_write(&listener, persist_peer, probe_source,
+        sizeof(probe_source)) == -ENOSPC);
+    CHECK(stream_requests[persist_peer.slot].send_next == old_next &&
+          stream_requests[persist_peer.slot].send_unacknowledged == old_una &&
+          stream_requests[persist_peer.slot].send_right == persist_old_right &&
+          !stream_requests[persist_peer.slot].send_bytes &&
+          !stream_requests[persist_peer.slot].send_retry_ms &&
+          !stream_requests[persist_peer.slot].send_deadline_ms &&
+          stream_send_storage[0] == 0xcc && stream_send_storage[8] == 0xcc &&
+          probe_source[0] == 0xa5);
+    drain(KER_TCP_SYN | KER_TCP_ACK); drain(KER_TCP_SYN | KER_TCP_ACK);
+    CHECK(ker_tcp_listener_write(&listener, persist_peer, probe_source,
+        sizeof(probe_source)) == 1);
+    CHECK(stream_requests[persist_peer.slot].send_bytes == 1 &&
+          stream_requests[persist_peer.slot].send_next == 0 &&
+          stream_send_storage[0] == 0xa5 && stream_send_storage[8] == 0xcc);
+    drain_data(UINT32_MAX, 51, 8, probe_source, 1);
+    uint64_t slot_a_deadline = stream_requests[persist_peer.slot].send_deadline_ms;
+    uint64_t slot_a_retry = stream_requests[persist_peer.slot].send_retry_ms;
+    uint64_t slot_a_backoff = stream_requests[persist_peer.slot].send_backoff_ms;
+    /* A second slot sends and retires independently while slot A probes. */
+    peer_port = rte_cpu_to_be_16(8010);
+    inject(100, 0, KER_TCP_SYN, NULL, 0);
+    drain_syn_ack(custom_isn_value, 101);
+    inject(101, custom_isn_value + 1U, KER_TCP_ACK, NULL, 0);
+    CHECK(ker_tcp_listener_accept(&listener, &other) == 1 && other.slot != persist_peer.slot);
+    inject_window(101, UINT32_MAX, 4, KER_TCP_ACK, NULL, 0);
+    CHECK(ker_tcp_listener_write(&listener, other, "B", 1) == 1 &&
+          !memcmp(stream_send_storage + other.slot * 8, "B", 1));
+    CHECK(stream_requests[persist_peer.slot].send_bytes == 1 &&
+          stream_requests[persist_peer.slot].send_unacknowledged == UINT32_MAX &&
+          stream_requests[persist_peer.slot].send_next == 0 &&
+          stream_requests[persist_peer.slot].send_right == UINT32_MAX &&
+          stream_requests[persist_peer.slot].peer_window == 0 &&
+          stream_requests[persist_peer.slot].send_deadline_ms == slot_a_deadline &&
+          stream_requests[persist_peer.slot].send_retry_ms == slot_a_retry &&
+          stream_requests[persist_peer.slot].send_backoff_ms == slot_a_backoff);
+    drain_data(UINT32_MAX, 101, 8, "B", 1);
+    inject_window(101, 0, 4, KER_TCP_ACK, NULL, 0);
+    CHECK(!stream_requests[other.slot].send_bytes &&
+          stream_requests[persist_peer.slot].send_bytes == 1 &&
+          stream_requests[persist_peer.slot].send_deadline_ms == slot_a_deadline &&
+          stream_requests[persist_peer.slot].send_retry_ms == slot_a_retry &&
+          stream_requests[persist_peer.slot].send_backoff_ms == slot_a_backoff &&
+          stream_send_storage[0] == 0xa5 && stream_send_storage[8] == 'B');
+    CHECK(ker_tcp_listener_reset(&listener, other) == 0);
+    drain_reset_values(0, 101);
+    CHECK(ker_tcp_listener_poll(&listener, listener.now_ms + 1, 2) == 2);
+    peer_port = rte_cpu_to_be_16(8009);
+    uint64_t persist_deadline = stream_requests[persist_peer.slot].send_deadline_ms;
+    uint64_t persist_retry = stream_requests[persist_peer.slot].send_retry_ms;
+    uint64_t persist_backoff = stream_requests[persist_peer.slot].send_backoff_ms;
+    inject_window(51, UINT32_MAX, 0, KER_TCP_ACK, NULL, 0);
+    CHECK(stream_requests[persist_peer.slot].send_bytes == 1 &&
+          stream_requests[persist_peer.slot].send_next == 0 &&
+          stream_requests[persist_peer.slot].send_deadline_ms == persist_deadline &&
+          stream_requests[persist_peer.slot].send_retry_ms == persist_retry &&
+          stream_requests[persist_peer.slot].send_backoff_ms == persist_backoff);
+    inject_window(51, UINT32_MAX, 2, KER_TCP_ACK, NULL, 0);
+    CHECK(stream_requests[persist_peer.slot].send_bytes == 1 &&
+          stream_requests[persist_peer.slot].peer_window == 2 &&
+          stream_requests[persist_peer.slot].send_right == 1 &&
+          stream_requests[persist_peer.slot].send_deadline_ms == persist_deadline &&
+          stream_requests[persist_peer.slot].send_retry_ms == persist_retry &&
+          stream_requests[persist_peer.slot].send_backoff_ms == persist_backoff);
+    inject_window(50, 0, 4, KER_TCP_ACK, NULL, 0); /* Stale receive sequence. */
+    inject_window(51, 1, 4, KER_TCP_ACK, NULL, 0); /* Future send ACK. */
+    CHECK(stream_requests[persist_peer.slot].send_bytes == 1 &&
+          stream_requests[persist_peer.slot].send_unacknowledged == UINT32_MAX &&
+          stream_requests[persist_peer.slot].send_right == 1 &&
+          stream_requests[persist_peer.slot].send_deadline_ms == persist_deadline);
+    CHECK(ker_tcp_listener_poll(&listener, persist_retry, 2) == 2);
+    drain_data(UINT32_MAX, 51, 8, probe_source, 1);
+    CHECK(stream_requests[persist_peer.slot].send_deadline_ms == persist_deadline &&
+          stream_requests[persist_peer.slot].send_backoff_ms == 20);
+    inject_window(51, 0, 2, KER_TCP_ACK, NULL, 0); /* ACK==NXT after wrap. */
+    CHECK(!stream_requests[persist_peer.slot].send_bytes &&
+          stream_requests[persist_peer.slot].send_unacknowledged == 0 &&
+          !stream_requests[persist_peer.slot].send_deadline_ms &&
+          !stream_requests[persist_peer.slot].send_retry_ms &&
+          !stream_requests[persist_peer.slot].send_backoff_ms);
+    CHECK(ker_tcp_listener_reset(&listener, persist_peer) == 0);
+    drain_reset_values(0, 51);
+    CHECK(ker_tcp_listener_poll(&listener, listener.now_ms + 1, 2) == 2 && !listener.count);
+
+    /* A budget-skipped probe expires in RX before a valid late ACK can mutate it. */
+    peer_port = rte_cpu_to_be_16(8011);
+    inject(70, 0, KER_TCP_SYN, NULL, 0);
+    drain_syn_ack(custom_isn_value, 71);
+    inject(71, custom_isn_value + 1U, KER_TCP_ACK, NULL, 0);
+    CHECK(ker_tcp_listener_accept(&listener, &persist_peer) == 1);
+    inject_window(71, UINT32_MAX, 0, KER_TCP_ACK, NULL, 0);
+    CHECK(ker_tcp_listener_write(&listener, persist_peer, "Z", 1) == 1);
+    drain_data(UINT32_MAX, 71, 8, "Z", 1);
+    fill_tx(); fill_tx();
+    inject_window(71, UINT32_MAX, 0, KER_TCP_ACK | KER_TCP_PSH, "R", 1);
+    CHECK(stream_requests[persist_peer.slot].receive_bytes == 1 &&
+          stream_requests[persist_peer.slot].receive_next == 72 &&
+          stream_requests[persist_peer.slot].ack_pending && stream_storage[0] == 'R');
+    drain(KER_TCP_SYN | KER_TCP_ACK); drain(KER_TCP_SYN | KER_TCP_ACK);
+    peer_port = rte_cpu_to_be_16(8012);
+    inject(110, 0, KER_TCP_SYN, NULL, 0);
+    drain_syn_ack(custom_isn_value, 111);
+    inject(111, custom_isn_value + 1U, KER_TCP_ACK, NULL, 0);
+    CHECK(ker_tcp_listener_accept(&listener, &other) == 1 && other.slot != persist_peer.slot);
+    struct ker_tcp_request *expiring = &stream_requests[persist_peer.slot];
+    uint64_t deadline = expiring->send_deadline_ms;
+    uint32_t saved_next = expiring->send_next, saved_una = expiring->send_unacknowledged;
+    uint32_t saved_send_right = expiring->send_right, saved_receive_right = expiring->receive_right;
+    uint16_t expired_peer_window = expiring->peer_window;
+    uint8_t saved_head = expiring->receive_head;
+    listener.cursor = other.slot;
+    unsigned int inspected_deadline = ker_tcp_listener_poll(&listener, deadline, 1);
+    CHECK(inspected_deadline == 1 && expiring->state == KER_TCP_REQUEST_READY &&
+          stream_requests[other.slot].state == KER_TCP_REQUEST_READY);
+    peer_port = rte_cpu_to_be_16(8011);
+    inject_window(72, 0, 4, KER_TCP_ACK, NULL, 0);
+    CHECK(expiring->state == KER_TCP_REQUEST_FAILED && expiring->error == -ETIMEDOUT &&
+          !expiring->send_bytes && expiring->send_next == saved_next &&
+          expiring->send_unacknowledged == saved_una && expiring->send_right == saved_send_right &&
+          expiring->peer_window == expired_peer_window && expiring->receive_bytes == 1 &&
+          expiring->receive_head == saved_head && expiring->receive_next == 72 &&
+          expiring->receive_right == saved_receive_right && expiring->ack_pending &&
+          stream_requests[other.slot].state == KER_TCP_REQUEST_READY);
+    CHECK(ker_tcp_listener_reset(&listener, persist_peer) == 0);
+    drain_reset_values(0, 72);
+    CHECK(ker_tcp_listener_reset(&listener, other) == 0);
+    drain_reset_values(custom_isn_value + 1U, 111);
+    CHECK(ker_tcp_listener_poll(&listener, deadline + 1, 2) == 2 && !listener.count);
+    listener.config.zero_window_probe = false;
     CHECK(ker_tcp_listener_cleanup(&listener) == 0);
     custom_isn = false;
+    config.receive_storage = NULL;
+    config.receive_storage_size = 0;
+    config.receive_capacity = 0;
     config.send_storage = NULL;
     config.send_storage_size = 0;
     config.send_capacity = 0;
@@ -1231,6 +1472,7 @@ int main(int argc, char **argv)
         tap = (int)fd; CHECK(fcntl(tap, F_SETFL, O_NONBLOCK) == 0);
         host_server_first = argc == 3 && !strcmp(argv[2], "server-first");
         host_reorder_mode = argc == 3 && !strcmp(argv[2], "reorder");
+        host_persist_mode = argc == 3 && !strcmp(argv[2], "persist");
     }
     local_ip = rte_cpu_to_be_32(0xc0000201); peer_ip = rte_cpu_to_be_32(0xc0000202);
     local_port = rte_cpu_to_be_16(9000); peer_port = rte_cpu_to_be_16(8000);
@@ -1248,7 +1490,7 @@ int main(int argc, char **argv)
     CHECK(ker_transport_receiver_register(&receiver, &runtime, &device, receive_message, NULL) == 0);
     config = (struct ker_tcp_listener_config){.port = local_port, .window = 1024,
         .mss = host_reorder_mode ? 256 : 1460, .ttl = 64, .retry_ms = tap < 0 ? 10 : 100,
-        .timeout_ms = tap < 0 ? 30 : 3000, .next_isn = next_isn,
+        .timeout_ms = tap < 0 ? 30 : host_persist_mode ? 30000 : 3000, .next_isn = next_isn,
         .receive_storage = tap < 0 ? NULL : host_storage,
         .receive_storage_size = tap < 0 ? 0 : sizeof(host_storage),
         .receive_capacity = tap < 0 ? 0 : sizeof(host_storage)};
@@ -1257,6 +1499,7 @@ int main(int argc, char **argv)
         config.send_storage_size = sizeof(host_send_storage);
         config.send_capacity = sizeof(host_send_storage);
         config.time_wait_ms = 50;
+        config.zero_window_probe = host_persist_mode;
         if (host_reorder_mode) {
             config.reorder_storage = host_reorder_storage;
             config.reorder_storage_size = sizeof(host_reorder_storage);

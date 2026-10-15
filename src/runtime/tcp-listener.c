@@ -771,14 +771,18 @@ int ker_tcp_listener_write(struct ker_tcp_listener *t, struct ker_tcp_request_ha
     if (r->state != KER_TCP_REQUEST_READY &&
         !(close_enabled(t) && r->state == KER_TCP_REQUEST_CLOSE_WAIT))
         return r->local_fin ? -EPIPE : r->error ? r->error : -ENOTCONN;
-    if (r->send_bytes || !r->peer_window || !before(r->send_next, r->send_right)) return -EAGAIN;
+    if (r->send_bytes) return -EAGAIN;
+    bool probe = t->config.zero_window_probe && r->send_right == r->send_next;
+    if (!probe && (!r->peer_window || !before(r->send_next, r->send_right))) return -EAGAIN;
     if (t->now_ms > UINT64_MAX - t->config.timeout_ms) return -EOVERFLOW;
-    uint16_t count = length;
-    if (count > r->send_mss) count = r->send_mss;
-    if (count > t->config.send_capacity) count = t->config.send_capacity;
-    if (count > r->peer_window) count = r->peer_window;
-    uint32_t available = r->send_right - r->send_next;
-    if (count > available) count = (uint16_t)available;
+    uint16_t count = probe ? 1 : length;
+    if (!probe) {
+        if (count > r->send_mss) count = r->send_mss;
+        if (count > t->config.send_capacity) count = t->config.send_capacity;
+        if (count > r->peer_window) count = r->peer_window;
+        uint32_t available = r->send_right - r->send_next;
+        if (count > available) count = (uint16_t)available;
+    }
     if (!count) return -EAGAIN;
     error = emit_data(t, r, r->send_next, source, count);
     if (error) return error;

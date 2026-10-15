@@ -9,9 +9,10 @@ import socket
 import struct
 import subprocess
 import sys
+import time
 
 
-def run(binary, server_first=False, local_port=8000, reorder=False):
+def run(binary, server_first=False, local_port=8000, reorder=False, persist=False):
     try:
         tap = os.open('/dev/net/tun', os.O_RDWR | os.O_NONBLOCK)
         # TUNSETIFF, IFF_TAP | IFF_NO_PI: raw Ethernet frames, no PI header.
@@ -28,21 +29,27 @@ def run(binary, server_first=False, local_port=8000, reorder=False):
         subprocess.run(['ip', 'link', 'set', 'kerhost0', 'mtu', '1500', 'up'], check=True)
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as peer:
             peer.bind(('192.0.2.2', local_port))
+            if persist:
+                peer.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 2048)
             peer.settimeout(5)
-            mode = 'server-first' if server_first else ('reorder' if reorder else None)
+            mode = 'persist' if persist else ('server-first' if server_first else ('reorder' if reorder else None))
             child = subprocess.Popen([binary, str(tap)] + ([mode] if mode else []),
                                      pass_fds=(tap,))
             peer.connect(('192.0.2.1', 9000))
             peer.sendall(bytes(range(256)) * 16)
             if not server_first:
                 peer.shutdown(socket.SHUT_WR)
+            if persist:
+                # Let the bounded receive buffer fill before reopening it by reading.
+                time.sleep(0.25)
             received = bytearray()
-            while len(received) < 4096:
-                part = peer.recv(4096 - len(received))
+            response_length = 65536 if persist else 4096
+            while len(received) < response_length:
+                part = peer.recv(response_length - len(received))
                 if not part:
                     raise AssertionError('peer closed before full-duplex response')
                 received.extend(part)
-            assert received == bytes((i + 37) & 0xff for i in range(4096))
+            assert received == bytes((i + 37) & 0xff for i in range(response_length))
             if peer.recv(1) != b'':
                 raise AssertionError('expected orderly EOF after passive FIN close')
             if server_first:
@@ -65,7 +72,7 @@ def run(binary, server_first=False, local_port=8000, reorder=False):
 
 
 if __name__ == '__main__':
-    if len(sys.argv) not in (2, 3):
+    if len(sys.argv) not in (2, 3, 4):
         raise SystemExit('usage: tcp-host.py /absolute/path/to/ker-tcp-listener-test')
     if len(sys.argv) == 3 and sys.argv[2] == '--isolated':
         result = run(sys.argv[1], False, 8000)
@@ -74,7 +81,20 @@ if __name__ == '__main__':
         result = run(sys.argv[1], True, 8001)
         if result:
             raise SystemExit(result)
-        raise SystemExit(run(sys.argv[1], False, 8002, reorder=True))
+        result = run(sys.argv[1], False, 8002, reorder=True)
+        if result:
+            raise SystemExit(result)
+        raise SystemExit(run(sys.argv[1], False, 8003, persist=True))
+    if len(sys.argv) == 3 and sys.argv[2] == 'persist':
+        if not shutil.which('unshare') or not shutil.which('ip'):
+            raise SystemExit(77)
+        probe = subprocess.run(['unshare', '-Urn', 'true'], capture_output=True, text=True)
+        if probe.returncode:
+            raise SystemExit(77)
+        raise SystemExit(subprocess.call(['unshare', '-Urn', sys.executable,
+            str(Path(__file__).resolve()), str(Path(sys.argv[1]).resolve()), 'persist', '--isolated']))
+    if len(sys.argv) == 4 and sys.argv[2:] == ['persist', '--isolated']:
+        raise SystemExit(run(sys.argv[1], False, 8003, persist=True))
     if not shutil.which('unshare') or not shutil.which('ip'):
         print('SKIP: unshare and ip are required')
         raise SystemExit(77)

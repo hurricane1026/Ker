@@ -55,9 +55,16 @@ after its sequence. Reads schedule a window ACK; the edge advances only after
 exporter admission. Retained data and validity bits survive ACK backpressure
 and poll retries pending ACKs fairly. `ker_tcp_listener_write` copies and admits at most
 one segment, clipped by the peer MSS, advertised window and per-slot send
-capacity. It returns the locally admitted byte count; an outstanding segment or
-zero peer window returns `-EAGAIN`. The private copy is retained for
-retransmission, and cumulative ACKs trim only the acknowledged prefix. Pure ACKs
+capacity. It returns the locally admitted byte count; an outstanding segment
+or a zero usable send window returns `-EAGAIN` by default. The opt-in
+`zero_window_probe` config admits exactly one real caller byte when there is no
+flight and the usable send window is exactly zero. The byte is consumed only
+after TX admission, then uses the ordinary one-flight retry and fixed timeout
+policy. This provides bounded, application-triggered recovery; it is not an
+indefinite RFC persist timer. Serial-negative/shrunk send edges remain blocked,
+and `shutdown_write` still requires a nonzero usable window. The private copy
+is retained for retransmission, and cumulative ACKs trim only the acknowledged
+prefix. Pure ACKs
 must match the current receive sequence; ACKs with payload may also update the
 send window when their segment overlaps the receive edge and contributes new
 bytes. Stale duplicates and future gaps cannot change send ACK/window state.
