@@ -135,10 +135,8 @@ static void acknowledge_send(struct ker_tcp_listener *t, struct ker_tcp_request 
                              const struct ker_tcp_packet_view *p)
 {
     if (!send_enabled(t) || !(p->flags & KER_TCP_ACK) || !valid_send_ack(r, p->acknowledgment)) return;
-    if (p->sequence == r->receive_next) {
-        r->peer_window = p->window;
-        r->send_right = p->acknowledgment + p->window;
-    }
+    r->peer_window = p->window;
+    r->send_right = p->acknowledgment + p->window;
     if (before(r->send_unacknowledged, p->acknowledgment)) {
         uint32_t advance = p->acknowledgment - r->send_unacknowledged;
         r->send_unacknowledged = p->acknowledgment;

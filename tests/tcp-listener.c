@@ -468,14 +468,25 @@ static void test_stream(void)
     inject_window(2, 8, 0, KER_TCP_ACK, NULL, 0);
     CHECK(stream_requests[1].send_unacknowledged == 8 && !stream_requests[1].send_bytes);
     CHECK(ker_tcp_listener_write(&listener, second, "01234567", 8) == -EAGAIN);
-    inject_window(2, 8, 3, KER_TCP_ACK, NULL, 0);
+    /* A future gap cannot reopen the exhausted peer window. */
+    inject_window(3, 8, 3, KER_TCP_ACK | KER_TCP_PSH, "G", 1);
+    drain_ack(2, 7);
+    CHECK(stream_requests[1].send_right == 8 && stream_requests[1].peer_window == 0 &&
+          ker_tcp_listener_write(&listener, second, "01234567", 8) == -EAGAIN);
+    /* A valid overlap carries one new byte and may reopen that send window. */
+    inject_window(1, 8, 3, KER_TCP_ACK | KER_TCP_PSH, "RS", 2);
+    CHECK(stream_requests[1].receive_next == 3 && stream_requests[1].receive_bytes == 2 &&
+          stream_requests[1].send_unacknowledged == 8 && !stream_requests[1].send_bytes &&
+          stream_requests[1].peer_window == 3 && stream_requests[1].send_right == 11);
+    drain_ack(3, 6);
     CHECK(ker_tcp_listener_write(&listener, second, "01234567", 8) == 3);
-    drain_data(8, 2, 7, "012", 3);
-    inject(2, 11, KER_TCP_ACK, NULL, 0);
+    drain_data(8, 3, 6, "012", 3);
+    inject(3, 11, KER_TCP_ACK, NULL, 0);
     CHECK(stream_requests[1].send_unacknowledged == 11 && !stream_requests[1].send_bytes);
-    inject(2, 12, KER_TCP_ACK, NULL, 0); /* future ACK cannot advance state */
+    inject(3, 12, KER_TCP_ACK, NULL, 0); /* future ACK cannot advance state */
     CHECK(stream_requests[1].send_unacknowledged == 11 && !stream_requests[1].send_bytes);
-    CHECK(ker_tcp_listener_read(&listener, second, out, sizeof(out)) == 1 && out[0] == 'R');
+    CHECK(ker_tcp_listener_read(&listener, second, out, sizeof(out)) == 2 &&
+          !memcmp(out, "RS", 2));
     peer_port = rte_cpu_to_be_16(8000);
     inject(10, 0, KER_TCP_ACK | KER_TCP_PSH, "U", 1);
     CHECK(stream_requests[0].receive_bytes == 1);
@@ -484,9 +495,9 @@ static void test_stream(void)
     CHECK(stream_requests[0].receive_bytes == 0 && !stream_requests[0].ack_pending);
     drain(KER_TCP_RST | KER_TCP_ACK);
     CHECK(ker_tcp_listener_poll(&listener, 319, 2) == 2);
-    drain_ack(2, 8);
+    drain_ack(3, 8);
     peer_port = rte_cpu_to_be_16(8001);
-    inject(1, 11, KER_TCP_ACK | KER_TCP_PSH | KER_TCP_FIN, "X", 1);
+    inject(3, 11, KER_TCP_ACK | KER_TCP_PSH | KER_TCP_FIN, "X", 1);
     CHECK(stream_requests[1].state == KER_TCP_REQUEST_RESET &&
           stream_requests[1].error == -EOPNOTSUPP && stream_requests[1].receive_bytes == 0);
     drain(KER_TCP_RST | KER_TCP_ACK);

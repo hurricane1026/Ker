@@ -49,10 +49,13 @@ retries pending ACKs fairly. `ker_tcp_listener_write` copies and admits at most
 one segment, clipped by the peer MSS, advertised window and per-slot send
 capacity. It returns the locally admitted byte count; an outstanding segment or
 zero peer window returns `-EAGAIN`. The private copy is retained for
-retransmission, and cumulative ACKs trim only the acknowledged prefix. Retry
-intervals back off exponentially against a fixed absolute timeout. No persist
-timer is used. FIN and data+FIN remain unsupported and take an explicit RST
-path; graceful close is not implemented.
+retransmission, and cumulative ACKs trim only the acknowledged prefix. Pure ACKs
+must match the current receive sequence; ACKs with payload may also update the
+send window when their segment overlaps the receive edge and contributes new
+bytes. Stale duplicates and future gaps cannot change send ACK/window state.
+Retry intervals back off exponentially against a fixed absolute timeout. No
+persist timer is used. FIN and data+FIN remain unsupported and take an explicit
+RST path; graceful close is not implemented.
 
 The receiver and exporter cannot be destroyed while a listener is attached.
 A retained native neighbor reference pins the peer/table; caller storage must
