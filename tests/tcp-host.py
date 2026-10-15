@@ -33,7 +33,8 @@ def run(binary, server_first=False, local_port=8000):
                                      pass_fds=(tap,))
             peer.connect(('192.0.2.1', 9000))
             peer.sendall(bytes(range(256)) * 16)
-            peer.shutdown(socket.SHUT_WR)
+            if not server_first:
+                peer.shutdown(socket.SHUT_WR)
             received = bytearray()
             while len(received) < 4096:
                 part = peer.recv(4096 - len(received))
@@ -43,6 +44,9 @@ def run(binary, server_first=False, local_port=8000):
             assert received == bytes((i + 37) & 0xff for i in range(4096))
             if peer.recv(1) != b'':
                 raise AssertionError('expected orderly EOF after passive FIN close')
+            if server_first:
+                # Observe Ker's FIN/EOF before beginning the peer half-close.
+                peer.shutdown(socket.SHUT_WR)
             assert child.wait(timeout=5) == 0
         print(f'PASS: Linux TCP connect, {"server-first" if server_first else "peer-first"} '
               'half-close, full-duplex streams and orderly EOF')

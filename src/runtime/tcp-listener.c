@@ -371,7 +371,9 @@ static int receive_request(void *arg, struct sk_buff *skb,
                     r->peer_window = p->window;
                     r->send_right = r->send_next + p->window;
                 }
-                if (stream_enabled(t) && p->payload_length) error = receive_data(t, r, p);
+                if (stream_enabled(t) && (p->payload_length ||
+                    (close_enabled(t) && (p->flags & KER_TCP_FIN))))
+                    error = receive_data(t, r, p);
             } else if ((p->payload_length || (p->flags & KER_TCP_FIN)) &&
                 p->sequence == r->peer_isn + 1U &&
                 p->acknowledgment == r->local_isn + 1U && (p->flags & KER_TCP_ACK)) {

@@ -263,9 +263,22 @@ static void test_host(void)
         if (accepted && (peer_eof || host_server_first) && !shutdown &&
             received == 4096 && sent == 4096 &&
             !listener.requests[0].send_bytes) {
+            if (host_server_first) {
+                CHECK(!listener.requests[handle.slot].peer_eof &&
+                      listener.requests[handle.slot].state == KER_TCP_REQUEST_READY);
+            } else {
+                CHECK(listener.requests[handle.slot].peer_eof &&
+                      listener.requests[handle.slot].state == KER_TCP_REQUEST_CLOSE_WAIT);
+            }
             CHECK(ker_tcp_listener_shutdown_write(&listener, handle) == 0); shutdown = true;
+            CHECK(listener.requests[handle.slot].state == (host_server_first ?
+                  KER_TCP_REQUEST_FIN_WAIT_1 : KER_TCP_REQUEST_LAST_ACK) &&
+                  listener.requests[handle.slot].active_close == host_server_first);
         }
-        if (shutdown && listener.requests[0].state == KER_TCP_REQUEST_CLOSED && !tx.packets) {
+        if (shutdown && listener.requests[handle.slot].state == KER_TCP_REQUEST_CLOSED && !tx.packets) {
+            CHECK(listener.requests[handle.slot].peer_eof &&
+                  listener.requests[handle.slot].local_fin_acked &&
+                  listener.requests[handle.slot].active_close == host_server_first);
             CHECK(ker_tcp_listener_release(&listener, handle) == 0);
             closed = true;
         }
@@ -312,6 +325,14 @@ static void test_listener(void)
     CHECK(ker_tcp_listener_poll(&listener, 111, 1) == 1 && !listener.count);
     struct ker_tcp_request snapshot = {.error = 42};
     CHECK(ker_tcp_listener_snapshot(&listener, handle, &snapshot) == -ESTALE && snapshot.error == 42);
+
+    /* Without opt-in close, an empty final ACK|FIN remains explicitly unsupported. */
+    inject(UINT32_MAX, 0, KER_TCP_SYN, NULL, 0); drain(KER_TCP_SYN | KER_TCP_ACK);
+    inject(0, 0, KER_TCP_ACK | KER_TCP_FIN, NULL, 0);
+    CHECK(requests[0].state == KER_TCP_REQUEST_RESET &&
+          requests[0].error == -EOPNOTSUPP && tx.packets == 1);
+    drain(KER_TCP_RST | KER_TCP_ACK);
+    CHECK(ker_tcp_listener_poll(&listener, 111, 1) == 1 && !listener.count);
 
     inject(UINT32_MAX, 0, KER_TCP_SYN, NULL, 0);
     drain(KER_TCP_SYN | KER_TCP_ACK);
@@ -793,6 +814,27 @@ static void test_passive_close(void)
     CHECK(stream_requests[0].state == KER_TCP_REQUEST_CLOSED);
     CHECK(ker_tcp_listener_release(&listener, peer_first) == 0);
 
+    /* A zero-payload final ACK|FIN consumes FIN and defers its ACK under pressure. */
+    peer_port = rte_cpu_to_be_16(8020);
+    inject(700, 0, KER_TCP_SYN, NULL, 0); drain_syn_ack(custom_isn_value, 701);
+    fill_tx(); fill_tx();
+    inject(701, custom_isn_value + 1, KER_TCP_ACK | KER_TCP_FIN, NULL, 0);
+    struct ker_tcp_request_handle empty_fin;
+    CHECK(ker_tcp_listener_accept(&listener, &empty_fin) == 1 &&
+          stream_requests[0].state == KER_TCP_REQUEST_CLOSE_WAIT &&
+          stream_requests[0].peer_eof && stream_requests[0].receive_next == 702 &&
+          !stream_requests[0].receive_bytes && stream_requests[0].ack_pending);
+    CHECK(ker_tcp_listener_read(&listener, empty_fin, bytes, sizeof(bytes)) == 0);
+    drain(KER_TCP_SYN | KER_TCP_ACK); drain(KER_TCP_SYN | KER_TCP_ACK);
+    CHECK(ker_tcp_listener_poll(&listener, listener.now_ms, 2) == 2 &&
+          !stream_requests[0].ack_pending);
+    drain_ack(702, 7);
+    CHECK(ker_tcp_listener_poll(&listener, listener.now_ms + 10, 2) == 2 && !tx.packets);
+    CHECK(ker_tcp_listener_reset(&listener, empty_fin) == 0);
+    drain_reset_values(custom_isn_value + 1, 702);
+    CHECK(ker_tcp_listener_poll(&listener, listener.now_ms + 11, 2) == 2 &&
+          !listener.count);
+
     peer_port = rte_cpu_to_be_16(8011);
     inject(200, 0, KER_TCP_SYN, NULL, 0);
     drain_syn_ack(custom_isn_value, 201);
@@ -812,7 +854,7 @@ static void test_passive_close(void)
           stream_requests[0].state == KER_TCP_REQUEST_FIN_WAIT_1);
     drain_close(KER_TCP_ACK | KER_TCP_FIN, custom_isn_value + 1, 209, 0);
     CHECK(ker_tcp_listener_read(&listener, server_first, bytes, 1) == 1 && bytes[0] == '1');
-    CHECK(ker_tcp_listener_poll(&listener, 403, 2) == 2);
+    CHECK(ker_tcp_listener_poll(&listener, listener.now_ms + 1, 2) == 2);
     drain_ack(209, 1);
     inject(209, custom_isn_value + 2, KER_TCP_ACK, NULL, 0);
     CHECK(stream_requests[0].state == KER_TCP_REQUEST_FIN_WAIT_2);
@@ -860,7 +902,7 @@ static void test_passive_close(void)
           stream_requests[0].state == KER_TCP_REQUEST_TIME_WAIT);
     CHECK(ker_tcp_listener_read(&listener, overlap_fin, bytes, sizeof(bytes)) == 3 &&
           !memcmp(bytes, "abc", 3));
-    CHECK(ker_tcp_listener_poll(&listener, 503, 2) == 2 &&
+    CHECK(ker_tcp_listener_poll(&listener, stream_requests[0].time_wait_deadline_ms, 2) == 2 &&
           stream_requests[0].state == KER_TCP_REQUEST_CLOSED);
     CHECK(ker_tcp_listener_release(&listener, overlap_fin) == 0);
     CHECK(ker_tcp_listener_cleanup(&listener) == 0);
