@@ -129,7 +129,7 @@ static uint64_t now_ms(void)
     struct timespec t; CHECK(clock_gettime(CLOCK_MONOTONIC, &t) == 0);
     return (uint64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000;
 }
-#if !defined(KER_TCP_STREAM_TEST) && !defined(KER_TCP_SEND_TEST) && !defined(KER_TCP_CLOSE_TEST)
+#if !defined(KER_TCP_STREAM_TEST) && !defined(KER_TCP_SEND_TEST) && !defined(KER_TCP_CLOSE_TEST) && !defined(KER_TCP_REORDER_TEST)
 static void test_host(void)
 {
     uint64_t deadline = now_ms() + 10000, reset_at = 0;
@@ -269,6 +269,8 @@ static void test_active(void)
 #include "tcp-close-cases.h"
 #elif defined(KER_TCP_SEND_TEST)
 #include "tcp-send-cases.h"
+#elif defined(KER_TCP_REORDER_TEST)
+#include "tcp-active-reorder-cases.h"
 #else
 #include "tcp-stream-cases.h"
 #endif
@@ -309,6 +311,14 @@ int main(int argc, char **argv)
     config.receive_buffer = close_receive; config.receive_capacity = config.window;
     config.send_buffer = close_send; config.send_capacity = sizeof(close_send);
     config.time_wait_ms = 120000;
+#endif
+#ifdef KER_TCP_REORDER_TEST
+    config.window = tap < 0 ? 16 : 1024; config.receive_capacity = config.window;
+    config.receive_buffer = reorder_ring; config.reorder_buffer = reorder_map;
+    config.reorder_buffer_size = sizeof(reorder_map);
+    config.send_buffer = reorder_send; config.send_capacity = sizeof(reorder_send);
+    config.time_wait_ms = 10000;
+    if (tap >= 0) config.mss = 256;
 #endif
     start(tap < 0 ? 100 : now_ms());
     CHECK(ker_arp_responder_register(&arp, &runtime, &address, &tx) == 0);

@@ -13,12 +13,13 @@ monotonic clock before RX, including idle iterations, and drain the exporter.
 Reading frees storage and schedules an ACK advertising the reopened window.
 Snapshot exposes retained bytes, next receive sequence and pending ACK state.
 
-The adapter retains only the contiguous suffix at the next receive sequence.
-It trims old duplicate bytes, clips at the right edge last admitted to TX, and
-discards future gaps while sending cumulative ACKs. No out-of-order storage is
-allocated. Sequence comparisons work across 32-bit wrap; capacity stays below
-the serial half-space. The advertised window reflects unused ring capacity.
-A read cannot authorize more incoming bytes until a new window ACK is admitted.
+The default adapter retains only the contiguous suffix at the next receive
+sequence and discards future gaps while sending cumulative ACKs. An optional
+caller-owned bitmap enables bounded future-byte retention as described below.
+Both modes trim old duplicate bytes and clip at the right edge last admitted
+to TX. Sequence comparisons work across 32-bit wrap; capacity stays below the
+serial half-space. The advertised window reflects unused ring capacity. A read
+cannot authorize more incoming bytes until a new window ACK is admitted.
 
 Retention precedes acknowledgment. If ACK enqueue fails, accepted bytes and
 sequence progress remain intact and poll retries the ACK. Duplicates can also
@@ -46,3 +47,21 @@ The legacy active/passive/UDP host tests continue separately.
 
 See [active handshake](tcp-active.md) for setup/lifecycle and
 [host prerequisites](udp-host-interop.md) for namespace requirements.
+
+# Opt-in active receive reordering
+
+Active connections may optionally provide a caller-owned receive validity
+bitmap alongside the receive ring. The bitmap uses one bit per ring byte and
+must contain at least `ceil(receive_capacity / 8)` bytes. The default remains
+gap discard when no bitmap is configured. The bitmap and receive ring must
+remain writable and exclusively owned by the connection until cleanup.
+
+With the option enabled, in-window future bytes are retained in their
+sequence-relative ring positions and exposed to reads only after every earlier
+byte arrives. The first retained value wins conflicting overlaps. The receive
+window remains anchored to the admitted right edge and physical ring capacity;
+out-of-order occupancy does not shrink it a second time. One in-window FIN may
+be remembered behind a gap, but is consumed only after the gap closes; bytes
+at or beyond that FIN are discarded. This is bounded reassembly, without SACK
+or changes to the active sender's ACK eligibility. Reset and the existing
+active timeout cleanup clear the bitmap.

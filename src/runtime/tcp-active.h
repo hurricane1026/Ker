@@ -29,6 +29,10 @@ struct ker_tcp_active_config {
     /* Opt-in graceful close. Choose twice the deployment maximum segment
      * lifetime; zero preserves the legacy unsupported-FIN boundary. */
     uint64_t time_wait_ms;
+    /* Optional caller-owned byte-validity bitmap, one bit per receive-buffer
+     * byte; size is ceil(receive_capacity/8). Absent storage keeps gap discard. */
+    unsigned char *reorder_buffer;
+    size_t reorder_buffer_size;
 };
 struct ker_tcp_active_snapshot {
     enum ker_tcp_active_state state;
@@ -64,6 +68,8 @@ struct ker_tcp_active {
     uint64_t send_retry_ms, send_deadline_ms, send_backoff_ms;
     uint64_t close_deadline_ms, time_wait_deadline_ms;
     bool active_close, time_wait_saturated;
+    bool reorder_fin_pending;
+    uint32_t reorder_fin_sequence;
 };
 int ker_tcp_active_start(struct ker_tcp_active *, struct ker_transport_receiver *,
     struct ker_neighbor_table *, __be32 peer_ip, struct ker_tx_export *,
