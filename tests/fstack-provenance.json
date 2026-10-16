@@ -369,7 +369,7 @@
     "ethdev-rx": {
       "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
       "source_case": "test_main_loop_one_iteration_then_stop",
-      "adaptation": "Ker-specific borrowed ethdev RX extension around the existing worker receive path. A real pinned DPDK net_ring PMD injects Ethernet frames and segmented mbuf chains; the test checks one-packet worker budgets, FIFO classification/dispatch, pool-pressure retry, cancellation, and RX binding exclusion. The upstream case only motivates one worker-loop iteration and stop; it does not test this adapter. No NIC, RSS, socket, or full-stack behavior is claimed."
+      "adaptation": "Ker-specific borrowed ethdev RX extension around the existing worker receive path. A real pinned DPDK net_ring PMD injects Ethernet frames and segmented mbuf chains; the test checks one-packet worker budgets, FIFO classification/dispatch, pool-pressure retry, cancellation, and RX binding exclusion. An opt-in immutable shared-reference profile additionally tests direct shared segments and actual rte_pktmbuf_clone chains, including caller/sibling lifetime and allocation retry. The upstream case only motivates one worker-loop iteration and stop; the pinned free/fanout scenarios do not test indirect-clone RX. No NIC, RSS, socket, or full-stack behavior is claimed."
     },
     "ethdev-duplex": {
       "source_file": "tests/integration/test_ff_dpdk_if_integration.c",

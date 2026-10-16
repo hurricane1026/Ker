@@ -101,6 +101,22 @@ static void inject(struct rte_ring *rx_ring, unsigned int id, bool malformed,
     if (expect) expect_delivery(id);
 }
 
+static void verify_chain(struct rte_mbuf *chain, unsigned int id)
+{
+    uint8_t frame[FRAME_LEN];
+    const uint8_t *bytes = rte_pktmbuf_read(chain, 0, FRAME_LEN, frame);
+    CHECK(bytes && chain->pkt_len == FRAME_LEN);
+    CHECK(memcmp(bytes + ETH_HLEN, expected[id], sizeof(expected[id])) == 0);
+}
+
+static void enqueue_shared(struct rte_ring *rx_ring, struct rte_mbuf *packet)
+{
+    for (struct rte_mbuf *segment = packet; segment; segment = segment->next)
+        CHECK(rte_mbuf_refcnt_read(segment) == 1);
+    rte_pktmbuf_refcnt_update(packet, 1); /* Caller keeps one reference per segment. */
+    CHECK(rte_ring_enqueue(rx_ring, packet) == 0);
+}
+
 static int worker_rx(void *arg, unsigned int budget)
 {
     return ker_ethdev_rx_poll(arg, budget);
@@ -243,8 +259,132 @@ static void test_ethdev_receive(void)
     release_pool(held, held_count, 0);
     CHECK(ker_ethdev_rx_cancel(&input, &cancelled) == 0);
 
+    /* The legacy profile remains unique-reference-only. A second direct ref
+     * is consumed by RX copy/drop while the caller's original remains valid. */
+    struct rte_mbuf *shared = make_frame(6, false, false);
+    enqueue_shared(rx_ring, shared);
+    CHECK(ker_ethdev_rx_poll(&input, 1) == 1 && input.last_dropped == 1 &&
+        input.last_error == -EBUSY && received == 5);
+    CHECK(rte_mbuf_refcnt_read(shared) == 1);
+    verify_chain(shared, 6);
+    rte_pktmbuf_free(shared);
+
+    /* The legacy profile also rejects a valid indirect clone without losing
+     * the original direct chain reference. */
+    struct rte_mbuf *legacy_parent = make_frame(7, false, true);
+    struct rte_mbuf *legacy_clone = rte_pktmbuf_clone(legacy_parent, pool.mbufs);
+    CHECK(legacy_clone && legacy_clone->nb_segs == 2);
+    CHECK(rte_ring_enqueue(rx_ring, legacy_clone) == 0);
+    CHECK(ker_ethdev_rx_poll(&input, 1) == 1 && input.last_dropped == 1 &&
+        input.last_error == -ENOTSUP && received == 5);
+    verify_chain(legacy_parent, 7);
+    CHECK(rte_mbuf_refcnt_read(legacy_parent) == 1 &&
+        rte_mbuf_refcnt_read(legacy_parent->next) == 1);
+    rte_pktmbuf_free(legacy_parent);
+
+    CHECK(ker_ethdev_rx_cleanup(&input) == 0);
+    struct ker_ethdev_rx untouched = {0};
+    CHECK(ker_ethdev_rx_init_profile(&untouched, &device, &runtime,
+        (uint16_t)port, 0, 0, (enum ker_ethdev_rx_copy_profile)99) == -EINVAL);
+    CHECK(!untouched.initialized && !untouched.device && !device.rx_ring_live &&
+        !runtime.rx_ring_live);
+    CHECK(ker_ethdev_rx_init_profile(&input, &device, &runtime,
+        (uint16_t)port, 0, 0, KER_ETHDEV_RX_COPY_IMMUTABLE_BORROWED) == 0);
+
+    /* Borrowed pending ownership can be returned unchanged by cancel. */
+    shared = make_frame(6, false, false);
+    enqueue_shared(rx_ring, shared);
+    exhaust_pool(held, &held_count);
+    CHECK(ker_ethdev_rx_poll(&input, 1) == -ENOMEM && input.pending == shared &&
+        rte_mbuf_refcnt_read(shared) == 2);
+    struct rte_mbuf *cancelled_shared = NULL;
+    CHECK(ker_ethdev_rx_cancel(&input, &cancelled_shared) == 1 &&
+        cancelled_shared == shared && rte_mbuf_refcnt_read(shared) == 2);
+    rte_pktmbuf_free(cancelled_shared); /* Release adapter's transferred ref. */
+    CHECK(rte_mbuf_refcnt_read(shared) == 1);
+    verify_chain(shared, 6);
+    rte_pktmbuf_free(shared);
+    release_pool(held, held_count, 0);
+
+    /* An immutable shared direct descriptor is copied before the adapter
+     * releases exactly its received reference. */
+    shared = make_frame(6, false, false);
+    expect_delivery(6);
+    enqueue_shared(rx_ring, shared);
+    CHECK(ker_ethdev_rx_poll(&input, 1) == 1 && received == 6 &&
+        !input.pending && !input.last_dropped);
+    CHECK(rte_mbuf_refcnt_read(shared) == 1);
+    verify_chain(shared, 6);
+    rte_pktmbuf_free(shared);
+
+    /* Split the Ethernet header across a real two-segment direct parent, then
+     * RX one of two actual DPDK clones under destination-pool pressure. The
+     * pending clone must remain intact until retry; its parent and sibling
+     * references remain usable after the RX reference is released. */
+    struct rte_mbuf *parent = make_frame(7, false, true);
+    struct rte_mbuf *sibling = rte_pktmbuf_clone(parent, pool.mbufs);
+    struct rte_mbuf *queued_clone = rte_pktmbuf_clone(parent, pool.mbufs);
+    CHECK(sibling && queued_clone && parent->nb_segs == 2 &&
+        sibling->nb_segs == 2 && queued_clone->nb_segs == 2 &&
+        RTE_MBUF_CLONED(sibling) && RTE_MBUF_CLONED(queued_clone));
+    expect_delivery(7);
+    CHECK(rte_ring_enqueue(rx_ring, queued_clone) == 0);
+    exhaust_pool(held, &held_count);
+    CHECK(held_count > 0);
+    CHECK(ker_ethdev_rx_poll(&input, 1) == -ENOMEM && input.pending == queued_clone &&
+        input.last_error == -ENOMEM && received == 6);
+    verify_chain(parent, 7);
+    verify_chain(sibling, 7);
+    CHECK(rte_mbuf_refcnt_read(parent) == 3 &&
+        rte_mbuf_refcnt_read(parent->next) == 3);
+    rte_pktmbuf_free(held[0]);
+    held[0] = NULL;
+    CHECK(ker_ethdev_rx_poll(&input, 1) == 1 && !input.pending && received == 7);
+    CHECK(rte_mbuf_refcnt_read(parent) == 2 &&
+        rte_mbuf_refcnt_read(parent->next) == 2);
+    verify_chain(parent, 7);
+    verify_chain(sibling, 7);
+    release_pool(held, held_count, 1);
+    rte_pktmbuf_free(sibling);
+    CHECK(rte_mbuf_refcnt_read(parent) == 1 &&
+        rte_mbuf_refcnt_read(parent->next) == 1);
+    rte_pktmbuf_free(parent);
+
+    /* A caller may drop its original direct reference before RX copy if it
+     * still retains an independent clone reference to the backing bytes. */
+    parent = make_frame(7, false, true);
+    sibling = rte_pktmbuf_clone(parent, pool.mbufs);
+    queued_clone = rte_pktmbuf_clone(parent, pool.mbufs);
+    CHECK(sibling && queued_clone && sibling->nb_segs == 2 &&
+        queued_clone->nb_segs == 2);
+    expect_delivery(7);
+    CHECK(rte_ring_enqueue(rx_ring, queued_clone) == 0);
+    rte_pktmbuf_free(parent); /* The sibling clone keeps each backing segment. */
+    struct rte_mbuf *sibling_parent = rte_mbuf_from_indirect(sibling);
+    CHECK(rte_mbuf_refcnt_read(sibling_parent) == 2);
+    verify_chain(sibling, 7);
+    CHECK(ker_ethdev_rx_poll(&input, 1) == 1 && received == 8);
+    CHECK(rte_mbuf_refcnt_read(sibling_parent) == 1);
+    verify_chain(sibling, 7);
+    rte_pktmbuf_free(sibling);
+
+    /* A shared malformed frame and unsupported transformed metadata each
+     * drop one RX reference while preserving the caller's reference. */
+    shared = make_frame(0, true, false);
+    enqueue_shared(rx_ring, shared);
+    CHECK(ker_ethdev_rx_poll(&input, 1) == 1 && input.last_dropped == 1 &&
+        input.last_error == -EMSGSIZE);
+    CHECK(rte_mbuf_refcnt_read(shared) == 1);
+    rte_pktmbuf_free(shared);
+    shared = make_frame(0, false, false);
+    shared->ol_flags |= RTE_MBUF_F_RX_VLAN_STRIPPED;
+    enqueue_shared(rx_ring, shared);
+    CHECK(ker_ethdev_rx_poll(&input, 1) == 1 && input.last_dropped == 1 &&
+        input.last_error == -ENOTSUP && rte_mbuf_refcnt_read(shared) == 1);
+    rte_pktmbuf_free(shared);
+
     struct rte_eth_stats stats = {0};
-    CHECK(rte_eth_stats_get((uint16_t)port, &stats) == 0 && stats.ipackets == 7);
+    CHECK(rte_eth_stats_get((uint16_t)port, &stats) == 0 && stats.ipackets == 15);
     CHECK(ker_worker_cleanup(&worker) == 0);
     CHECK(ker_ethdev_rx_cleanup(&input) == 0);
     CHECK(device.rx_ring_live == 0 && runtime.rx_ring_live == 0);

@@ -88,7 +88,8 @@ static int packet_geometry(const struct rte_mbuf *packet, unsigned int *size)
         return -ENOSPC;
     return 0;
 }
-static int mbuf_chain_geometry(const struct rte_mbuf *head, uint32_t *length)
+static int mbuf_chain_geometry(const struct rte_mbuf *head, uint32_t *length,
+    bool allow_shared)
 {
     if (!head || !length)
         return -EINVAL;
@@ -104,10 +105,26 @@ static int mbuf_chain_geometry(const struct rte_mbuf *head, uint32_t *length)
             return -EINVAL;
         if (i == 0 && segment->nb_segs != count)
             return -EINVAL;
-        if (!segment->buf_addr || RTE_MBUF_HAS_EXTBUF(segment) || !RTE_MBUF_DIRECT(segment))
+        if (!segment->buf_addr || RTE_MBUF_HAS_EXTBUF(segment))
             return -ENOTSUP;
-        if (rte_mbuf_refcnt_read(segment) != 1)
-            return -EBUSY;
+        if (RTE_MBUF_DIRECT(segment)) {
+            if (!allow_shared && rte_mbuf_refcnt_read(segment) != 1)
+                return -EBUSY;
+            if (allow_shared && !rte_mbuf_refcnt_read(segment))
+                return -EINVAL;
+        } else {
+            if (!allow_shared || !RTE_MBUF_CLONED(segment) ||
+                !rte_mbuf_refcnt_read(segment))
+                return -ENOTSUP;
+            struct rte_mbuf *parent = rte_mbuf_from_indirect(
+                (struct rte_mbuf *)segment);
+            if (!parent || !RTE_MBUF_DIRECT(parent) ||
+                RTE_MBUF_HAS_EXTBUF(parent) || !rte_mbuf_refcnt_read(parent) ||
+                segment->buf_addr != parent->buf_addr ||
+                segment->buf_len != parent->buf_len ||
+                (uint64_t)segment->data_off + segment->data_len > parent->buf_len)
+                return -EINVAL;
+        }
         if ((uint64_t)segment->data_off + segment->data_len > segment->buf_len)
             return -EINVAL;
         total += segment->data_len;
@@ -184,7 +201,7 @@ int ker_skb_copy_from_mbuf_chain(struct ker_skb_context *ctx,
         return -EINVAL;
     if (!owner_active(ctx))
         return -EXDEV;
-    int error = mbuf_chain_geometry(chain, &length);
+    int error = mbuf_chain_geometry(chain, &length, false);
     if (error)
         return error;
     if ((uint64_t)headroom + length > UINT_MAX)
@@ -203,6 +220,40 @@ int ker_skb_copy_from_mbuf_chain(struct ker_skb_context *ctx,
     for (uint16_t i = 0; i < chain->nb_segs; ++i) {
         if (segment->data_len)
             memcpy(destination, rte_pktmbuf_mtod(segment, const void *), segment->data_len);
+        destination += segment->data_len;
+        segment = segment->next;
+    }
+    *result = skb;
+    return 0;
+}
+int ker_skb_copy_from_mbuf_chain_borrowed(struct ker_skb_context *ctx,
+    const struct rte_mbuf *chain, unsigned int headroom, struct sk_buff **result)
+{
+    uint32_t length;
+    if (!result)
+        return -EINVAL;
+    if (!owner_active(ctx))
+        return -EXDEV;
+    int error = mbuf_chain_geometry(chain, &length, true);
+    if (error)
+        return error;
+    if ((uint64_t)headroom + length > UINT_MAX)
+        return -EOVERFLOW;
+    struct sk_buff *skb = NULL;
+    error = ker_skb_alloc(ctx, length, headroom, &skb);
+    if (error)
+        return error;
+    uint8_t *destination;
+    error = ker_skb_put(skb, length, &destination);
+    if (error) {
+        ker_skb_free(skb);
+        return error;
+    }
+    const struct rte_mbuf *segment = chain;
+    for (uint16_t i = 0; i < chain->nb_segs; ++i) {
+        if (segment->data_len)
+            memcpy(destination, rte_pktmbuf_mtod(segment, const void *),
+                segment->data_len);
         destination += segment->data_len;
         segment = segment->next;
     }

@@ -449,6 +449,27 @@ static void expect_chain_copy_error(struct rte_mbuf *head, struct rte_mbuf *tail
     CHECK(memcmp((uint8_t *)head_buf + head_data_off, "abc", 3) == 0);
     CHECK(memcmp((uint8_t *)tail_buf + RTE_PKTMBUF_HEADROOM, "de", 2) == 0);
 }
+static void expect_borrowed_chain_copy_error(struct rte_mbuf *head,
+    struct rte_mbuf *tail, int expected)
+{
+    uint16_t head_segs = head->nb_segs, tail_refs = rte_mbuf_refcnt_read(tail);
+    uint32_t head_len = head->pkt_len;
+    struct rte_mbuf *head_next = head->next;
+    uint16_t head_refs = rte_mbuf_refcnt_read(head);
+    unsigned int live = ctx.live, available = rte_mempool_avail_count(pool.mbufs);
+    uint8_t head_bytes[3], tail_bytes[2];
+    memcpy(head_bytes, rte_pktmbuf_mtod(head, const void *), sizeof(head_bytes));
+    memcpy(tail_bytes, rte_pktmbuf_mtod(tail, const void *), sizeof(tail_bytes));
+    struct sk_buff *result = (struct sk_buff *)(uintptr_t)1;
+    CHECK(ker_skb_copy_from_mbuf_chain_borrowed(&ctx, head, 64, &result) == expected);
+    CHECK(result == (struct sk_buff *)(uintptr_t)1 && ctx.live == live);
+    CHECK(rte_mempool_avail_count(pool.mbufs) == available);
+    CHECK(head->nb_segs == head_segs && head->pkt_len == head_len &&
+        head->next == head_next && rte_mbuf_refcnt_read(head) == head_refs &&
+        rte_mbuf_refcnt_read(tail) == tail_refs);
+    CHECK(memcmp(rte_pktmbuf_mtod(head, const void *), head_bytes, sizeof(head_bytes)) == 0);
+    CHECK(memcmp(rte_pktmbuf_mtod(tail, const void *), tail_bytes, sizeof(tail_bytes)) == 0);
+}
 struct foreign_chain_copy {
     struct rte_mbuf *chain;
     int error;
@@ -567,6 +588,140 @@ static void test_mbuf_chain_copy(void)
     CHECK(extbuf_frees == frees_before + 1);
     check_pool(31);
 }
+static void test_borrowed_mbuf_chain_copy(void)
+{
+    struct rte_mbuf *tail;
+    struct rte_mbuf *head = make_chain_pair(&tail);
+    rte_pktmbuf_refcnt_update(head, 1); /* Caller and adapter own one each. */
+
+    head->nb_segs = 3;
+    expect_borrowed_chain_copy_error(head, tail, -EINVAL);
+    head->nb_segs = 2;
+    head->next = NULL;
+    expect_borrowed_chain_copy_error(head, tail, -EINVAL);
+    head->next = tail;
+    ++head->pkt_len;
+    expect_borrowed_chain_copy_error(head, tail, -EINVAL);
+    --head->pkt_len;
+    uint16_t saved_off = tail->data_off;
+    struct sk_buff *result = (struct sk_buff *)(uintptr_t)1;
+    unsigned int live_before_bad_offset = ctx.live;
+    unsigned int available_before_bad_offset = rte_mempool_avail_count(pool.mbufs);
+    uint16_t refs_head_before_bad_offset = rte_mbuf_refcnt_read(head);
+    uint16_t refs_tail_before_bad_offset = rte_mbuf_refcnt_read(tail);
+    uint8_t bad_offset_head_bytes[3], original_tail_bytes[2];
+    memcpy(bad_offset_head_bytes, rte_pktmbuf_mtod(head, const void *),
+        sizeof(bad_offset_head_bytes));
+    memcpy(original_tail_bytes, (const uint8_t *)tail->buf_addr + saved_off,
+        sizeof(original_tail_bytes));
+    tail->data_off = tail->buf_len;
+    CHECK(ker_skb_copy_from_mbuf_chain_borrowed(&ctx, head, 64, &result) == -EINVAL);
+    CHECK(result == (struct sk_buff *)(uintptr_t)1 && ctx.live == live_before_bad_offset &&
+        rte_mempool_avail_count(pool.mbufs) == available_before_bad_offset &&
+        rte_mbuf_refcnt_read(head) == refs_head_before_bad_offset &&
+        rte_mbuf_refcnt_read(tail) == refs_tail_before_bad_offset && head->next == tail);
+    CHECK(memcmp(rte_pktmbuf_mtod(head, const void *), bad_offset_head_bytes,
+        sizeof(bad_offset_head_bytes)) == 0 &&
+        memcmp((const uint8_t *)tail->buf_addr + saved_off, original_tail_bytes,
+            sizeof(original_tail_bytes)) == 0);
+    tail->data_off = saved_off;
+    uint64_t saved_flags = head->ol_flags;
+    head->ol_flags = RTE_MBUF_F_RX_VLAN_STRIPPED;
+    expect_borrowed_chain_copy_error(head, tail, -ENOTSUP);
+    head->ol_flags = saved_flags;
+
+    result = (struct sk_buff *)(uintptr_t)1;
+    uint16_t tail_refs = rte_mbuf_refcnt_read(tail);
+    rte_mbuf_refcnt_set(tail, 0);
+    expect_borrowed_chain_copy_error(head, tail, -EINVAL);
+    rte_mbuf_refcnt_set(tail, tail_refs);
+
+    /* Allocation failure must not consume refs or publish a partial skb. */
+    struct rte_mbuf *held[29];
+    for (unsigned int i = 0; i < 29; ++i) { held[i] = ker_packet_alloc(&pool); CHECK(held[i]); }
+    unsigned int live = ctx.live;
+    CHECK(ker_skb_copy_from_mbuf_chain_borrowed(&ctx, head, 64, &result) == -ENOMEM);
+    CHECK(result == (struct sk_buff *)(uintptr_t)1 && ctx.live == live &&
+        rte_mbuf_refcnt_read(head) == 2 && rte_mbuf_refcnt_read(tail) == 2);
+    ker_packet_free(held[0]);
+    CHECK(ker_skb_copy_from_mbuf_chain_borrowed(&ctx, head, 64, &result) == 0);
+    CHECK(result && result->len == 5 && memcmp(result->data, "abcde", 5) == 0);
+    CHECK(rte_mbuf_refcnt_read(head) == 2 && rte_mbuf_refcnt_read(tail) == 2);
+    CHECK(ker_skb_free(result) == 0);
+    for (unsigned int i = 1; i < 29; ++i) ker_packet_free(held[i]);
+    rte_pktmbuf_refcnt_update(head, -1);
+    ker_packet_free(head);
+    check_pool(31);
+
+    /* Exercise real indirect parent geometry and its direct backing refs. */
+    struct rte_mbuf *backing = ker_packet_alloc(&pool), *indirect = NULL;
+    head = ker_packet_alloc(&pool);
+    CHECK(backing && head && rte_pktmbuf_append(backing, 2) && rte_pktmbuf_append(head, 3));
+    memcpy(rte_pktmbuf_mtod(backing, void *), "de", 2);
+    memcpy(rte_pktmbuf_mtod(head, void *), "abc", 3);
+    indirect = rte_pktmbuf_clone(backing, pool.mbufs);
+    CHECK(indirect && !RTE_MBUF_DIRECT(indirect));
+    CHECK(rte_pktmbuf_chain(head, indirect) == 0);
+    struct rte_mbuf *saved_buf = indirect->buf_addr;
+    uint16_t saved_buf_len = indirect->buf_len;
+    indirect->buf_len = (uint16_t)(backing->buf_len + 1);
+    result = (struct sk_buff *)(uintptr_t)1;
+    CHECK(ker_skb_copy_from_mbuf_chain_borrowed(&ctx, head, 64, &result) == -EINVAL);
+    CHECK(result == (struct sk_buff *)(uintptr_t)1 &&
+        rte_mbuf_refcnt_read(backing) == 2 && rte_mbuf_refcnt_read(indirect) == 1);
+    indirect->buf_len = saved_buf_len;
+    uint16_t shortened_buf_len = (uint16_t)(backing->buf_len - 1);
+    CHECK((uint32_t)indirect->data_off + indirect->data_len <= shortened_buf_len);
+    indirect->buf_len = shortened_buf_len;
+    result = (struct sk_buff *)(uintptr_t)1;
+    unsigned int live_before_short_clone = ctx.live;
+    unsigned int pool_before_short_clone = rte_mempool_avail_count(pool.mbufs);
+    CHECK(ker_skb_copy_from_mbuf_chain_borrowed(&ctx, head, 64, &result) == -EINVAL);
+    CHECK(result == (struct sk_buff *)(uintptr_t)1 && ctx.live == live_before_short_clone &&
+        rte_mempool_avail_count(pool.mbufs) == pool_before_short_clone &&
+        rte_mbuf_refcnt_read(backing) == 2 && rte_mbuf_refcnt_read(indirect) == 1 &&
+        memcmp(rte_pktmbuf_mtod(backing, const void *), "de", 2) == 0);
+    indirect->buf_len = saved_buf_len;
+    uint16_t backing_refs = rte_mbuf_refcnt_read(backing);
+    rte_mbuf_refcnt_set(backing, 0);
+    CHECK(ker_skb_copy_from_mbuf_chain_borrowed(&ctx, head, 64, &result) == -EINVAL);
+    CHECK(result == (struct sk_buff *)(uintptr_t)1 &&
+        rte_mbuf_refcnt_read(backing) == 0 && rte_mbuf_refcnt_read(indirect) == 1);
+    rte_mbuf_refcnt_set(backing, backing_refs);
+    uint16_t indirect_refs = rte_mbuf_refcnt_read(indirect);
+    rte_mbuf_refcnt_set(indirect, 0);
+    CHECK(ker_skb_copy_from_mbuf_chain_borrowed(&ctx, head, 64, &result) == -ENOTSUP);
+    CHECK(result == (struct sk_buff *)(uintptr_t)1 &&
+        rte_mbuf_refcnt_read(backing) == backing_refs && rte_mbuf_refcnt_read(indirect) == 0);
+    rte_mbuf_refcnt_set(indirect, indirect_refs);
+    CHECK(indirect->buf_addr == saved_buf);
+    CHECK(ker_skb_copy_from_mbuf_chain_borrowed(&ctx, head, 64, &result) == 0);
+    CHECK(result && result->len == 5 && memcmp(result->data, "abcde", 5) == 0);
+    CHECK(rte_mbuf_refcnt_read(backing) == 2 && rte_mbuf_refcnt_read(indirect) == 1);
+    CHECK(ker_skb_free(result) == 0);
+    ker_packet_free(head);
+    CHECK(rte_mbuf_refcnt_read(backing) == 1);
+    ker_packet_free(backing);
+    check_pool(31);
+
+    /* External backing remains unsupported even when a valid direct segment
+     * precedes it; failure leaves the caller's whole chain untouched. */
+    head = ker_packet_alloc(&pool);
+    CHECK(head && rte_pktmbuf_append(head, 3));
+    memcpy(rte_pktmbuf_mtod(head, void *), "abc", 3);
+    void *external_buffer = NULL;
+    struct rte_mbuf *external = external_packet(&external_buffer);
+    CHECK(rte_pktmbuf_chain(head, external) == 0);
+    unsigned int frees_before = extbuf_frees;
+    result = (struct sk_buff *)(uintptr_t)1;
+    CHECK(ker_skb_copy_from_mbuf_chain_borrowed(&ctx, head, 64, &result) == -ENOTSUP);
+    CHECK(result == (struct sk_buff *)(uintptr_t)1 && ctx.live == 0 &&
+        rte_mbuf_refcnt_read(head) == 1 && rte_mbuf_refcnt_read(external) == 1 &&
+        memcmp(rte_pktmbuf_mtod(external, const void *), "ext!", 4) == 0);
+    ker_packet_free(head);
+    CHECK(extbuf_frees == frees_before + 1);
+    check_pool(31);
+}
 int main(void)
 {
     ker_test_eal_init();
@@ -582,6 +737,7 @@ int main(void)
     test_external_backing_rejection();
     test_rx_metadata_boundary();
     test_mbuf_chain_copy();
+    test_borrowed_mbuf_chain_copy();
     test_foreign_backing();
     CHECK(ctx.live == 0);
     CHECK(ker_packet_pool_cleanup(&pool) == 0);

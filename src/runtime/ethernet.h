@@ -30,4 +30,8 @@ int ker_eth_receive(struct ker_eth_device *device, struct rte_mbuf *packet,
  * caller-owned on success and failure. Headroom must be even-aligned. */
 int ker_eth_receive_copy_chain(struct ker_eth_device *device,
     const struct rte_mbuf *chain, unsigned int headroom, struct sk_buff **result);
+/* Explicit immutable borrowed-input variant; leaves the entire source chain
+ * reference untouched while producing a classified skb copy. */
+int ker_eth_receive_copy_chain_borrowed(struct ker_eth_device *device,
+    const struct rte_mbuf *chain, unsigned int headroom, struct sk_buff **result);
 #endif

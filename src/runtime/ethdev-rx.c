@@ -18,10 +18,13 @@ static int valid(struct ker_ethdev_rx *rx)
     return 0;
 }
 
-int ker_ethdev_rx_init(struct ker_ethdev_rx *rx, struct ker_eth_device *device,
+int ker_ethdev_rx_init_profile(struct ker_ethdev_rx *rx, struct ker_eth_device *device,
     struct ker_receive_runtime *runtime, uint16_t port_id, uint16_t queue_id,
-    unsigned int headroom)
+    unsigned int headroom, enum ker_ethdev_rx_copy_profile copy_profile)
 {
+    if (copy_profile != KER_ETHDEV_RX_COPY_UNIQUE &&
+        copy_profile != KER_ETHDEV_RX_COPY_IMMUTABLE_BORROWED)
+        return -EINVAL;
     if (!rx || !device || !runtime || !device->native || !device->context ||
         !runtime->initialized || !runtime->context || !runtime->context->descriptors ||
         !runtime->context->packets || !runtime->context->packets->mbufs ||
@@ -29,7 +32,8 @@ int ker_ethdev_rx_init(struct ker_ethdev_rx *rx, struct ker_eth_device *device,
         return -EINVAL;
     if (rx->device || rx->runtime || rx->pending || rx->initialized || rx->polling ||
         rx->port_id || rx->queue_id || rx->owner_lcore || rx->headroom ||
-        rx->last_completed || rx->last_dropped || rx->last_error)
+        rx->last_completed || rx->last_dropped || rx->last_error ||
+        rx->copy_profile)
         return -EALREADY;
     if (runtime->dispatching || ker_local_irq_disabled()) return -EBUSY;
     unsigned int lcore = rte_lcore_id();
@@ -60,8 +64,16 @@ int ker_ethdev_rx_init(struct ker_ethdev_rx *rx, struct ker_eth_device *device,
     runtime->rx_ring_live++;
     *rx = (struct ker_ethdev_rx){.device = device, .runtime = runtime,
         .port_id = port_id, .queue_id = queue_id, .owner_lcore = lcore,
-        .headroom = headroom, .initialized = true};
+        .headroom = headroom, .initialized = true, .copy_profile = copy_profile};
     return 0;
+}
+
+int ker_ethdev_rx_init(struct ker_ethdev_rx *rx, struct ker_eth_device *device,
+    struct ker_receive_runtime *runtime, uint16_t port_id, uint16_t queue_id,
+    unsigned int headroom)
+{
+    return ker_ethdev_rx_init_profile(rx, device, runtime, port_id, queue_id,
+        headroom, KER_ETHDEV_RX_COPY_UNIQUE);
 }
 
 int ker_ethdev_rx_poll(void *arg, unsigned int budget)
@@ -89,8 +101,12 @@ int ker_ethdev_rx_poll(void *arg, unsigned int budget)
         }
 
         struct sk_buff *skb = NULL;
-        error = ker_eth_receive_copy_chain(rx->device, rx->pending,
-            rx->headroom, &skb);
+        if (rx->copy_profile == KER_ETHDEV_RX_COPY_IMMUTABLE_BORROWED)
+            error = ker_eth_receive_copy_chain_borrowed(rx->device, rx->pending,
+                rx->headroom, &skb);
+        else
+            error = ker_eth_receive_copy_chain(rx->device, rx->pending,
+                rx->headroom, &skb);
         if (error == -ENOMEM) {
             rx->last_error = error;
             break;
