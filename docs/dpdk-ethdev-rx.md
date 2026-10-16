@@ -21,6 +21,15 @@ Malformed or unsupported frames are consumed and counted as drops. Queue
 configuration, hardware capabilities, offloads, port lifecycle, and NIC
 behavior remain caller/driver responsibilities.
 
+RX checksum status bits are admission metadata, not trusted verification.
+`GOOD`, `BAD`, and `UNKNOWN` IP/L4 hints are ignored while copying bytes; the
+existing IPv4 and transport packet views still validate wire checksums before
+the callback. `NONE` and packet transform metadata such as stripped VLAN,
+LRO, and security-offload indications remain unsupported and are consumed as
+adapter drops. The `ethdev-rx-metadata` regression drives those
+cases through a real `net_ring` PMD burst, the worker, Ethernet classifier, and
+TCP/UDP receiver; it does not test NIC checksum offload.
+
 `ker_ethdev_rx_init` keeps the unique-reference copy profile: direct segments
 must have reference count one, and indirect chains are rejected. The explicit
 `KER_ETHDEV_RX_COPY_IMMUTABLE_BORROWED` profile accepts shared direct segments

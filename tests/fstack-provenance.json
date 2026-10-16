@@ -389,6 +389,14 @@
       "source_file": "tests/unit/test_ff_dpdk_if.c",
       "source_case": "test_ut_nr_19_drain_ring_sp_sc",
       "adaptation": "Ker-specific multi-EAL ethdev queue-isolation extension motivated by the upstream SP/SC drain scenario. Two owner workers on distinct EAL lcores use independent bounded net_ring ethdev queues, contexts, pools, and existing TX/RX adapters. The test checks real worker dispatch, queue-0 backpressure while queue 1 progresses, recovery, checksum/payload identity, and wrong-owner rejection. It does not test upstream ring reload, RSS, multiprocess operation, physical NICs, or full F-Stack."
+    },
+    "ethdev-rx-metadata": {
+      "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
+      "source_case": [
+        "test_ff_dpdk_if_send_tcp_csum",
+        "test_ff_dpdk_if_send_udp_csum"
+      ],
+      "adaptation": "Ker-specific RX trust-boundary extension: a real net_ring PMD feeds TCP/UDP frames through ethdev RX, the worker, the original Ethernet classifier and existing transport packet views. GOOD/BAD/UNKNOWN checksum hints never bypass software wire validation; NONE and transformed metadata are rejected. The pinned F-Stack cases are TX checksum-offload scenarios and do not cover this RX path or hardware/NIC checksum behavior."
     }
   }
 }
