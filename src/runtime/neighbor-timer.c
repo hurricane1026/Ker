@@ -454,13 +454,6 @@ static int monitor_output_common(struct ker_neighbor_monitor *m, struct ker_tx_e
        skb->transport_header!=skb->network_header+ihl ||
        total>dev->mtu || memcmp(ip_header+12,&m->table->address->native->ifa_list->ifa_local,4) ||
        memcmp(ip_header+16,entry->primary_key,4))return -EINVAL;
-    if (m->output_mtu) {
-        uint32_t path_mtu = 0;
-        error = m->output_mtu(m->output_mtu_ctx, &path_mtu);
-        if (error) return error;
-        if (path_mtu < 68 || path_mtu > dev->mtu) return -EINVAL;
-        if (total > path_mtu) return -EMSGSIZE;
-    } else if (m->output_mtu_ctx) return -EINVAL;
     if(state==NUD_STALE || (resolving && (state==NUD_FAILED || state==NUD_NONE))) {
         unsigned long delay = state==NUD_STALE ?
             (unsigned long)NEIGH_VAR(entry->parms,DELAY_PROBE_TIME) :
@@ -531,8 +524,7 @@ int ker_neighbor_monitor_resolution_disable(struct ker_neighbor_monitor *m)
 {
     int error=valid(m); if(error)return error;
     if (!m->resolution_enabled) return -EALREADY;
-    if (m->busy || m->timer.runtime->polling || m->echo_service_refs ||
-        m->udp_adapter_refs) return -EBUSY;
+    if (m->busy || m->timer.runtime->polling || m->echo_service_refs) return -EBUSY;
     if ((m->entry->nud_state == NUD_INCOMPLETE && !(m->error && !timer_pending(&m->entry->timer))) ||
         m->entry->arp_queue.qlen || m->unresolved_bytes)
         return -EBUSY;
@@ -600,8 +592,7 @@ int ker_neighbor_monitor_cleanup(struct ker_neighbor_monitor *m)
 {
     int error=valid(m); if(error)return error;
     if (m->busy || m->timer.runtime->polling || ker_local_irq_disabled() ||
-        m->echo_service_refs || m->udp_adapter_refs || m->output_mtu ||
-        m->output_mtu_ctx) return -EBUSY;
+        m->echo_service_refs) return -EBUSY;
     if ((m->entry->nud_state == NUD_INCOMPLETE && !(m->error && !timer_pending(&m->entry->timer))) ||
         m->entry->arp_queue.qlen || m->unresolved_bytes)
         return -EBUSY;

@@ -257,7 +257,7 @@ int ker_tx_export_cleanup(struct ker_tx_export *tx)
 {
     int rc = valid(tx);
     if (rc) return rc;
-    if (tx->resolver_refs || tx->responder_refs || tx->listener_refs || tx->active_refs || tx->pending || tx->packets || tx->bytes || tx->observers) return -EBUSY;
+    if (tx->resolver_refs || tx->responder_refs || tx->pending || tx->packets || tx->bytes || tx->observers) return -EBUSY;
     rc = ker_skb_queue_cleanup(&tx->queue);
     if (rc) return rc;
     memset(tx, 0, sizeof(*tx));

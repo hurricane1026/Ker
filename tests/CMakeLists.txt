@@ -272,39 +272,6 @@ if(KER_WITH_DPDK)
         ker_eth_port ker_linux_port ker_dpdk_port ker_skb_port Threads::Threads)
     add_test(NAME udp-create COMMAND ker-udp-create-test)
     set_tests_properties(udp-create PROPERTIES TIMEOUT 30)
-    add_executable(ker-udp-io-test udp-io.c)
-    target_include_directories(ker-udp-io-test PRIVATE "${PROJECT_SOURCE_DIR}/src")
-    target_compile_definitions(ker-udp-io-test PRIVATE _GNU_SOURCE)
-    target_link_libraries(ker-udp-io-test PRIVATE ker_arp_headers
-        ker_neighbor_timer_headers ker_receive_headers ker_udp_io_port ker_udp_error_port
-        ker_udp_endpoint_port ker_icmpv4_service_port ker_transport_receive_port ker_udp_view_port
-        ker_icmpv4_create_port ker_icmpv4_view_port ker_icmpv4_pmtu_port
-        ker_icmp_echo_view_port ker_tcp_view_port ker_ipv4_view_port
-        ker_receive_port ker_neighbor_timer_port ker_neighbor_update_port
-        ker_neighbor_event_send_port ker_timer_list_port ker_neighbor_port
-        ker_address_port ker_arp_port ker_arp_probe_port ker_udp_create_port
-        ker_tx_export_port ker_tx_ring_port ker_rx_ring_port
-        ker_eth_port ker_skb_port ker_linux_port ker_dpdk_port PkgConfig::DPDK
-        Threads::Threads)
-    add_test(NAME udp-io COMMAND ker-udp-io-test)
-    set_tests_properties(udp-io PROPERTIES TIMEOUT 30)
-    add_executable(ker-udp-flow-test udp-flow.c)
-    target_include_directories(ker-udp-flow-test PRIVATE "${PROJECT_SOURCE_DIR}/src")
-    target_compile_definitions(ker-udp-flow-test PRIVATE _GNU_SOURCE)
-    target_link_libraries(ker-udp-flow-test PRIVATE ker_arp_rx_headers ker_skb_headers ker_neighbor_headers
-        ker_neighbor_timer_headers ker_neighbor_update_headers ker_udp_io_port ker_udp_error_port ker_icmpv4_pmtu_port
-        ker_udp_flow_port ker_udp_endpoint_port ker_icmpv4_service_port
-        ker_icmpv4_create_port ker_icmpv4_view_port ker_icmp_echo_view_port
-        ker_tcp_view_port ker_arp_rx_port ker_transport_receive_port
-        ker_udp_view_port ker_ipv4_view_port
-        ker_receive_port ker_neighbor_timer_port ker_neighbor_update_port
-        ker_neighbor_event_send_port ker_arp_neighbor_feedback_port ker_arp_probe_port
-        ker_arp_responder_port ker_timer_list_port ker_neighbor_port ker_address_port
-        ker_arp_port ker_udp_create_port ker_tx_export_port ker_tx_ring_port
-        ker_rx_ring_port ker_eth_port ker_skb_port ker_linux_port ker_dpdk_port
-        PkgConfig::DPDK Threads::Threads)
-    add_test(NAME udp-flow COMMAND ker-udp-flow-test)
-    set_tests_properties(udp-flow PROPERTIES TIMEOUT 45 SKIP_RETURN_CODE 77)
     add_executable(ker-udp-configured-create-test udp-configured-create.c)
     target_include_directories(ker-udp-configured-create-test PRIVATE "${PROJECT_SOURCE_DIR}/src" "${KER_ADDR_IMPORT}")
     target_compile_definitions(ker-udp-configured-create-test PRIVATE _GNU_SOURCE)
@@ -399,35 +366,6 @@ if(KER_WITH_DPDK)
     add_test(NAME address-import COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/address-import.py" "${PROJECT_SOURCE_DIR}"
         "${CMAKE_C_COMPILER}" "${KER_LINUX_INCLUDE}" "${KER_SKB_IMPORT}" "${KER_ETH_IMPORT}" ${DPDK_INCLUDE_DIRS})
-    add_executable(ker-icmpv4-pmtu-test icmpv4-pmtu.c)
-    target_include_directories(ker-icmpv4-pmtu-test PRIVATE "${PROJECT_SOURCE_DIR}/src")
-    target_compile_definitions(ker-icmpv4-pmtu-test PRIVATE _GNU_SOURCE)
-    target_link_libraries(ker-icmpv4-pmtu-test PRIVATE ker_icmpv4_pmtu_port ker_icmpv4_service_port
-        ker_icmpv4_create_port ker_transport_receive_port ker_receive_port ker_icmpv4_view_port
-        ker_udp_view_port ker_tcp_view_port ker_icmp_echo_view_port
-        ker_receive_headers ker_eth_headers ker_ipv4_view_port ker_neighbor_timer_headers
-        ker_neighbor_timer_port ker_timer_list_port
-        ker_neighbor_port ker_neighbor_update_headers ker_neighbor_update_port
-        ker_neighbor_event_send_headers ker_neighbor_event_send_port ker_address_port ker_arp_headers
-        ker_arp_port ker_arp_probe_port ker_eth_port ker_linux_port ker_dpdk_port ker_skb_port
-        ker_udp_create_port ker_udp_configured_create_port ker_tx_export_port Threads::Threads)
-    add_test(NAME icmpv4-pmtu COMMAND ker-icmpv4-pmtu-test)
-    set_tests_properties(icmpv4-pmtu PROPERTIES TIMEOUT 30)
-    add_executable(ker-udp-error-test udp-error.c)
-    target_include_directories(ker-udp-error-test PRIVATE "${PROJECT_SOURCE_DIR}/src")
-    target_compile_definitions(ker-udp-error-test PRIVATE _GNU_SOURCE)
-    target_link_libraries(ker-udp-error-test PRIVATE ker_udp_error_port ker_udp_io_port ker_udp_endpoint_port
-        ker_icmpv4_pmtu_port ker_icmpv4_service_port ker_transport_receive_port
-        ker_icmpv4_create_port ker_receive_port ker_icmpv4_view_port ker_udp_view_port ker_tcp_view_port
-        ker_icmp_echo_view_port ker_receive_headers ker_eth_headers ker_ipv4_view_port
-        ker_neighbor_timer_headers ker_neighbor_timer_port ker_timer_list_port
-        ker_neighbor_headers ker_neighbor_port ker_neighbor_update_headers
-        ker_neighbor_update_port ker_neighbor_event_send_headers ker_neighbor_event_send_port
-        ker_address_port ker_arp_headers ker_arp_port ker_arp_probe_port ker_eth_port
-        ker_linux_port ker_dpdk_port ker_skb_port ker_udp_create_port
-        ker_udp_configured_create_port ker_tx_export_port PkgConfig::DPDK Threads::Threads)
-    add_test(NAME udp-error COMMAND ker-udp-error-test)
-    set_tests_properties(udp-error PROPERTIES TIMEOUT 30)
     add_executable(ker-neighbor-timer-test neighbor-timer.c)
     target_include_directories(ker-neighbor-timer-test PRIVATE "${KER_ARP_PROBE_IMPORT}" "${KER_NEIGH_UPDATE_IMPORT}" "${KER_NEIGH_EVENT_SEND_IMPORT}")
     target_compile_definitions(ker-neighbor-timer-test PRIVATE _GNU_SOURCE)
@@ -541,7 +479,7 @@ if(KER_WITH_DPDK)
         ker_arp_responder_port ker_address_headers ker_address_port ker_neighbor_headers ker_neighbor_port
         ker_neighbor_timer_headers ker_neighbor_timer_port ker_neighbor_update_headers ker_neighbor_update_port
         ker_neighbor_event_send_port ker_timer_list_port ker_arp_neighbor_feedback_port ker_arp_probe_port
-        ker_arp_port ker_receive_headers ker_receive_port ker_transport_receive_port ker_icmpv4_service_port ker_udp_endpoint_port
+        ker_arp_port ker_receive_headers ker_receive_port ker_transport_receive_port ker_icmpv4_service_port
         ker_icmpv4_create_port ker_eth_headers ker_eth_port ker_rx_ring_port ker_tx_export_port ker_tx_ring_port
         ker_ipv4_view_port ker_udp_view_port ker_tcp_view_port ker_icmpv4_view_port ker_icmp_echo_view_port
         ker_udp_configured_create_port ker_tcp_configured_create_port ker_udp_create_port ker_tcp_create_port
@@ -607,30 +545,7 @@ if(KER_WITH_DPDK)
     set_tests_properties(skb PROPERTIES TIMEOUT 30)
     set_tests_properties(dpdk-memory PROPERTIES TIMEOUT 30)
     list(JOIN DPDK_LIBRARY_DIRS ":" ker_dpdk_library_path)
-    set_tests_properties(icmpv4-service icmpv4-pmtu checksum timer refcount dpdk-memory skb worker flow flow-buckets flow-chain flow-ip-options flow-icmpv4 fstack-flow-receive fstack-flow-owner-receive fstack-flow-concurrent-receive flow-matrix flow-multicore ethernet fstack-ipv4-ingress-validation fstack-udp-ingress-validation fstack-udp-minimal-boundaries fstack-tcp-ingress-validation ipv4-fields transport-receive icmp-echo icmp-echo-configured-create fstack-chain-export fstack-chain-checksum udp-create udp-io udp-flow udp-error udp-configured-create tcp-configured-create udp-ip-options udp-neighbor-create tcp-create tcp-ip-options tcp-neighbor-create tcp-options napi receive arp arp-configured arp-ring arp-responder fstack-icmp-echo-service arp-concurrent-ring configured-ring ipv4-address neighbor-timer neighbor arp-receive fstack-arp-chain-feedback skb-queue timer-list arp-probe-import neighbor-update-import tx-export tx-export-chain tx-ring rx-ring flow-ring cross-worker-ring fstack-concurrent-ring ${ker_fstack_tests} PROPERTIES
-        ENVIRONMENT "LD_LIBRARY_PATH=${ker_dpdk_library_path}:$ENV{LD_LIBRARY_PATH}")
-endif()
-
-if(KER_WITH_DPDK AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    add_executable(ker-udp-host-test udp-host.c)
-    target_include_directories(ker-udp-host-test PRIVATE "${PROJECT_SOURCE_DIR}/src")
-    target_compile_definitions(ker-udp-host-test PRIVATE _GNU_SOURCE)
-    target_link_libraries(ker-udp-host-test PRIVATE ker_arp_headers
-        ker_neighbor_timer_headers ker_receive_headers ker_udp_io_port ker_udp_error_port
-        ker_udp_endpoint_port ker_icmpv4_service_port ker_transport_receive_port ker_udp_view_port
-        ker_icmpv4_create_port ker_icmpv4_view_port ker_icmpv4_pmtu_port
-        ker_icmp_echo_view_port ker_tcp_view_port ker_ipv4_view_port
-        ker_receive_port ker_neighbor_timer_port ker_neighbor_update_port
-        ker_neighbor_event_send_port ker_timer_list_port ker_neighbor_port
-        ker_address_port ker_arp_port ker_arp_probe_port ker_udp_create_port
-        ker_tx_export_port ker_tx_ring_port ker_rx_ring_port
-        ker_eth_port ker_skb_port ker_linux_port ker_dpdk_port PkgConfig::DPDK
-        Threads::Threads)
-    target_link_libraries(ker-udp-host-test PRIVATE ker_arp_rx_headers ker_arp_responder_port ker_arp_rx_port)
-    find_package(Python3 COMPONENTS Interpreter REQUIRED)
-    add_test(NAME udp-host COMMAND ${Python3_EXECUTABLE}
-        ${CMAKE_CURRENT_SOURCE_DIR}/udp-host.py $<TARGET_FILE:ker-udp-host-test>)
-    set_tests_properties(udp-host PROPERTIES TIMEOUT 30 SKIP_RETURN_CODE 77
+    set_tests_properties(icmpv4-service checksum timer refcount dpdk-memory skb worker flow flow-buckets flow-chain flow-ip-options flow-icmpv4 fstack-flow-receive fstack-flow-owner-receive fstack-flow-concurrent-receive flow-matrix flow-multicore ethernet fstack-ipv4-ingress-validation fstack-udp-ingress-validation fstack-udp-minimal-boundaries fstack-tcp-ingress-validation ipv4-fields transport-receive icmp-echo icmp-echo-configured-create fstack-chain-export fstack-chain-checksum udp-create udp-configured-create tcp-configured-create udp-ip-options udp-neighbor-create tcp-create tcp-ip-options tcp-neighbor-create tcp-options napi receive arp arp-configured arp-ring arp-responder fstack-icmp-echo-service arp-concurrent-ring configured-ring ipv4-address neighbor-timer neighbor arp-receive fstack-arp-chain-feedback skb-queue timer-list arp-probe-import neighbor-update-import tx-export tx-export-chain tx-ring rx-ring flow-ring cross-worker-ring fstack-concurrent-ring ${ker_fstack_tests} PROPERTIES
         ENVIRONMENT "LD_LIBRARY_PATH=${ker_dpdk_library_path}:$ENV{LD_LIBRARY_PATH}")
 endif()
 
@@ -647,144 +562,4 @@ if(KER_WITH_DPDK)
         "${CMAKE_CURRENT_SOURCE_DIR}/tcp-mss-import.py" "${KER_LINUX_DIR}"
         "${KER_TCP_MSS_MANIFEST}" "${KER_TCP_MSS_IMPORT}"
         "${PROJECT_SOURCE_DIR}/tools/import-linux-tcp-mss.py")
-endif()
-
-if(KER_WITH_DPDK)
-    add_executable(ker-tcp-listener-test tcp-listener.c)
-    target_include_directories(ker-tcp-listener-test PRIVATE "${PROJECT_SOURCE_DIR}/src")
-    target_compile_definitions(ker-tcp-listener-test PRIVATE _GNU_SOURCE)
-    target_link_libraries(ker-tcp-listener-test PRIVATE ker_skb_headers ker_eth_headers ker_neighbor_headers ker_timer_list_port ker_linux_port ker_dpdk_port ker_address_port ker_neighbor_port ker_skb_port ker_tx_export_port ker_tcp_create_port ker_tcp_view_port ker_udp_view_port ker_ipv4_view_port ker_icmpv4_view_port ker_icmp_echo_view_port ker_transport_receive_port ker_receive_port ker_receive_headers ker_eth_port Threads::Threads)
-    target_link_libraries(ker-tcp-listener-test PRIVATE ker_tcp_mss_port)
-    target_link_libraries(ker-tcp-listener-test PRIVATE ker_tcp_listener_port
-        ker_tcp_neighbor_create_port ker_tcp_configured_create_port
-        ker_arp_headers ker_arp_rx_headers ker_arp_port ker_arp_responder_port ker_arp_rx_port ker_tx_ring_port)
-    add_test(NAME tcp-listener COMMAND ker-tcp-listener-test)
-    add_test(NAME tcp-host COMMAND ${Python3_EXECUTABLE}
-        ${CMAKE_CURRENT_SOURCE_DIR}/tcp-host.py $<TARGET_FILE:ker-tcp-listener-test>)
-    add_test(NAME tcp-passive-persist-host COMMAND ${Python3_EXECUTABLE}
-        ${CMAKE_CURRENT_SOURCE_DIR}/tcp-host.py $<TARGET_FILE:ker-tcp-listener-test> persist)
-    add_test(NAME tcp-passive-rto-host COMMAND ${Python3_EXECUTABLE}
-        ${CMAKE_CURRENT_SOURCE_DIR}/tcp-host.py $<TARGET_FILE:ker-tcp-listener-test> rto)
-    add_test(NAME tcp-passive-syn-errors COMMAND ker-tcp-listener-test syn-errors)
-    set_tests_properties(tcp-listener tcp-host PROPERTIES TIMEOUT 30
-        ENVIRONMENT "LD_LIBRARY_PATH=${ker_dpdk_library_path}:$ENV{LD_LIBRARY_PATH}")
-    set_tests_properties(tcp-passive-syn-errors PROPERTIES TIMEOUT 30
-        ENVIRONMENT "LD_LIBRARY_PATH=${ker_dpdk_library_path}:$ENV{LD_LIBRARY_PATH}")
-    set_tests_properties(tcp-host PROPERTIES SKIP_RETURN_CODE 77)
-    set_tests_properties(tcp-passive-persist-host PROPERTIES TIMEOUT 45 SKIP_RETURN_CODE 77
-        ENVIRONMENT "LD_LIBRARY_PATH=${ker_dpdk_library_path}:$ENV{LD_LIBRARY_PATH}")
-    set_tests_properties(tcp-passive-rto-host PROPERTIES TIMEOUT 45 SKIP_RETURN_CODE 77
-        ENVIRONMENT "LD_LIBRARY_PATH=${ker_dpdk_library_path}:$ENV{LD_LIBRARY_PATH}")
-endif()
-
-if(KER_WITH_DPDK)
-    add_executable(ker-tcp-active-test tcp-active.c)
-    target_include_directories(ker-tcp-active-test PRIVATE "${PROJECT_SOURCE_DIR}/src")
-    target_compile_definitions(ker-tcp-active-test PRIVATE _GNU_SOURCE)
-    target_link_libraries(ker-tcp-active-test PRIVATE ker_skb_headers ker_eth_headers ker_neighbor_headers ker_timer_list_port ker_linux_port ker_dpdk_port ker_address_port ker_neighbor_port ker_skb_port ker_tx_export_port ker_tcp_create_port ker_tcp_view_port ker_udp_view_port ker_ipv4_view_port ker_icmpv4_view_port ker_icmp_echo_view_port ker_transport_receive_port ker_receive_port ker_receive_headers ker_eth_port Threads::Threads)
-    target_link_libraries(ker-tcp-active-test PRIVATE ker_tcp_mss_port)
-    target_link_libraries(ker-tcp-active-test PRIVATE ker_tcp_active_port ker_tcp_listener_port
-        ker_tcp_neighbor_create_port ker_tcp_configured_create_port
-        ker_arp_headers ker_arp_rx_headers ker_arp_port ker_arp_responder_port ker_arp_rx_port ker_tx_ring_port)
-    add_test(NAME tcp-active COMMAND ker-tcp-active-test)
-    add_test(NAME tcp-active-host COMMAND ${Python3_EXECUTABLE}
-        ${CMAKE_CURRENT_SOURCE_DIR}/tcp-active-host.py $<TARGET_FILE:ker-tcp-active-test>)
-    set_tests_properties(tcp-active tcp-active-host PROPERTIES TIMEOUT 30
-        ENVIRONMENT "LD_LIBRARY_PATH=${ker_dpdk_library_path}:$ENV{LD_LIBRARY_PATH}")
-    set_tests_properties(tcp-active-host PROPERTIES SKIP_RETURN_CODE 77)
-endif()
-
-if(KER_WITH_DPDK)
-    add_executable(ker-tcp-stream-test tcp-stream.c)
-    target_include_directories(ker-tcp-stream-test PRIVATE "${PROJECT_SOURCE_DIR}/src")
-    target_compile_definitions(ker-tcp-stream-test PRIVATE _GNU_SOURCE)
-    target_link_libraries(ker-tcp-stream-test PRIVATE ker_skb_headers ker_eth_headers ker_neighbor_headers ker_timer_list_port ker_linux_port ker_dpdk_port ker_address_port ker_neighbor_port ker_skb_port ker_tx_export_port ker_tcp_create_port ker_tcp_view_port ker_udp_view_port ker_ipv4_view_port ker_icmpv4_view_port ker_icmp_echo_view_port ker_transport_receive_port ker_receive_port ker_receive_headers ker_eth_port Threads::Threads)
-    target_link_libraries(ker-tcp-stream-test PRIVATE ker_tcp_mss_port)
-    target_link_libraries(ker-tcp-stream-test PRIVATE ker_tcp_active_port ker_tcp_listener_port
-        ker_tcp_neighbor_create_port ker_tcp_configured_create_port
-        ker_arp_headers ker_arp_rx_headers ker_arp_port ker_arp_responder_port ker_arp_rx_port ker_tx_ring_port)
-    add_test(NAME tcp-stream COMMAND ker-tcp-stream-test)
-    add_test(NAME tcp-stream-host COMMAND ${Python3_EXECUTABLE}
-        ${CMAKE_CURRENT_SOURCE_DIR}/tcp-stream-host.py $<TARGET_FILE:ker-tcp-stream-test>)
-    set_tests_properties(tcp-stream tcp-stream-host PROPERTIES TIMEOUT 30
-        ENVIRONMENT "LD_LIBRARY_PATH=${ker_dpdk_library_path}:$ENV{LD_LIBRARY_PATH}")
-    set_tests_properties(tcp-stream-host PROPERTIES SKIP_RETURN_CODE 77)
-endif()
-
-if(KER_WITH_DPDK)
-    add_executable(ker-tcp-send-test tcp-send.c)
-    target_include_directories(ker-tcp-send-test PRIVATE "${PROJECT_SOURCE_DIR}/src")
-    target_compile_definitions(ker-tcp-send-test PRIVATE _GNU_SOURCE)
-    target_link_libraries(ker-tcp-send-test PRIVATE ker_skb_headers ker_eth_headers ker_neighbor_headers ker_timer_list_port ker_linux_port ker_dpdk_port ker_address_port ker_neighbor_port ker_skb_port ker_tx_export_port ker_tcp_create_port ker_tcp_view_port ker_udp_view_port ker_ipv4_view_port ker_icmpv4_view_port ker_icmp_echo_view_port ker_transport_receive_port ker_receive_port ker_receive_headers ker_eth_port Threads::Threads)
-    target_link_libraries(ker-tcp-send-test PRIVATE ker_tcp_mss_port)
-    target_link_libraries(ker-tcp-send-test PRIVATE ker_tcp_active_port ker_tcp_listener_port
-        ker_tcp_neighbor_create_port ker_tcp_configured_create_port
-        ker_arp_headers ker_arp_rx_headers ker_arp_port ker_arp_responder_port ker_arp_rx_port ker_tx_ring_port)
-    add_test(NAME tcp-send COMMAND ker-tcp-send-test)
-    add_test(NAME tcp-send-host COMMAND ${Python3_EXECUTABLE}
-        ${CMAKE_CURRENT_SOURCE_DIR}/tcp-send-host.py $<TARGET_FILE:ker-tcp-send-test>)
-    add_test(NAME tcp-send-rto-host COMMAND ${Python3_EXECUTABLE}
-        ${CMAKE_CURRENT_SOURCE_DIR}/tcp-send-host.py $<TARGET_FILE:ker-tcp-send-test> rto)
-    set_tests_properties(tcp-send tcp-send-host tcp-send-rto-host PROPERTIES TIMEOUT 30
-        ENVIRONMENT "LD_LIBRARY_PATH=${ker_dpdk_library_path}:$ENV{LD_LIBRARY_PATH}")
-    set_tests_properties(tcp-send-host tcp-send-rto-host PROPERTIES SKIP_RETURN_CODE 77)
-endif()
-
-if(KER_WITH_DPDK)
-    add_executable(ker-tcp-persist-test tcp-persist.c)
-    target_include_directories(ker-tcp-persist-test PRIVATE "${PROJECT_SOURCE_DIR}/src")
-    target_compile_definitions(ker-tcp-persist-test PRIVATE _GNU_SOURCE)
-    target_link_libraries(ker-tcp-persist-test PRIVATE ker_skb_headers ker_eth_headers ker_neighbor_headers ker_timer_list_port ker_linux_port ker_dpdk_port ker_address_port ker_neighbor_port ker_skb_port ker_tx_export_port ker_tcp_create_port ker_tcp_view_port ker_udp_view_port ker_ipv4_view_port ker_icmpv4_view_port ker_icmp_echo_view_port ker_transport_receive_port ker_receive_port ker_receive_headers ker_eth_port Threads::Threads)
-    target_link_libraries(ker-tcp-persist-test PRIVATE ker_tcp_mss_port ker_tcp_active_port ker_tcp_listener_port
-        ker_tcp_neighbor_create_port ker_tcp_configured_create_port
-        ker_arp_headers ker_arp_rx_headers ker_arp_port ker_arp_responder_port ker_arp_rx_port ker_tx_ring_port)
-    add_test(NAME tcp-persist COMMAND ker-tcp-persist-test)
-    add_test(NAME tcp-persist-host COMMAND ${Python3_EXECUTABLE}
-        ${CMAKE_CURRENT_SOURCE_DIR}/tcp-active-persist-host.py $<TARGET_FILE:ker-tcp-persist-test>)
-    set_tests_properties(tcp-persist tcp-persist-host PROPERTIES TIMEOUT 30
-        ENVIRONMENT "LD_LIBRARY_PATH=${ker_dpdk_library_path}:$ENV{LD_LIBRARY_PATH}")
-    set_tests_properties(tcp-persist-host PROPERTIES SKIP_RETURN_CODE 77)
-endif()
-
-if(KER_WITH_DPDK)
-    add_executable(ker-tcp-close-test tcp-close.c)
-    target_include_directories(ker-tcp-close-test PRIVATE "${PROJECT_SOURCE_DIR}/src")
-    target_compile_definitions(ker-tcp-close-test PRIVATE _GNU_SOURCE)
-    target_link_libraries(ker-tcp-close-test PRIVATE ker_skb_headers ker_eth_headers ker_neighbor_headers ker_timer_list_port ker_linux_port ker_dpdk_port ker_address_port ker_neighbor_port ker_skb_port ker_tx_export_port ker_tcp_create_port ker_tcp_view_port ker_udp_view_port ker_ipv4_view_port ker_icmpv4_view_port ker_icmp_echo_view_port ker_transport_receive_port ker_receive_port ker_receive_headers ker_eth_port Threads::Threads)
-    target_link_libraries(ker-tcp-close-test PRIVATE ker_tcp_mss_port)
-    target_link_libraries(ker-tcp-close-test PRIVATE ker_tcp_active_port ker_tcp_listener_port
-        ker_tcp_neighbor_create_port ker_tcp_configured_create_port
-        ker_arp_headers ker_arp_rx_headers ker_arp_port ker_arp_responder_port ker_arp_rx_port ker_tx_ring_port)
-    add_test(NAME tcp-close COMMAND ker-tcp-close-test)
-    add_test(NAME tcp-close-host COMMAND ${Python3_EXECUTABLE}
-        ${CMAKE_CURRENT_SOURCE_DIR}/tcp-close-host.py $<TARGET_FILE:ker-tcp-close-test>)
-    set_tests_properties(tcp-close tcp-close-host PROPERTIES TIMEOUT 30
-        ENVIRONMENT "LD_LIBRARY_PATH=${ker_dpdk_library_path}:$ENV{LD_LIBRARY_PATH}")
-    set_tests_properties(tcp-close-host PROPERTIES SKIP_RETURN_CODE 77)
-endif()
-
-if(KER_WITH_DPDK)
-    add_executable(ker-tcp-active-reorder-test tcp-active.c)
-    target_include_directories(ker-tcp-active-reorder-test PRIVATE "${PROJECT_SOURCE_DIR}/src")
-    target_compile_definitions(ker-tcp-active-reorder-test PRIVATE _GNU_SOURCE KER_TCP_REORDER_TEST)
-    target_link_libraries(ker-tcp-active-reorder-test PRIVATE ker_skb_headers ker_eth_headers ker_neighbor_headers ker_timer_list_port ker_linux_port ker_dpdk_port ker_address_port ker_neighbor_port ker_skb_port ker_tx_export_port ker_tcp_create_port ker_tcp_view_port ker_udp_view_port ker_ipv4_view_port ker_icmpv4_view_port ker_icmp_echo_view_port ker_transport_receive_port ker_receive_port ker_receive_headers ker_eth_port Threads::Threads)
-    target_link_libraries(ker-tcp-active-reorder-test PRIVATE ker_tcp_mss_port ker_tcp_active_port ker_tcp_listener_port
-        ker_tcp_neighbor_create_port ker_tcp_configured_create_port
-        ker_arp_headers ker_arp_rx_headers ker_arp_port ker_arp_responder_port ker_arp_rx_port ker_tx_ring_port)
-    add_test(NAME tcp-active-reorder COMMAND ker-tcp-active-reorder-test)
-    add_test(NAME tcp-active-reorder-host COMMAND ${Python3_EXECUTABLE}
-        ${CMAKE_CURRENT_SOURCE_DIR}/tcp-active-reorder-host.py $<TARGET_FILE:ker-tcp-active-reorder-test>)
-    set_tests_properties(tcp-active-reorder tcp-active-reorder-host PROPERTIES TIMEOUT 30
-        ENVIRONMENT "LD_LIBRARY_PATH=${ker_dpdk_library_path}:$ENV{LD_LIBRARY_PATH}")
-    set_tests_properties(tcp-active-reorder-host PROPERTIES SKIP_RETURN_CODE 77)
-endif()
-
-if(KER_WITH_DPDK)
-    foreach(tcp_test ker-tcp-listener-test ker-tcp-active-test ker-tcp-stream-test ker-tcp-send-test
-            ker-tcp-persist-test ker-tcp-close-test ker-tcp-active-reorder-test)
-        target_link_libraries(${tcp_test} PRIVATE ker_icmpv4_service_port
-            ker_icmpv4_create_port ker_neighbor_timer_port ker_neighbor_timer_headers
-            ker_address_headers ker_neighbor_update_headers ker_neighbor_update_port
-            ker_neighbor_event_send_headers ker_neighbor_event_send_port ker_arp_probe_port)
-    endforeach()
 endif()

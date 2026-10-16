@@ -502,8 +502,6 @@ int ker_icmpv4_service_disable(struct ker_icmpv4_service *s) {
   struct ker_neighbor_monitor *m = s->monitor;
   if (rte_lcore_id() != r->handler.runtime->lcore)
     return -EXDEV;
-  if (r->udp_endpoint_table)
-    return -EBUSY;
   if (r->icmpv4_service != s || !m->echo_service_refs)
     return -EINVAL;
   if (s->busy || s->control_observer || s->control_observer_arg ||
@@ -665,13 +663,6 @@ static int emit_error_internal(struct ker_icmpv4_service *s,
     return -EHOSTUNREACH;
   }
   uint32_t path_mtu = s->receiver->handler.device->native->mtu;
-  if (s->monitor->output_mtu) {
-    e = s->monitor->output_mtu(s->monitor->output_mtu_ctx, &path_mtu);
-    if (e) {
-      s->last_error = e;
-      return e;
-    }
-  }
   if (!path_mtu) {
     inc(&s->malformed);
     return -EINVAL;
