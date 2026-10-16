@@ -670,6 +670,18 @@ static void test_borrowed_mbuf_chain_copy(void)
     CHECK(result == (struct sk_buff *)(uintptr_t)1 &&
         rte_mbuf_refcnt_read(backing) == 2 && rte_mbuf_refcnt_read(indirect) == 1);
     indirect->buf_len = saved_buf_len;
+    uint16_t shortened_buf_len = (uint16_t)(backing->buf_len - 1);
+    CHECK((uint32_t)indirect->data_off + indirect->data_len <= shortened_buf_len);
+    indirect->buf_len = shortened_buf_len;
+    result = (struct sk_buff *)(uintptr_t)1;
+    unsigned int live_before_short_clone = ctx.live;
+    unsigned int pool_before_short_clone = rte_mempool_avail_count(pool.mbufs);
+    CHECK(ker_skb_copy_from_mbuf_chain_borrowed(&ctx, head, 64, &result) == -EINVAL);
+    CHECK(result == (struct sk_buff *)(uintptr_t)1 && ctx.live == live_before_short_clone &&
+        rte_mempool_avail_count(pool.mbufs) == pool_before_short_clone &&
+        rte_mbuf_refcnt_read(backing) == 2 && rte_mbuf_refcnt_read(indirect) == 1 &&
+        memcmp(rte_pktmbuf_mtod(backing, const void *), "de", 2) == 0);
+    indirect->buf_len = saved_buf_len;
     uint16_t backing_refs = rte_mbuf_refcnt_read(backing);
     rte_mbuf_refcnt_set(backing, 0);
     CHECK(ker_skb_copy_from_mbuf_chain_borrowed(&ctx, head, 64, &result) == -EINVAL);

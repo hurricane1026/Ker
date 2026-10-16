@@ -121,7 +121,7 @@ static int mbuf_chain_geometry(const struct rte_mbuf *head, uint32_t *length,
             if (!parent || !RTE_MBUF_DIRECT(parent) ||
                 RTE_MBUF_HAS_EXTBUF(parent) || !rte_mbuf_refcnt_read(parent) ||
                 segment->buf_addr != parent->buf_addr ||
-                segment->buf_len > parent->buf_len ||
+                segment->buf_len != parent->buf_len ||
                 (uint64_t)segment->data_off + segment->data_len > parent->buf_len)
                 return -EINVAL;
         }
