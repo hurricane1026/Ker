@@ -12,6 +12,7 @@
 #include <pthread.h>
 #include <rte_eth_ring.h>
 #include <rte_ethdev.h>
+#include <rte_malloc.h>
 #include <rte_ring.h>
 #include <string.h>
 
@@ -24,14 +25,15 @@ static struct ker_eth_device device;
 static struct ker_receive_runtime runtime;
 static struct ker_protocol_handler handler;
 static struct ker_ethdev_rx input;
-static uint8_t expected[8][FRAME_LEN - ETH_HLEN];
-static unsigned int expected_order[8], expected_count, received;
+static uint8_t expected[10][FRAME_LEN - ETH_HLEN];
+static unsigned int expected_order[10], expected_count, received;
+static unsigned int external_frees;
 static bool test_reentry;
 static int poll_reentry_result, cleanup_reentry_result;
 
 static void expect_delivery(unsigned int id)
 {
-    CHECK(expected_count < 8);
+    CHECK(expected_count < sizeof(expected_order) / sizeof(expected_order[0]));
     expected_order[expected_count++] = id;
 }
 
@@ -91,6 +93,54 @@ static struct rte_mbuf *make_frame(unsigned int id, bool malformed, bool split)
     CHECK(linear);
     memcpy(linear, frame, length);
     return packet;
+}
+
+static void external_buffer_free(void *address, void *opaque)
+{
+    unsigned int *counter = opaque;
+    ++*counter;
+    rte_free(address);
+}
+
+static struct rte_mbuf *make_external_segment(const uint8_t *bytes, uint16_t length)
+{
+    const uint16_t allocation_length = 512;
+    void *buffer = rte_malloc(NULL, allocation_length, RTE_CACHE_LINE_SIZE);
+    CHECK(buffer);
+    memset(buffer, 0, allocation_length);
+    uint16_t usable_length = allocation_length;
+    struct rte_mbuf_ext_shared_info *shinfo = rte_pktmbuf_ext_shinfo_init_helper(
+        buffer, &usable_length, external_buffer_free, &external_frees);
+    CHECK(shinfo);
+    struct rte_mbuf *packet = rte_pktmbuf_alloc(pool.mbufs);
+    CHECK(packet);
+    rte_pktmbuf_attach_extbuf(packet, buffer, RTE_BAD_IOVA, usable_length, shinfo);
+    rte_pktmbuf_reset_headroom(packet);
+    uint8_t *destination = rte_pktmbuf_append(packet, length);
+    CHECK(destination);
+    memcpy(destination, bytes, length);
+    return packet;
+}
+
+static struct rte_mbuf *make_external_frame(unsigned int id)
+{
+    uint8_t frame[FRAME_LEN];
+    memset(frame, (int)(0x20 + id), sizeof(frame));
+    struct rte_ether_hdr *ether = (struct rte_ether_hdr *)frame;
+    ether->dst_addr.addr_bytes[0] = 2;
+    ether->src_addr.addr_bytes[0] = 4;
+    ether->ether_type = rte_cpu_to_be_16(ETH_P_IP);
+    uint8_t *ip = frame + ETH_HLEN;
+    ip[0] = 0x45;
+    ip[2] = 0;
+    ip[3] = FRAME_LEN - ETH_HLEN;
+    ip[8] = 64;
+    ip[9] = IPPROTO_UDP;
+    memcpy(expected[id], frame + ETH_HLEN, FRAME_LEN - ETH_HLEN);
+    struct rte_mbuf *head = make_external_segment(frame, 10);
+    struct rte_mbuf *tail = make_external_segment(frame + 10, FRAME_LEN - 10);
+    CHECK(rte_pktmbuf_chain(head, tail) == 0);
+    return head;
 }
 
 static void inject(struct rte_ring *rx_ring, unsigned int id, bool malformed,
@@ -368,6 +418,103 @@ static void test_ethdev_receive(void)
     verify_chain(sibling, 7);
     rte_pktmbuf_free(sibling);
 
+    /* External multisegment clones use a distinct opt-in profile. The PMD
+     * queue releases its clone after the copied skb is dispatched; retained
+     * parent/sibling references keep the extbuf callbacks pending until the
+     * last source reference is released. */
+    CHECK(ker_ethdev_rx_cleanup(&input) == 0);
+    CHECK(ker_ethdev_rx_init_profile(&input, &device, &runtime, (uint16_t)port,
+        0, 0, KER_ETHDEV_RX_COPY_IMMUTABLE_EXTERNAL) == 0);
+    struct rte_mbuf *external_parent = make_external_frame(8);
+    struct rte_mbuf *external_sibling = rte_pktmbuf_clone(external_parent, pool.mbufs);
+    struct rte_mbuf *external_queued = rte_pktmbuf_clone(external_parent, pool.mbufs);
+    CHECK(external_sibling && external_queued && external_parent->nb_segs == 2 &&
+        external_sibling->nb_segs == 2 && external_queued->nb_segs == 2);
+    struct rte_mbuf *parent_segment = external_parent;
+    struct rte_mbuf *sibling_segment = external_sibling;
+    struct rte_mbuf *queued_segment = external_queued;
+    for (; parent_segment; parent_segment = parent_segment->next,
+        sibling_segment = sibling_segment->next, queued_segment = queued_segment->next) {
+        CHECK(sibling_segment && queued_segment && RTE_MBUF_HAS_EXTBUF(queued_segment) &&
+            !(queued_segment->ol_flags & RTE_MBUF_F_INDIRECT));
+        CHECK(parent_segment->shinfo == sibling_segment->shinfo &&
+            parent_segment->shinfo == queued_segment->shinfo &&
+            rte_mbuf_ext_refcnt_read(parent_segment->shinfo) == 3);
+    }
+    unsigned int external_before = external_frees;
+    expect_delivery(8);
+    CHECK(rte_ring_enqueue(rx_ring, external_queued) == 0);
+    rte_pktmbuf_free(external_parent); /* sibling keeps all external buffers alive */
+    external_parent = NULL;
+    exhaust_pool(held, &held_count);
+    CHECK(held_count > 0);
+    CHECK(ker_ethdev_rx_poll(&input, 1) == -ENOMEM && input.pending == external_queued &&
+        received == 8 && external_frees == external_before);
+    verify_chain(external_sibling, 8);
+    rte_pktmbuf_free(held[0]);
+    held[0] = NULL;
+    CHECK(ker_ethdev_rx_poll(&input, 1) == 1 && received == 9 && !input.last_dropped);
+    CHECK(external_frees == external_before);
+    verify_chain(external_sibling, 8);
+    release_pool(held, held_count, 1);
+    rte_pktmbuf_free(external_sibling);
+    CHECK(external_frees == external_before + 2);
+
+    /* Cancellation transfers the still-live external clone back unchanged;
+     * releasing that reference alone does not invoke either callback while
+     * parent and sibling references remain. */
+    external_parent = make_external_frame(9);
+    external_sibling = rte_pktmbuf_clone(external_parent, pool.mbufs);
+    external_queued = rte_pktmbuf_clone(external_parent, pool.mbufs);
+    CHECK(external_sibling && external_queued);
+    external_before = external_frees;
+    CHECK(rte_ring_enqueue(rx_ring, external_queued) == 0);
+    exhaust_pool(held, &held_count);
+    CHECK(ker_ethdev_rx_poll(&input, 1) == -ENOMEM && input.pending == external_queued &&
+        external_frees == external_before);
+    CHECK(rte_mbuf_ext_refcnt_read(external_parent->shinfo) == 3 &&
+        rte_mbuf_ext_refcnt_read(external_parent->next->shinfo) == 3);
+    struct rte_mbuf *cancelled_external = NULL;
+    CHECK(ker_ethdev_rx_cancel(&input, &cancelled_external) == 1 &&
+        cancelled_external == external_queued &&
+        rte_mbuf_refcnt_read(cancelled_external) == 1 &&
+        rte_mbuf_ext_refcnt_read(cancelled_external->shinfo) == 3);
+    rte_pktmbuf_free(cancelled_external);
+    CHECK(external_frees == external_before);
+    verify_chain(external_parent, 9);
+    verify_chain(external_sibling, 9);
+    rte_pktmbuf_free(external_parent);
+    CHECK(external_frees == external_before);
+    rte_pktmbuf_free(external_sibling);
+    CHECK(external_frees == external_before + 2);
+    release_pool(held, held_count, 0);
+
+    /* Unsupported transformed metadata drops the external queue reference
+     * while preserving an independently retained sibling until its release. */
+    external_parent = make_external_frame(9);
+    external_sibling = rte_pktmbuf_clone(external_parent, pool.mbufs);
+    CHECK(external_sibling);
+    external_parent->ol_flags |= RTE_MBUF_F_RX_VLAN_STRIPPED;
+    external_before = external_frees;
+    CHECK(rte_ring_enqueue(rx_ring, external_parent) == 0);
+    CHECK(ker_ethdev_rx_poll(&input, 1) == 1 && input.last_dropped == 1 &&
+        input.last_error == -ENOTSUP && external_frees == external_before);
+    verify_chain(external_sibling, 9);
+    rte_pktmbuf_free(external_sibling);
+    CHECK(external_frees == external_before + 2);
+    CHECK(ker_ethdev_rx_cleanup(&input) == 0);
+    CHECK(ker_ethdev_rx_init(&input, &device, &runtime, (uint16_t)port, 0, 0) == 0);
+    external_parent = make_external_frame(9);
+    external_sibling = rte_pktmbuf_clone(external_parent, pool.mbufs);
+    CHECK(external_sibling);
+    external_before = external_frees;
+    CHECK(rte_ring_enqueue(rx_ring, external_parent) == 0);
+    CHECK(ker_ethdev_rx_poll(&input, 1) == 1 && input.last_dropped == 1 &&
+        input.last_error == -ENOTSUP && external_frees == external_before);
+    verify_chain(external_sibling, 9);
+    rte_pktmbuf_free(external_sibling);
+    CHECK(external_frees == external_before + 2);
+
     /* A shared malformed frame and unsupported transformed metadata each
      * drop one RX reference while preserving the caller's reference. */
     shared = make_frame(0, true, false);
@@ -384,7 +531,7 @@ static void test_ethdev_receive(void)
     rte_pktmbuf_free(shared);
 
     struct rte_eth_stats stats = {0};
-    CHECK(rte_eth_stats_get((uint16_t)port, &stats) == 0 && stats.ipackets == 15);
+    CHECK(rte_eth_stats_get((uint16_t)port, &stats) == 0 && stats.ipackets == 19);
     CHECK(ker_worker_cleanup(&worker) == 0);
     CHECK(ker_ethdev_rx_cleanup(&input) == 0);
     CHECK(device.rx_ring_live == 0 && runtime.rx_ring_live == 0);

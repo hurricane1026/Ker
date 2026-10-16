@@ -23,7 +23,8 @@ int ker_ethdev_rx_init_profile(struct ker_ethdev_rx *rx, struct ker_eth_device *
     unsigned int headroom, enum ker_ethdev_rx_copy_profile copy_profile)
 {
     if (copy_profile != KER_ETHDEV_RX_COPY_UNIQUE &&
-        copy_profile != KER_ETHDEV_RX_COPY_IMMUTABLE_BORROWED)
+        copy_profile != KER_ETHDEV_RX_COPY_IMMUTABLE_BORROWED &&
+        copy_profile != KER_ETHDEV_RX_COPY_IMMUTABLE_EXTERNAL)
         return -EINVAL;
     if (!rx || !device || !runtime || !device->native || !device->context ||
         !runtime->initialized || !runtime->context || !runtime->context->descriptors ||
@@ -101,7 +102,10 @@ int ker_ethdev_rx_poll(void *arg, unsigned int budget)
         }
 
         struct sk_buff *skb = NULL;
-        if (rx->copy_profile == KER_ETHDEV_RX_COPY_IMMUTABLE_BORROWED)
+        if (rx->copy_profile == KER_ETHDEV_RX_COPY_IMMUTABLE_EXTERNAL)
+            error = ker_eth_receive_copy_chain_external(rx->device, rx->pending,
+                rx->headroom, &skb);
+        else if (rx->copy_profile == KER_ETHDEV_RX_COPY_IMMUTABLE_BORROWED)
             error = ker_eth_receive_copy_chain_borrowed(rx->device, rx->pending,
                 rx->headroom, &skb);
         else

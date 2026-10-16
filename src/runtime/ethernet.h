@@ -34,4 +34,7 @@ int ker_eth_receive_copy_chain(struct ker_eth_device *device,
  * reference untouched while producing a classified skb copy. */
 int ker_eth_receive_copy_chain_borrowed(struct ker_eth_device *device,
     const struct rte_mbuf *chain, unsigned int headroom, struct sk_buff **result);
+/* Explicit immutable DPDK external-buffer receive-copy profile. */
+int ker_eth_receive_copy_chain_external(struct ker_eth_device *device,
+    const struct rte_mbuf *chain, unsigned int headroom, struct sk_buff **result);
 #endif
