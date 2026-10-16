@@ -65,9 +65,13 @@ static uint16_t host_rto_flight_length;
 static unsigned int host_rto_stage;
 static bool host_reorder_mode, host_reorder_held, host_reorder_exercised;
 static bool host_persist_zero_seen, host_persist_probe_sent, host_persist_reopen_dropped,
-    host_persist_recovered;
+    host_persist_recovered, host_persist_retry_seen_while_zero;
+static unsigned int host_persist_duplicate_reopens;
 static uint32_t host_persist_probe_sequence, host_persist_reopen_ack;
 static uint16_t host_persist_reopen_window, host_persist_recovery_window;
+static unsigned char host_persist_probe_byte;
+static uint64_t host_persist_probe_first_emitted_ms;
+static unsigned int host_persist_probe_emissions;
 static unsigned char host_held_frame[2048];
 static size_t host_held_length;
 static uint32_t host_held_sequence;
@@ -113,6 +117,7 @@ static int next_isn(void *arg, __be16 port, uint32_t *out)
 }
 static int sink(struct rte_mbuf *m, void *arg)
 {
+    bool persist_probe_packet = false;
     (void)arg;
     if (tap < 0 && syn_error_mode && capture_synack && m->pkt_len >= 58 &&
         m->pkt_len <= 128) {
@@ -211,9 +216,49 @@ static int sink(struct rte_mbuf *m, void *arg)
             }
         }
     }
+    if (host_persist_mode && m->pkt_len >= 55 && bytes[12] == 8 && bytes[13] == 0 &&
+        bytes[14] == 0x45 && bytes[23] == 6 && bytes[26] == 192 && bytes[27] == 0 &&
+        bytes[28] == 2 && bytes[29] == 1 && bytes[30] == 192 && bytes[31] == 0 &&
+        bytes[32] == 2 && bytes[33] == 2) {
+        struct ker_tcp_request *r = &listener.requests[0];
+        size_t total = ((size_t)bytes[16] << 8) | bytes[17], tcp = 34;
+        size_t header = (size_t)(bytes[tcp + 12] >> 4) * 4;
+        if (total <= (size_t)m->pkt_len - 14 &&
+            header >= 20 && total == 20 + header + 1 &&
+            bytes[tcp + 13] == (KER_TCP_ACK | KER_TCP_PSH) &&
+            !memcmp(bytes + tcp, &local_port, 2) &&
+            !memcmp(bytes + tcp + 2, &r->peer_port, 2) &&
+            be32(bytes + tcp + 4) == host_persist_probe_sequence &&
+            r->send_bytes == 1 && r->peer_window == 0 &&
+            r->send_next == host_persist_probe_sequence + 1U &&
+            bytes[tcp + header] == host_persist_probe_byte) {
+            persist_probe_packet = true;
+        }
+    }
     ssize_t n = write(tap, data, m->pkt_len);
     if (n < 0) return -errno;
     if ((size_t)n != m->pkt_len) return -EIO;
+    if (persist_probe_packet) {
+        uint64_t emitted_ms = now_ms();
+        bool retry_at_zero = false;
+        if (!host_persist_probe_emissions) {
+            host_persist_probe_first_emitted_ms = emitted_ms;
+            host_persist_probe_emissions = 1;
+        } else {
+            ++host_persist_probe_emissions;
+            retry_at_zero = listener.requests[0].peer_window == 0 &&
+                emitted_ms >= host_persist_probe_first_emitted_ms &&
+                emitted_ms - host_persist_probe_first_emitted_ms >= 200;
+        }
+        if (retry_at_zero && host_persist_reopen_dropped && !host_persist_retry_seen_while_zero) {
+            host_persist_retry_seen_while_zero = true;
+            puts("PERSIST_RETRY_AT_ZERO_AFTER_DROP");
+            fflush(stdout);
+        } else if (retry_at_zero && !host_persist_reopen_dropped) {
+            puts("PERSIST_RETRY_AT_ZERO_INITIAL");
+            fflush(stdout);
+        }
+    }
     ker_packet_free(m);
     return 0;
 }
@@ -498,19 +543,22 @@ static void test_host(void)
                 size_t ip_length = ((size_t)bytes[16] << 8) | bytes[17];
                 if ((bytes[14] >> 4) == 4 && bytes[23] == 6 && ihl >= 20 &&
                     ip_length >= ihl + 20 && ip_length <= (size_t)n - 14 &&
-                    tcp + 20 <= 14 + ip_length && bytes[tcp] == 0x1f && bytes[tcp + 1] == 0x43 &&
-                    bytes[tcp + 2] == 0x23 && bytes[tcp + 3] == 0x28 &&
-                    (bytes[tcp + 12] >> 4) >= 5 &&
-                    tcp + (((size_t)bytes[tcp + 12] >> 4) * 4) <= 14 + ip_length) {
+                    tcp + 20 <= (size_t)n && tcp + 20 <= 14 + ip_length) {
+                    size_t header = (size_t)(bytes[tcp + 12] >> 4) * 4;
+                    if (header >= 20 && ihl + header <= ip_length &&
+                        bytes[tcp] == 0x1f && bytes[tcp + 1] == 0x43 &&
+                        bytes[tcp + 2] == 0x23 && bytes[tcp + 3] == 0x28) {
                     struct ker_tcp_request *r = &listener.requests[handle.slot];
                     uint32_t sequence = be32(bytes + tcp + 4);
                     uint32_t acknowledgment = be32(bytes + tcp + 8);
                     uint16_t window = ((uint16_t)bytes[tcp + 14] << 8) | bytes[tcp + 15];
+                    bool pure_ack = bytes[tcp + 13] == KER_TCP_ACK &&
+                        ip_length == ihl + header;
                     if (!host_persist_reopen_dropped && r->send_bytes == 1 &&
                         r->peer_window == 0 && host_persist_probe_sent &&
                         r->send_right == host_persist_probe_sequence &&
                         r->send_next == host_persist_probe_sequence + 1U &&
-                        sequence == r->receive_next && bytes[tcp + 13] == KER_TCP_ACK && window &&
+                        sequence == r->receive_next && pure_ack && window &&
                         acknowledgment == host_persist_probe_sequence) {
                         host_persist_reopen_ack = acknowledgment;
                         host_persist_reopen_window = window;
@@ -519,7 +567,15 @@ static void test_host(void)
                     }
                     if (!drop_frame && host_persist_reopen_dropped && !host_persist_recovered &&
                         r->send_bytes == 1 && r->peer_window == 0 &&
-                        sequence == r->receive_next && bytes[tcp + 13] == KER_TCP_ACK && window &&
+                        r->send_right == host_persist_probe_sequence &&
+                        sequence == r->receive_next && pure_ack && window &&
+                        acknowledgment == host_persist_probe_sequence) {
+                        ++host_persist_duplicate_reopens;
+                        drop_frame = true;
+                    }
+                    if (!drop_frame && host_persist_reopen_dropped && !host_persist_recovered &&
+                        r->send_bytes == 1 && r->peer_window == 0 &&
+                        sequence == r->receive_next && pure_ack && window &&
                         acknowledgment == host_persist_probe_sequence + 1U) {
                         uint32_t recovery_ack = acknowledgment;
                         host_persist_recovery_window = window;
@@ -531,6 +587,7 @@ static void test_host(void)
                         if (!r->peer_window && r->send_right == r->send_next)
                             host_persist_zero_seen = true;
                         dispatch_done = true;
+                    }
                     }
                 }
             }
@@ -596,7 +653,8 @@ static void test_host(void)
             } else if (n == 0) peer_eof = true;
             else CHECK(n == -EAGAIN);
             if (!listener.requests[handle.slot].send_bytes && sent < response_goal &&
-                (!host_rto_mode || (received == request_goal && peer_eof))) {
+                (!host_rto_mode || (received == request_goal && peer_eof)) &&
+                (!host_persist_mode || (received == request_goal && peer_eof))) {
                 unsigned char payload[1024];
                 size_t amount = sizeof(payload);
                 if (amount > response_goal - sent) amount = response_goal - sent;
@@ -607,6 +665,7 @@ static void test_host(void)
                         listener.requests[handle.slot].peer_window == 0 && written == 1) {
                         host_persist_probe_sent = true;
                         host_persist_probe_sequence = listener.requests[handle.slot].send_unacknowledged;
+                        host_persist_probe_byte = payload[0];
                     }
                     sent += (size_t)written;
                 }
@@ -642,13 +701,19 @@ static void test_host(void)
     CHECK(arp.replies_enqueued > 0);
     if (host_reorder_mode) CHECK(host_reorder_exercised);
     if (host_persist_mode && !(host_persist_zero_seen && host_persist_probe_sent &&
-        host_persist_reopen_dropped && host_persist_recovered)) {
-        fprintf(stderr, "persist proof zero=%d probe=%d dropped=%d recovered=%d seq=%u ack=%u win=%u recwin=%u\n",
+        host_persist_reopen_dropped && host_persist_retry_seen_while_zero &&
+        host_persist_recovered)) {
+        fprintf(stderr, "persist proof zero=%d probe=%d dropped=%d retry0=%d recovered=%d duplicates=%u seq=%u ack=%u win=%u recwin=%u\n",
             host_persist_zero_seen, host_persist_probe_sent, host_persist_reopen_dropped,
-            host_persist_recovered, host_persist_probe_sequence, host_persist_reopen_ack,
+            host_persist_retry_seen_while_zero, host_persist_recovered,
+            host_persist_duplicate_reopens,
+            host_persist_probe_sequence, host_persist_reopen_ack,
             host_persist_reopen_window, host_persist_recovery_window);
         CHECK(false);
     }
+    if (host_persist_mode)
+        fprintf(stderr, "persist proof: dropped ACK/UNA; same byte/sequence retried at zero window; ACK/NXT retired probe (duplicate reopen ACKs=%u)\n",
+            host_persist_duplicate_reopens);
     if (host_rto_mode) {
         CHECK(host_rto_ack_held && host_rto_ack_released && host_rto_retry_dropped &&
               host_rto_retry_seen && host_rto_karn_verified && host_rto_clean_ack_held &&
@@ -2126,10 +2191,12 @@ int main(int argc, char **argv)
     CHECK(ker_arp_device_setup(&device) == 0);
     CHECK(ker_ipv4_address_init(&address, &device, local_ip, 24) == 0);
     CHECK(ker_neighbor_table_init(&neighbors, &address, "tcp_listen_neigh", 4, 2) == 0);
-    struct ker_neighbor_config neighbor_config = {.retrans_ticks=20, .reachable_ticks=100,
-        .delay_ticks=30, .ucast_probes=2, .mcast_probes=2, .mcast_reprobes=1,
-        .queue_bytes=8192};
-    CHECK(ker_neighbor_configure(&neighbors, &neighbor_config) == 0);
+    if (syn_error_mode) {
+        struct ker_neighbor_config neighbor_config = {.retrans_ticks=20, .reachable_ticks=100,
+            .delay_ticks=30, .ucast_probes=2, .mcast_probes=2, .mcast_reprobes=1,
+            .queue_bytes=8192};
+        CHECK(ker_neighbor_configure(&neighbors, &neighbor_config) == 0);
+    }
     CHECK(ker_neighbor_add(&neighbors, peer_ip, peer_mac) == 0);
     if (syn_error_mode) CHECK(ker_neighbor_add(&neighbors, monitor_ip, router_mac) == 0);
     CHECK(ker_tx_ring_init(&output, "tcp_listen_out", 1, SOCKET_ID_ANY) == 0);

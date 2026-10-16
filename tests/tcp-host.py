@@ -5,6 +5,7 @@ import fcntl
 import os
 from pathlib import Path
 import shutil
+import select
 import socket
 import struct
 import subprocess
@@ -35,14 +36,28 @@ def run(binary, server_first=False, local_port=8000, reorder=False, persist=Fals
             mode = 'persist' if persist else ('rto' if rto else
                    ('server-first' if server_first else ('reorder' if reorder else None)))
             child = subprocess.Popen([binary, str(tap)] + ([mode] if mode else []),
-                                     pass_fds=(tap,))
+                                     pass_fds=(tap,), stdout=subprocess.PIPE if persist else None,
+                                     text=persist, bufsize=1 if persist else -1)
             peer.connect(('192.0.2.1', 9000))
             peer.sendall(bytes(range(256)) * 16)
             if not server_first:
                 peer.shutdown(socket.SHUT_WR)
             if persist:
-                # Let the bounded receive buffer fill before reopening it by reading.
-                time.sleep(0.25)
+                # Keep the peer window closed until Ker emits a real zero-window retry.
+                deadline = time.monotonic() + 5
+                marker_seen = False
+                while time.monotonic() < deadline:
+                    ready, _, _ = select.select(
+                        [child.stdout], [], [], max(0, deadline - time.monotonic()))
+                    if not ready:
+                        break
+                    line = child.stdout.readline()
+                    if not line:
+                        break
+                    if line.strip() == 'PERSIST_RETRY_AT_ZERO_INITIAL':
+                        marker_seen = True
+                        break
+                assert marker_seen, 'Ker did not emit a zero-window retry before peer read'
             received = bytearray()
             response_length = 65536 if persist else 4096
             while len(received) < response_length:
