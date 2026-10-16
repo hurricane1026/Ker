@@ -193,6 +193,18 @@ if(KER_WITH_DPDK)
     add_test(NAME ethdev-rx COMMAND ker-ethdev-rx-test)
     set_tests_properties(ethdev-rx PROPERTIES TIMEOUT 30
         ENVIRONMENT "LD_LIBRARY_PATH=${KER_ETHDEV_TEST_LIBRARY_PATH}:$ENV{LD_LIBRARY_PATH}")
+    add_executable(ker-ethdev-rx-metadata-test ethdev-rx-metadata.c)
+    target_include_directories(ker-ethdev-rx-metadata-test PRIVATE "${PROJECT_SOURCE_DIR}/src"
+        "${PROJECT_SOURCE_DIR}/third_party/dpdk/drivers/net/ring")
+    target_compile_definitions(ker-ethdev-rx-metadata-test PRIVATE _GNU_SOURCE)
+    target_link_libraries(ker-ethdev-rx-metadata-test PRIVATE "${KER_NET_RING_PMD}"
+        ker_ethdev_rx_port ker_transport_receive_port ker_receive_port ker_receive_headers
+        ker_eth_headers ker_skb_headers ker_icmpv4_view_port ker_ipv4_view_port ker_udp_view_port
+        ker_tcp_view_port ker_icmp_echo_view_port ker_eth_port ker_linux_port
+        ker_dpdk_port ker_skb_port PkgConfig::DPDK Threads::Threads)
+    add_test(NAME ethdev-rx-metadata COMMAND ker-ethdev-rx-metadata-test)
+    set_tests_properties(ethdev-rx-metadata PROPERTIES TIMEOUT 30
+        ENVIRONMENT "LD_LIBRARY_PATH=${KER_ETHDEV_TEST_LIBRARY_PATH}:$ENV{LD_LIBRARY_PATH}")
     add_executable(ker-ethdev-rebind-test ethdev-rebind.c)
     target_include_directories(ker-ethdev-rebind-test PRIVATE "${PROJECT_SOURCE_DIR}/src"
         "${PROJECT_SOURCE_DIR}/third_party/dpdk/drivers/net/ring")
