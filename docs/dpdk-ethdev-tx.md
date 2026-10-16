@@ -16,9 +16,14 @@ the PMD; zero returns `-EAGAIN`, leaving the exporter to retry without consuming
 the caller's queued skb. Adapter cleanup pins the exporter against direct
 cleanup and fails while packets remain pending. Only queues configured for
 multisegment TX are accepted. Where the PMD reports a nonzero maximum number of
-segments per packet, longer chains are rejected. Checksum, TSO, VLAN and other
-TX offload metadata is rejected; this adapter
-does not claim hardware checksum, segmentation, NIC, or full-stack capability.
+segments per packet, longer chains are rejected. The existing
+`ker_ethdev_tx_init` path remains copy-only and rejects `CHECKSUM_PARTIAL` as
+before. A private opt-in mode reuses Ker's software Internet-checksum completion
+on a private copied chain; its exact-fold variant preserves a folded zero so the
+caller can apply protocol-specific zero policy. Neither mode sets TX offload
+flags or adds GSO/TSO support. VLAN and other unsupported TX metadata remains
+rejected. This is software completion, not hardware checksum, NIC, or full-stack
+capability.
 
 Before each nonzero-budget adapter poll, the wrapper asks the PMD to reclaim all
 completed TX mbufs with `rte_eth_tx_done_cleanup(..., 0)`. This lets drivers
