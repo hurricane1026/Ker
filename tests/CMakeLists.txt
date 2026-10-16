@@ -179,6 +179,19 @@ if(KER_WITH_DPDK)
     string(JOIN ":" KER_ETHDEV_TEST_LIBRARY_PATH ${DPDK_LIBRARY_DIRS})
     set_tests_properties(ethdev-tx PROPERTIES TIMEOUT 30
         ENVIRONMENT "LD_LIBRARY_PATH=${KER_ETHDEV_TEST_LIBRARY_PATH}:$ENV{LD_LIBRARY_PATH}")
+    add_executable(ker-ethdev-rx-test ethdev-rx.c)
+    target_include_directories(ker-ethdev-rx-test PRIVATE "${PROJECT_SOURCE_DIR}/src"
+        "${PROJECT_SOURCE_DIR}/third_party/dpdk/drivers/net/ring")
+    target_compile_definitions(ker-ethdev-rx-test PRIVATE _GNU_SOURCE)
+    target_link_libraries(ker-ethdev-rx-test PRIVATE "${KER_NET_RING_PMD}"
+        ker_linux_port ker_skb_port ker_dpdk_port)
+    target_link_libraries(ker-ethdev-rx-test PRIVATE ker_ethdev_rx_port ker_receive_port
+        ker_receive_headers ker_eth_headers ker_skb_headers ker_neighbor_headers
+        ker_rx_ring_port ker_tx_ring_port ker_eth_port ker_neighbor_port ker_address_port
+        PkgConfig::DPDK Threads::Threads)
+    add_test(NAME ethdev-rx COMMAND ker-ethdev-rx-test)
+    set_tests_properties(ethdev-rx PROPERTIES TIMEOUT 30
+        ENVIRONMENT "LD_LIBRARY_PATH=${KER_ETHDEV_TEST_LIBRARY_PATH}:$ENV{LD_LIBRARY_PATH}")
     add_executable(ker-tx-ring-test tx-ring.c)
     target_include_directories(ker-tx-ring-test PRIVATE "${PROJECT_SOURCE_DIR}/src")
     target_compile_definitions(ker-tx-ring-test PRIVATE _GNU_SOURCE)

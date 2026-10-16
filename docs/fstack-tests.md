@@ -23,6 +23,7 @@ FreeBSD 栈、cmocka mock/stub 或覆盖率脚本。没有通过宿主机 socket
 | fstack-packet-export | test_ff_dpdk_if_send_basic | 实际字节复制；原始 backing 释放后 copy 仍可读取 |
 | fstack-multiseg-boundary | test_ff_dpdk_if_send_multiseg | skb adoption API 仍 fail-closed；独立的 TX exporter 将受支持 skb 复制为 DPDK 段，并由 `ethdev-tx` 用真实 net_ring PMD 验证正向发送 |
 | ethdev-tx | test_ff_dpdk_raw_packet_send_basic / test_ff_dpdk_raw_packet_send_multiseg | Ker-owned bounded TX adapter borrows a caller-configured/started DPDK ethdev queue. A pinned DPDK `net_ring` PMD receives and exposes exact 64-byte and 4096-byte multisegment packets; the test also verifies FIFO, ring-full retry, pool exhaustion and PMD `opackets`. This is an ethdev/ownership adapter check, not a NIC or full-stack claim. |
+| ethdev-rx | test_main_loop_one_iteration_then_stop | Ker-specific borrowed ethdev RX adapter feeds the existing Ethernet classifier and worker receive dispatcher. A real pinned DPDK `net_ring` PMD injects segmented frames; the test covers one-packet worker budgets, FIFO, pool-pressure retry/cancel, and binding exclusion. The upstream case only motivates the worker-loop boundary; it does not test this adapter or claim NIC/RSS/full-stack support. |
 | fstack-queue-isolation | test_ut_nr_19_drain_ring_sp_sc | 两个本地 Linux skb FIFO 隔离，不等价于多进程 generation/ring |
 | fstack-queue-full-ownership | 同上 | 满队列不消费调用方引用，可用 pool 对象数不变 |
 | fstack-export-exhaustion-retry | test_ff_dpdk_if_send_copydata_fail | 真实 pool 耗尽时输出槽和 skb 所有权不变；释放一个 mbuf 后重试成功，不模拟 copydata 错误 |

@@ -79,3 +79,4 @@ ICMPv4 通用报文和控制服务边界见 [ICMPv4 控制层](docs/linux-icmpv4
 
 F-Stack 外部测试场景的适配范围与追溯见 [测试迁移](docs/fstack-tests.md)，每个适配场景独立运行真实 DPDK 回归测试。
 借用现有 DPDK ethdev TX 队列的生命周期与所有权约束见 [ethdev TX adapter](docs/dpdk-ethdev-tx.md)。
+借用现有 DPDK ethdev RX 队列并接入 Ker Ethernet 分类/接收分发的边界见 [ethdev RX adapter](docs/dpdk-ethdev-rx.md)。
