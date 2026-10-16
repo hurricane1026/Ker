@@ -42,4 +42,5 @@ congestion control, stream reassembly, or TCP public capability. Window scaling,
 SACK, timestamps, TCP authentication, and Fast Open negotiation still require
 separate adaptation and validation.
 
-The next private passive-handshake profile is documented in [TCP listener](tcp-listener.md).
+This remains a stateless packet-view and native-option parsing adapter. Ker does
+not currently provide TCP connection, listener, retransmission, or stream state.

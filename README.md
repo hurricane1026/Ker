@@ -1,10 +1,10 @@
 # ker 用户态网络栈
 
-ker 的目标是把 Linux kernel 网络栈移植到用户态，以 DPDK 提供网卡收发和运行基础，向上层应用提供 C API，用于高性能 IP、UDP、TCP 服务以及 HTTP 和 WAF 应用。整体方向类似 F-Stack 的 FreeBSD 加 DPDK，但协议实现来自 Linux。
+ker 的目标是把 Linux kernel 网络栈移植到用户态，以 DPDK 提供网卡收发和运行基础，向上层应用提供 C API。当前实现的是 Linux 网络基础代码的兼容层、DPDK 内存和队列适配，以及无状态 Ethernet/IP/ICMP/UDP/TCP 报文 view 与构造器；TCP/UDP socket 和连接语义尚未由导入的 Linux 实现提供，因此当前不能独立提供网络服务。
 
 目前已移植 checksum、rbtree、timerqueue 和 refcount 基础代码，并接入 DPDK heap、原子分配尺寸池、每 worker 分类容量预算、描述符 mempool、原生 mbuf 生命周期及 Linux 原始 skb 的线性子集，以及按容量压力限制 RX 的私有 worker 轮询框架，以及原始 net_device 布局、Ethernet 接收分类、单 worker NAPI 调度/完成、原始 packet_type 协议匹配/投递、ARP/Ethernet 报文构造、原始 IPv4 静态地址视图、固定容量永久邻居表，以及原始 ARP 接收门控和私有消息回调，以及按包数/truesize 限制的原始 skb FIFO。提供公共校验和 API，其他 runtime 与内存接口仍是私有接口。**完整 skb、IP/UDP/TCP 协议层、网卡收发和 socket API 尚未实现，当前不能提供网络服务。** `ker_capabilities()` 仍返回 `KER_CAP_CHECKSUM`（`0x20`），协议栈和网卡能力仍关闭。
 
-现已建立私有的固定 TCP/UDP flow owner 选择和有界跨 worker mbuf handoff 基础；它只解析报文头并选择包的调度 worker，不实现协议栈或全局状态隔离。边界见[固定 flow steering](docs/flow-steering.md)。
+现有 flow steering 仅解析 TCP/UDP 报文头并选择包的调度 worker；它不实现协议栈或连接状态。边界见[固定 flow steering](docs/flow-steering.md)。
 
 ## 获取依赖
 
@@ -75,6 +75,6 @@ native probe callback, the bounded [ARP probe adapter](docs/linux-arp-probes.md)
 can return Linux's constructed packet as a caller-owned skb. NIC transmission,
 ARP learning and unresolved packet queues remain unsupported.
 
-ICMPv4 的通用报文、控制服务、错误事件和实际 PMTU 输出限制见 [ICMPv4 控制层](docs/linux-icmpv4-control.md)。该文档也列出尚待 socket、路由与 IPv4 重组接入的部分；本轮不包含 IPv6。
+ICMPv4 通用报文和控制服务边界见 [ICMPv4 控制层](docs/linux-icmpv4-control.md)。该服务不实现 socket 错误队列或 PMTU policy/cache；socket、路由与 IPv4 重组仍未接入。
 
 F-Stack 外部测试场景的适配范围与追溯见 [测试迁移](docs/fstack-tests.md)，每个适配场景独立运行真实 DPDK 回归测试。

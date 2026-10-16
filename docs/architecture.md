@@ -1,15 +1,15 @@
 # ker 架构与移植路线
 
-ker 的目标是将 Linux 网络协议代码编译进用户态库，并通过 DPDK 驱动网卡。当前已编译原始 checksum、rbtree、timerqueue 与 refcount，建立定时器运行环境，并接入 DPDK heap、描述符 mempool 和原生 mbuf 生命周期；原始 skb 的线性子集也已接入；协议数据路径仍待实现。第一目标是可验证的单 worker IPv4 和 UDP 收发，再推进 TCP 和多核性能。
+ker 的目标是将原始 Linux 网络协议实现编译进用户态，并通过 DPDK 驱动网卡。当前已接入基础运行环境、内存与 skb 适配、Ethernet/IPv4 分类、邻居和无状态报文处理。Ker-owned TCP/UDP 连接状态机及 ICMP 错误关联/PMTU policy 已移除；协议行为必须由原始 Linux 实现提供。当前公共能力仍仅为 checksum，不能独立提供 TCP/UDP 网络服务。
 
 ## 数据路径和模块边界
 
 ```text
-HTTP 服务 / WAF / UDP 与 TCP 应用
+上层应用与应用协议
                  |
         ker 公共 C API 与事件接口
                  |
-      移植的 Linux socket 与协议实现
+      导入的 Linux socket 与协议实现
                  |
       sk_buff / net_device / NAPI 适配
                  |
@@ -20,7 +20,7 @@ HTTP 服务 / WAF / UDP 与 TCP 应用
 
 Linux 使用 `sk_buff` 管理网络包，NAPI 负责网络事件处理；DPDK 使用 `rte_mbuf` 管理包缓冲区。因此 ker 需要在这些接口之间实现包生命周期与事件调度适配，而不是只替换网卡驱动。参考 [Linux sk_buff](https://docs.kernel.org/networking/skbuff.html)、[Linux NAPI](https://docs.kernel.org/networking/napi.html) 和 [DPDK mbuf](https://doc.dpdk.org/guides/prog_guide/mbuf_lib.html)。
 
-公共 API 隐藏 Linux 和 DPDK 类型。HTTP 解析、TLS、WAF 规则和请求策略放在上层应用；ker 提供它们需要的连接、字节流、报文和事件能力。后续 socket API 使用独立的 ker 句柄，明确线程归属和错误约定，不直接假定它们是宿主机文件描述符。
+公共 API 隐藏 Linux 和 DPDK 类型。HTTP 解析、TLS、WAF 规则和请求策略属于上层应用。当前 Ker 保留无状态 packet views/constructors、checksum 和运行时适配；TCP/UDP socket、连接、字节流和事件语义尚未由导入实现提供。
 
 ## Linux 用户态运行环境
 
@@ -49,7 +49,7 @@ RX 获取的 mbuf 由适配层负责释放；交给 Linux 的 skb 由协议栈�
 
 第一阶段在一个线程上运行一个栈实例，按预算轮询 RX、处理协议事件、推进 timer、服务应用事件并提交 TX。即使没有收包，也必须推进定时器。应用回调不能长时间阻塞这个线程。
 
-当前已接受一项有限的多 worker 基线：用固定 seeded tuple hash 和不可变 bucket-to-worker 表确定 TCP/UDP 包的 owner，并通过有界 mbuf inbox 在 worker poll 中交接；适配层还可提供有界 exact-key owner override。详见 [固定 flow steering](flow-steering.md)。方向是每个 worker 持有并访问自己的可变协议与设备状态；现有 Linux 全局状态仍需逐项审计并通过适配层隔离或明确共享，完整的独立 worker 协议栈、RSS、监听与 accept 分发、RCU 和在线路由更新仍待实现和验证。
+当前已接受一项有限的多 worker 基线：用固定 seeded tuple hash 和不可变 bucket-to-worker 表确定 TCP/UDP 包的 owner，并通过有界 mbuf inbox 在 worker poll 中交接；适配层还可提供有界 exact-key owner override。详见 [固定 flow steering](flow-steering.md)。方向是每个 worker 持有并访问原始 Linux 协议实现所需的状态；现有 Linux 全局状态仍需逐项审计并通过适配层隔离或明确共享。flow steering 只负责包调度，不提供 TCP/UDP 状态隔离、监听或 accept 分发。
 
 ## 分阶段验收
 
@@ -67,14 +67,8 @@ RX 获取的 mbuf 由适配层负责释放；交给 Linux 的 skb 由协议栈�
 
 submodule 的许可证以各自源码声明为准。移植前需要确认所选 Linux 源文件和组合产物的许可证及分发要求，再决定 ker 自有代码与对外 API 的许可证。当前没有为自有代码添加许可证声明。
 
-TCP 控制字段与原生 MSS 解析的当前边界见 [TCP control view](tcp-control.md)。连接和监听的有界握手基础见下文。
+TCP 控制字段与原生 MSS 解析的无状态边界见 [TCP control view](tcp-control.md)。
 
-固定对端的单 worker TCP 被动 listen/accept、重试、超时、可选有界收发流和 FIN 关闭见 [TCP listener](tcp-listener.md)。
-
-固定对端的单 worker TCP 主动握手和 Linux 服务端互通验收见 [TCP active handshake](tcp-active.md)。主动与被动握手均已建立有界基础；发送流基础见下文；正常关闭见下文。
-
-主动连接的有界接收流、重复片段处理、窗口背压、可选乱序缓存及 Linux 发送端验收见 [TCP receive stream](tcp-receive-stream.md)。发送流见下文；被动 listener 的 opt-in 有界乱序接收见 [TCP listener](tcp-listener.md)；正常 FIN 关闭见下文。
-
-主动连接的单片段发送、部分确认、重传与双向 Linux 互通验收见 [TCP send stream](tcp-send-stream.md)。拥塞控制扩展与乱序缓存仍待后续实现；正常 FIN 关闭见下文。
-
-主动连接的 FIN 半关闭、EOF、重传、TIME_WAIT 生命周期和 Linux 正常关闭验收见 [TCP FIN close](tcp-fin-close.md)。完整拥塞控制和乱序缓存仍待后续实现。
+TCP/UDP 连接与 socket 状态目前不可用。以前的 Ker-owned 状态机及其测试已删除，
+不会以私有协议实现替代原始 Linux。后续阶段应导入所需 Linux socket/协议源文件、
+配置及依赖，再由适配层完成用户态集成。
