@@ -1,8 +1,16 @@
 #include "runtime/ethdev-tx.h"
 #include <errno.h>
+#include <limits.h>
 #include <rte_ethdev.h>
 #include <rte_lcore.h>
 #include <string.h>
+
+static int ethdev_reclaim(uint16_t port_id, uint16_t queue_id,
+    uint32_t free_count, void *arg)
+{
+    (void)arg;
+    return rte_eth_tx_done_cleanup(port_id, queue_id, free_count);
+}
 
 static int ethdev_sink(struct rte_mbuf *packet, void *arg)
 {
@@ -30,7 +38,7 @@ int ker_ethdev_tx_init(struct ker_ethdev_tx *tx, struct ker_skb_context *ctx,
 {
     if (!tx || !ctx || !packet_limit || !byte_limit || !segment_payload_limit)
         return -EINVAL;
-    if (tx->initialized || tx->polling || tx->port_id || tx->queue_id || tx->max_segments ||
+    if (tx->initialized || tx->polling || tx->last_cleanup_error || tx->port_id || tx->queue_id || tx->max_segments ||
         tx->owner_lcore || tx->exporter.queue.native.next || tx->exporter.queue.native.prev ||
         tx->exporter.queue.context || tx->exporter.queue.bytes || tx->exporter.queue.byte_limit ||
         tx->exporter.queue.packet_limit || tx->exporter.queue.purging ||
@@ -77,7 +85,24 @@ int ker_ethdev_tx_poll(void *arg, unsigned int budget)
     if (!tx || !tx->initialized) return -EINVAL;
     if (rte_lcore_id() != tx->owner_lcore) return -EXDEV;
     if (tx->polling) return -EBUSY;
+    return ker_ethdev_tx_poll_with_reclaim(tx, budget, ethdev_reclaim, NULL);
+}
+
+int ker_ethdev_tx_poll_with_reclaim(struct ker_ethdev_tx *tx, unsigned int budget,
+    ker_ethdev_tx_reclaim_fn reclaim, void *reclaim_arg)
+{
+    if (!tx || !tx->initialized || !reclaim) return -EINVAL;
+    if (rte_lcore_id() != tx->owner_lcore) return -EXDEV;
+    if (tx->polling) return -EBUSY;
+    if (!budget) return 0;
+    if (budget > INT_MAX) return -EOVERFLOW;
     tx->polling = true;
+    int reclaim_rc = reclaim(tx->port_id, tx->queue_id, 0, reclaim_arg);
+    tx->last_cleanup_error = reclaim_rc < 0 ? reclaim_rc : 0;
+    if (reclaim_rc < 0 && reclaim_rc != -ENOTSUP) {
+        tx->polling = false;
+        return reclaim_rc;
+    }
     int rc = ker_tx_export_poll(&tx->exporter, budget);
     tx->polling = false;
     return rc;
