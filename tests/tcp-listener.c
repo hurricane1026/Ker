@@ -6,6 +6,9 @@
 #include "runtime/tcp-listener.h"
 #include "runtime/tcp-create.h"
 #include "runtime/tcp-neighbor-create.h"
+#include "runtime/icmpv4-create.h"
+#include "runtime/icmpv4-service.h"
+#include "runtime/neighbor-timer.h"
 #include "runtime/tx-ring.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -25,6 +28,9 @@ static struct ker_transport_receiver receiver;
 static struct ker_tx_export tx;
 static struct ker_tx_ring output;
 static struct ker_arp_responder arp;
+static struct ker_runtime monitor_runtime;
+static struct ker_neighbor_monitor monitor;
+static struct ker_icmpv4_service icmp_service;
 static struct ker_tcp_listener listener;
 static struct ker_tcp_request requests[1];
 static struct ker_tcp_request stream_requests[2];
@@ -36,9 +42,11 @@ static unsigned char host_send_storage[1024];
 static unsigned char host_reorder_storage[128];
 static struct ker_tcp_listener_config config;
 static __be32 local_ip, peer_ip;
+static __be32 monitor_ip;
 static __be16 local_port, peer_port;
 static const unsigned char local_mac[6] = {2, 0x10, 0, 0, 0, 1};
 static const unsigned char peer_mac[6] = {2, 0x20, 0, 0, 0, 1};
+static const unsigned char router_mac[6] = {2, 0x20, 0, 0, 0, 9};
 static int tap = -1, isn_error;
 static bool reenter;
 static bool reenter_close;
@@ -67,6 +75,16 @@ static uint16_t host_held_payload_length;
 static bool custom_isn;
 static uint32_t custom_isn_value;
 static uint16_t peer_mss = 1000;
+static bool syn_error_mode, capture_synack, fail_synack_sink, inject_synack_quote_in_sink;
+static bool mutate_synack_generation;
+static uint64_t saved_synack_generation;
+static unsigned char synack_quote[2][28], synack_packet[2][44], synack_first_packet[2][44];
+static bool synack_captured[2];
+static void inject_icmp(uint8_t type, uint8_t code, const unsigned char *quote,
+                        unsigned int length);
+static uint64_t service_clock(void *arg) { (void)arg; return listener.now_ms; }
+static void monitor_probe(const struct ker_neighbor_event *event, void *arg)
+{ (void)event; (void)arg; }
 static uint32_t be32(const unsigned char *p);
 static uint64_t now_ms(void);
 static int receive_message(const struct ker_transport_message *m, void *arg)
@@ -96,6 +114,43 @@ static int next_isn(void *arg, __be16 port, uint32_t *out)
 static int sink(struct rte_mbuf *m, void *arg)
 {
     (void)arg;
+    if (tap < 0 && syn_error_mode && capture_synack && m->pkt_len >= 58 &&
+        m->pkt_len <= 128) {
+        unsigned char bytes[128];
+        const unsigned char *frame = rte_pktmbuf_read(m, 0, m->pkt_len, bytes);
+        if (!frame) return -EIO;
+        if (frame != bytes) memcpy(bytes, frame, m->pkt_len);
+        if (bytes[12] == 8 && bytes[13] == 0 && bytes[23] == 6 &&
+            bytes[47] == (KER_TCP_SYN | KER_TCP_ACK)) {
+            __be16 destination_port;
+            memcpy(&destination_port, bytes + 36, sizeof(destination_port));
+            for (unsigned int i = 0; i < 2; ++i) {
+                if (stream_requests[i].state != KER_TCP_REQUEST_SYN ||
+                    destination_port != stream_requests[i].peer_port) continue;
+                memcpy(synack_quote[i], bytes + 14, sizeof(synack_quote[i]));
+                memcpy(synack_packet[i], bytes + 14, sizeof(synack_packet[i]));
+                if (!synack_captured[i])
+                    memcpy(synack_first_packet[i], bytes + 14, sizeof(synack_first_packet[i]));
+                synack_captured[i] = true;
+                if (inject_synack_quote_in_sink) {
+                    inject_synack_quote_in_sink = false;
+                    inject_icmp(3, 3, synack_quote[i], sizeof(synack_quote[i]));
+                    CHECK(stream_requests[i].state == KER_TCP_REQUEST_SYN &&
+                          !stream_requests[i].synack_accepted);
+                }
+                if (mutate_synack_generation) {
+                    mutate_synack_generation = false;
+                    saved_synack_generation = stream_requests[i].generation;
+                    ++stream_requests[i].generation;
+                }
+                if (fail_synack_sink) {
+                    fail_synack_sink = false;
+                    return -EIO;
+                }
+                break;
+            }
+        }
+    }
     if (tap < 0) return ker_tx_ring_sink(m, &output);
     unsigned char bytes[2048];
     if (m->pkt_len > sizeof(bytes)) return -EMSGSIZE;
@@ -205,6 +260,39 @@ static void dispatch_bytes(const unsigned char *bytes, size_t length)
     void *data = rte_pktmbuf_append(m, (uint16_t)length); CHECK(data);
     memcpy(data, bytes, length); dispatch(m);
 }
+static void inject_icmp(uint8_t type, uint8_t code, const unsigned char *quote,
+                        unsigned int length)
+{
+    unsigned char rest[4] = {0}; struct sk_buff *skb = NULL;
+    unsigned int encoded_length = length < 28 ? 28 : length;
+    CHECK(ker_icmpv4_ipv4_create(&context, router_mac, local_mac, monitor_ip,
+        local_ip, type, code, rest, 64, quote, encoded_length, &skb) == 0);
+    struct rte_mbuf *frame = NULL;
+    CHECK(ker_skb_to_mbuf(skb, &frame) == 0 && ker_skb_free(skb) == 0);
+    if (length < 28) CHECK(rte_pktmbuf_trim(frame, 28 - length) == 0);
+    dispatch(frame);
+}
+static void export_and_drain_synack(unsigned int slot)
+{
+    CHECK(ker_tx_export_poll(&tx, 1) == 1);
+    struct rte_mbuf *frame = NULL;
+    CHECK(ker_tx_ring_take(&output, &frame) == 1 && frame->pkt_len >= 58);
+    const unsigned char *bytes = rte_pktmbuf_mtod(frame, const unsigned char *);
+    CHECK(bytes[12] == 8 && bytes[13] == 0 && bytes[23] == 6 &&
+          bytes[47] == (KER_TCP_SYN | KER_TCP_ACK));
+    CHECK(synack_captured[slot] &&
+          !memcmp(bytes + 14, synack_packet[slot], sizeof(synack_packet[slot])));
+    ker_packet_free(frame);
+}
+static size_t find_request_slot(__be16 port)
+{
+    for (size_t i = 0; i < listener.capacity; ++i)
+        if (stream_requests[i].state && stream_requests[i].peer_port == port) return i;
+    return listener.capacity;
+}
+static int dummy_control_observer(const struct ker_icmpv4_control_event *event,
+                                  void *arg)
+{ (void)event; (void)arg; return 0; }
 static bool peer_tcp_payload(const unsigned char *frame, size_t length,
                              uint32_t *sequence, uint16_t *payload_length)
 {
@@ -1868,10 +1956,158 @@ static void test_passive_adaptive_rto(void)
     CHECK(ker_tcp_listener_init(&listener, &receiver, &neighbors, peer_ip, &tx,
         requests, 1, &config, 3408) == 0);
 }
+static void test_passive_syn_errors(void)
+{
+    config.syn_hard_errors = true; config.retry_ms = 10; config.timeout_ms = 30;
+    memset(stream_requests, 0, sizeof(stream_requests));
+    memset(synack_captured, 0, sizeof(synack_captured));
+    CHECK(ker_icmpv4_service_control_observer_attach(&icmp_service,
+        dummy_control_observer, NULL) == 0);
+    unsigned int refs = tx.listener_refs;
+    CHECK(ker_tcp_listener_init(&listener, &receiver, &neighbors, peer_ip, &tx,
+        stream_requests, 2, &config, 100) == -EALREADY);
+    CHECK(!listener.receiver && !receiver.tcp_listener && tx.listener_refs == refs &&
+          !tx.observers && icmp_service.control_observer == dummy_control_observer);
+    CHECK(ker_icmpv4_service_control_observer_detach(&icmp_service,
+        dummy_control_observer, NULL) == 0);
+    CHECK(ker_tcp_listener_init(&listener, &receiver, &neighbors, peer_ip, &tx,
+        stream_requests, 2, &config, 100) == 0);
+    CHECK(ker_icmpv4_service_disable(&icmp_service) == -EBUSY);
+
+    peer_port = rte_cpu_to_be_16(8000);
+    custom_isn = true; custom_isn_value = UINT32_C(0x11111110);
+    capture_synack = true; fail_synack_sink = true;
+    inject_synack_quote_in_sink = true;
+    inject(UINT32_C(0x11110000), 0, KER_TCP_SYN, NULL, 0);
+    size_t first = find_request_slot(peer_port);
+    CHECK(first < listener.capacity && tx.packets == 1);
+    CHECK(ker_tx_export_poll(&tx, 1) == -EIO);
+    struct rte_mbuf *unexpected = NULL;
+    CHECK(synack_captured[first] && !stream_requests[first].synack_accepted &&
+          stream_requests[first].state == KER_TCP_REQUEST_SYN &&
+          ker_tx_ring_take(&output, &unexpected) == 0 && !unexpected);
+
+    inject_synack_quote_in_sink = true;
+    mutate_synack_generation = true;
+    export_and_drain_synack((unsigned int)first);
+    CHECK(!stream_requests[first].synack_accepted &&
+          stream_requests[first].state == KER_TCP_REQUEST_SYN);
+    stream_requests[first].generation = saved_synack_generation;
+    custom_isn = false;
+    CHECK(ker_tcp_listener_poll(&listener, 110, 2) == 2);
+    inject_synack_quote_in_sink = true;
+    export_and_drain_synack((unsigned int)first);
+    CHECK(stream_requests[first].synack_accepted &&
+          !memcmp(synack_first_packet[first], synack_packet[first], 44));
+
+    peer_port = rte_cpu_to_be_16(8001);
+    custom_isn = true; custom_isn_value = UINT32_C(0x22222220);
+    inject(UINT32_C(0x22220000), 0, KER_TCP_SYN, NULL, 0);
+    size_t second = find_request_slot(peer_port);
+    CHECK(second < listener.capacity && second != first);
+    custom_isn = false;
+    export_and_drain_synack((unsigned int)second);
+    CHECK(stream_requests[second].synack_accepted);
+    unsigned char forged[28];
+    memcpy(forged, synack_quote[second], sizeof(forged)); forged[12] ^= 1;
+    inject_icmp(3, 3, forged, sizeof(forged));
+    memcpy(forged, synack_quote[second], sizeof(forged)); forged[16] ^= 1;
+    inject_icmp(3, 3, forged, sizeof(forged));
+    memcpy(forged, synack_quote[second], sizeof(forged)); forged[20] ^= 1;
+    inject_icmp(3, 3, forged, sizeof(forged));
+    memcpy(forged, synack_quote[second], sizeof(forged)); forged[2] = 0; forged[3] = 43;
+    inject_icmp(3, 3, forged, sizeof(forged));
+    memcpy(forged, synack_quote[second], sizeof(forged)); forged[6] = 0x40;
+    inject_icmp(3, 3, forged, sizeof(forged));
+    memcpy(forged, synack_quote[second], sizeof(forged)); forged[6] = 0x80;
+    inject_icmp(3, 3, forged, sizeof(forged));
+    memcpy(forged, synack_quote[second], sizeof(forged)); forged[6] = 0x20;
+    inject_icmp(3, 3, forged, sizeof(forged));
+    memcpy(forged, synack_quote[second], sizeof(forged)); forged[6] = 0x01;
+    inject_icmp(3, 3, forged, sizeof(forged));
+    inject_icmp(3, 3, synack_quote[second], sizeof(synack_quote[second]) - 1);
+    memcpy(forged, synack_quote[second], sizeof(forged)); forged[22] ^= 1;
+    inject_icmp(3, 3, forged, sizeof(forged));
+    memcpy(forged, synack_quote[second], sizeof(forged)); forged[24] ^= 1;
+    inject_icmp(3, 3, forged, sizeof(forged));
+    memcpy(forged, synack_quote[second], sizeof(forged)); forged[4] ^= 1;
+    inject_icmp(3, 3, forged, sizeof(forged));
+    memcpy(forged, synack_quote[second], sizeof(forged)); forged[6] = 0x20;
+    inject_icmp(3, 3, forged, sizeof(forged));
+    memcpy(forged, synack_quote[second], sizeof(forged)); forged[9] = 17;
+    inject_icmp(3, 3, forged, sizeof(forged));
+    const uint8_t ignored_codes[] = {0, 1, 4, 5, 9, 10, 13};
+    for (size_t i = 0; i < sizeof(ignored_codes); ++i)
+        inject_icmp(3, ignored_codes[i], synack_quote[second], sizeof(synack_quote[second]));
+    inject_icmp(11, 0, synack_quote[second], sizeof(synack_quote[second]));
+    inject_icmp(12, 0, synack_quote[second], sizeof(synack_quote[second]));
+    inject_icmp(5, 0, synack_quote[second], sizeof(synack_quote[second]));
+    CHECK(stream_requests[second].state == KER_TCP_REQUEST_SYN &&
+          !listener.hard_protocol_errors && !listener.hard_port_errors);
+    inject_icmp(3, 3, synack_quote[first], sizeof(synack_quote[first]));
+    CHECK(stream_requests[first].state == KER_TCP_REQUEST_FAILED &&
+          stream_requests[first].error == -ECONNREFUSED &&
+          listener.hard_port_errors == 1 && !listener.hard_protocol_errors &&
+          stream_requests[second].state == KER_TCP_REQUEST_SYN);
+    inject_icmp(3, 2, synack_quote[first], sizeof(synack_quote[first]));
+    CHECK(stream_requests[first].error == -ECONNREFUSED && listener.hard_port_errors == 1);
+
+    CHECK(ker_tcp_listener_poll(&listener, 120, 2) == 2);
+    export_and_drain_synack((unsigned int)second);
+    CHECK(!memcmp(synack_first_packet[second], synack_packet[second], 44));
+    uint64_t timed_out = listener.timed_out;
+    CHECK(ker_tcp_listener_poll(&listener, 140, 0) == 0);
+    inject_icmp(3, 2, synack_quote[second], sizeof(synack_quote[second]));
+    CHECK(stream_requests[second].state == KER_TCP_REQUEST_FAILED &&
+          stream_requests[second].error == -ETIMEDOUT && listener.timed_out == timed_out + 1 &&
+          !listener.hard_protocol_errors && listener.hard_port_errors == 1);
+    CHECK(ker_tcp_listener_poll(&listener, 140, 2) == 2 && !listener.count);
+
+    peer_port = rte_cpu_to_be_16(8000);
+    custom_isn = true; custom_isn_value = UINT32_C(0x33333330);
+    unsigned char stale_quote[28];
+    memcpy(stale_quote, synack_quote[first], sizeof(stale_quote));
+    inject(UINT32_C(0x33330000), 0, KER_TCP_SYN, NULL, 0);
+    first = find_request_slot(peer_port);
+    CHECK(first < listener.capacity && stream_requests[first].generation > 2);
+    custom_isn = false;
+    export_and_drain_synack((unsigned int)first);
+    inject_icmp(3, 3, stale_quote, sizeof(stale_quote));
+    CHECK(stream_requests[first].state == KER_TCP_REQUEST_SYN);
+    inject_icmp(3, 2, synack_quote[first], sizeof(synack_quote[first]));
+    CHECK(stream_requests[first].state == KER_TCP_REQUEST_FAILED &&
+          stream_requests[first].error == -EPROTONOSUPPORT &&
+          listener.hard_protocol_errors == 1 && listener.hard_port_errors == 1);
+    CHECK(ker_tcp_listener_poll(&listener, 140, 2) == 2 && !listener.count);
+
+    custom_isn = true; custom_isn_value = UINT32_C(0x44444440);
+    inject(UINT32_C(0x44440000), 0, KER_TCP_SYN, NULL, 0);
+    first = find_request_slot(peer_port); custom_isn = false;
+    export_and_drain_synack((unsigned int)first);
+    inject(UINT32_C(0x44440001), custom_isn_value + 1, KER_TCP_ACK, NULL, 0);
+    struct ker_tcp_request_handle accepted;
+    CHECK(ker_tcp_listener_accept(&listener, &accepted) == 1 &&
+          stream_requests[first].state == KER_TCP_REQUEST_READY);
+    inject_icmp(3, 3, synack_quote[first], sizeof(synack_quote[first]));
+    CHECK(stream_requests[first].state == KER_TCP_REQUEST_READY &&
+          listener.hard_port_errors == 1 && listener.hard_protocol_errors == 1);
+    CHECK(ker_tcp_listener_reset(&listener, accepted) == 0);
+    CHECK(ker_tx_export_poll(&tx, 1) == 1);
+    struct rte_mbuf *reset = NULL;
+    CHECK(ker_tx_ring_take(&output, &reset) == 1); ker_packet_free(reset);
+    CHECK(ker_tcp_listener_poll(&listener, 140, 2) == 2 && !listener.count);
+
+    monitor.busy = true;
+    CHECK(ker_tcp_listener_cleanup(&listener) == -EBUSY &&
+          listener.tx_observer.attached && tx.observers == &listener.tx_observer &&
+          icmp_service.control_observer != NULL);
+    monitor.busy = false;
+}
 int main(int argc, char **argv)
 {
     CHECK(argc == 1 || argc == 2 || argc == 3);
-    if (argc >= 2) {
+    syn_error_mode = argc == 2 && !strcmp(argv[1], "syn-errors");
+    if (argc >= 2 && !syn_error_mode) {
         char *end; errno = 0; long fd = strtol(argv[1], &end, 10);
         CHECK(!errno && end != argv[1] && !*end && fd >= 0 && fd <= INT_MAX);
         tap = (int)fd; CHECK(fcntl(tap, F_SETFL, O_NONBLOCK) == 0);
@@ -1881,6 +2117,7 @@ int main(int argc, char **argv)
         host_rto_mode = argc == 3 && !strcmp(argv[2], "rto");
     }
     local_ip = rte_cpu_to_be_32(0xc0000201); peer_ip = rte_cpu_to_be_32(0xc0000202);
+    monitor_ip = rte_cpu_to_be_32(0xc0000209);
     local_port = rte_cpu_to_be_16(9000); peer_port = rte_cpu_to_be_16(8000);
     ker_test_eal_init(); CHECK(ker_memory_init(SOCKET_ID_ANY, 7) == 0);
     CHECK(ker_packet_pool_init(&pool, "tcp_listen", 127, 0, 4096, SOCKET_ID_ANY) == 0);
@@ -1889,11 +2126,25 @@ int main(int argc, char **argv)
     CHECK(ker_arp_device_setup(&device) == 0);
     CHECK(ker_ipv4_address_init(&address, &device, local_ip, 24) == 0);
     CHECK(ker_neighbor_table_init(&neighbors, &address, "tcp_listen_neigh", 4, 2) == 0);
+    struct ker_neighbor_config neighbor_config = {.retrans_ticks=20, .reachable_ticks=100,
+        .delay_ticks=30, .ucast_probes=2, .mcast_probes=2, .mcast_reprobes=1,
+        .queue_bytes=8192};
+    CHECK(ker_neighbor_configure(&neighbors, &neighbor_config) == 0);
     CHECK(ker_neighbor_add(&neighbors, peer_ip, peer_mac) == 0);
+    if (syn_error_mode) CHECK(ker_neighbor_add(&neighbors, monitor_ip, router_mac) == 0);
     CHECK(ker_tx_ring_init(&output, "tcp_listen_out", 1, SOCKET_ID_ANY) == 0);
     CHECK(ker_tx_export_init(&tx, &context, 2, 16384, sink, NULL) == 0);
     CHECK(ker_receive_runtime_init(&runtime, &context) == 0);
     CHECK(ker_transport_receiver_register(&receiver, &runtime, &device, receive_message, NULL) == 0);
+    if (syn_error_mode) {
+        ker_runtime_init(&monitor_runtime);
+        CHECK(ker_neighbor_monitor_init(&monitor, &neighbors, &monitor_runtime, monitor_ip,
+            monitor_probe, NULL, NULL) == 0);
+        CHECK(ker_neighbor_monitor_resolution_enable(&monitor, &tx) == 0);
+        struct ker_icmpv4_service_config icmp_config = {.ttl=64, .burst=4,
+            .refill_ms=100, .monotonic_ms=service_clock};
+        CHECK(ker_icmpv4_service_enable(&icmp_service, &receiver, &monitor, &icmp_config) == 0);
+    }
     config = (struct ker_tcp_listener_config){.port = local_port, .window = 1024,
         .mss = host_reorder_mode ? 256 : 1460, .ttl = 64, .retry_ms = tap < 0 ? 10 : 100,
         .timeout_ms = tap < 0 ? 30 : (host_persist_mode || host_rto_mode) ? 30000 : 3000, .next_isn = next_isn,
@@ -1912,12 +2163,19 @@ int main(int argc, char **argv)
             config.reorder_storage_size = sizeof(host_reorder_storage);
         }
     }
-    CHECK(ker_tcp_listener_init(&listener, &receiver, &neighbors, peer_ip, &tx,
+    if (!syn_error_mode) CHECK(ker_tcp_listener_init(&listener, &receiver, &neighbors, peer_ip, &tx,
         requests, 1, &config, tap < 0 ? 100 : now_ms()) == 0);
+    else config.syn_hard_errors = true;
     CHECK(ker_arp_responder_register(&arp, &runtime, &address, &tx) == 0);
-    if (tap < 0) { test_listener(); test_stream(); test_passive_close(); test_passive_adaptive_rto(); }
+    if (syn_error_mode) test_passive_syn_errors();
+    else if (tap < 0) { test_listener(); test_stream(); test_passive_close(); test_passive_adaptive_rto(); }
     else test_host();
     CHECK(ker_tcp_listener_cleanup(&listener) == 0);
+    if (syn_error_mode) {
+        CHECK(ker_icmpv4_service_disable(&icmp_service) == 0);
+        CHECK(ker_neighbor_monitor_cleanup(&monitor) == 0);
+        CHECK(ker_neighbor_remove(&neighbors, monitor_ip) == 0);
+    }
     CHECK(ker_arp_responder_unregister(&arp) == 0);
     CHECK(ker_transport_receiver_unregister(&receiver) == 0);
     CHECK(ker_receive_runtime_cleanup(&runtime) == 0);

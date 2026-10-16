@@ -3,6 +3,7 @@
 #include "runtime/neighbor.h"
 #include "runtime/transport-receive.h"
 #include "runtime/tx-export.h"
+struct ker_icmpv4_service;
 
 /* Fixed-peer profile; optional bounded passive streams and FIN close. */
 enum ker_tcp_request_state { KER_TCP_REQUEST_FREE, KER_TCP_REQUEST_SYN,
@@ -28,6 +29,11 @@ struct ker_tcp_request {
     uint32_t reorder_fin_sequence;
     uint64_t rtt_srtt_x8, rttvar_x8, rto_ms, send_first_tx_ms;
     bool send_rtt_eligible, send_retransmitted, send_zero_window_probe;
+    bool synack_accepted;
+    __be32 synack_source, synack_destination;
+    __be16 synack_identification, synack_fragment;
+    uint16_t synack_ip_length;
+    uint32_t synack_sequence;
 };
 struct ker_tcp_listener;
 struct ker_tcp_request_handle {
@@ -69,6 +75,9 @@ struct ker_tcp_listener_config {
     /* Opt in to adaptive RTT estimation/backoff for ordinary DATA flights.
      * SYN, FIN, and zero-window probes retain fixed retry behavior. */
     bool adaptive_rto;
+    /* Correlate opt-in ICMPv4 protocol/port unreachable errors for half-open
+     * SYN-ACKs. Requires an enabled ICMPv4 service on the same receiver. */
+    bool syn_hard_errors;
 };
 struct ker_tcp_listener {
     struct ker_transport_receiver *receiver;
@@ -83,6 +92,9 @@ struct ker_tcp_listener {
     uint64_t timed_out, dropped_full;
     int last_tx_error;
     bool busy;
+    uint64_t hard_protocol_errors, hard_port_errors;
+    struct ker_tx_export_observer tx_observer;
+    struct ker_icmpv4_service *icmp_service;
 };
 /* Stable zero-initialized listener and request storage. Peer must have a
  * permanent neighbor mapping; only its local-unicast IPv4 packets are served.
