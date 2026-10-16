@@ -78,3 +78,4 @@ ARP learning and unresolved packet queues remain unsupported.
 ICMPv4 通用报文和控制服务边界见 [ICMPv4 控制层](docs/linux-icmpv4-control.md)。该服务不实现 socket 错误队列或 PMTU policy/cache；socket、路由与 IPv4 重组仍未接入。
 
 F-Stack 外部测试场景的适配范围与追溯见 [测试迁移](docs/fstack-tests.md)，每个适配场景独立运行真实 DPDK 回归测试。
+借用现有 DPDK ethdev TX 队列的生命周期与所有权约束见 [ethdev TX adapter](docs/dpdk-ethdev-tx.md)。
