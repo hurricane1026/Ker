@@ -208,6 +208,21 @@ if(KER_WITH_DPDK)
     add_test(NAME ethdev-duplex COMMAND ker-ethdev-duplex-test)
     set_tests_properties(ethdev-duplex PROPERTIES TIMEOUT 30
         ENVIRONMENT "LD_LIBRARY_PATH=${KER_ETHDEV_TEST_LIBRARY_PATH}:$ENV{LD_LIBRARY_PATH}")
+    add_executable(ker-ethdev-multiqueue-test ethdev-multiqueue.c)
+    target_include_directories(ker-ethdev-multiqueue-test PRIVATE "${PROJECT_SOURCE_DIR}/src"
+        "${PROJECT_SOURCE_DIR}/third_party/dpdk/drivers/net/ring")
+    target_compile_definitions(ker-ethdev-multiqueue-test PRIVATE _GNU_SOURCE)
+    target_link_libraries(ker-ethdev-multiqueue-test PRIVATE "${KER_NET_RING_PMD}"
+        ker_ethdev_tx_port ker_ethdev_rx_port ker_skb_headers ker_neighbor_headers
+        ker_receive_headers ker_eth_headers ker_linux_port ker_skb_port ker_dpdk_port
+        ker_eth_port ker_receive_port ker_neighbor_port ker_address_port
+        ker_ipv4_view_port ker_udp_view_port ker_tcp_view_port ker_icmpv4_view_port
+        ker_icmp_echo_view_port ker_transport_receive_port ker_udp_create_port
+        ker_tcp_create_port ker_tx_export_port ker_timer_list_port
+        PkgConfig::DPDK Threads::Threads)
+    add_test(NAME ethdev-multiqueue COMMAND ker-ethdev-multiqueue-test)
+    set_tests_properties(ethdev-multiqueue PROPERTIES TIMEOUT 45 SKIP_RETURN_CODE 77
+        ENVIRONMENT "LD_LIBRARY_PATH=${KER_ETHDEV_TEST_LIBRARY_PATH}:$ENV{LD_LIBRARY_PATH}")
     add_executable(ker-tx-ring-test tx-ring.c)
     target_include_directories(ker-tx-ring-test PRIVATE "${PROJECT_SOURCE_DIR}/src")
     target_compile_definitions(ker-tx-ring-test PRIVATE _GNU_SOURCE)
