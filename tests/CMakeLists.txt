@@ -162,6 +162,23 @@ if(KER_WITH_DPDK)
         ker_tx_export_port Threads::Threads)
     add_test(NAME tx-export-chain COMMAND ker-tx-export-chain-test)
     set_tests_properties(tx-export-chain PROPERTIES TIMEOUT 30)
+    add_executable(ker-ethdev-tx-test ethdev-tx.c)
+    file(GLOB KER_NET_RING_PMD_CANDIDATES
+        "${KER_DPDK_PKGCONFIG_DIR}/../dpdk/pmds-*/librte_net_ring.so")
+    if(NOT KER_NET_RING_PMD_CANDIDATES)
+        message(FATAL_ERROR "ethdev-tx requires the pinned DPDK net_ring PMD; build with KER_DPDK_DRIVERS=mempool/ring,net/ring")
+    endif()
+    list(GET KER_NET_RING_PMD_CANDIDATES 0 KER_NET_RING_PMD)
+    target_include_directories(ker-ethdev-tx-test PRIVATE "${PROJECT_SOURCE_DIR}/src"
+        "${PROJECT_SOURCE_DIR}/third_party/dpdk/drivers/net/ring")
+    target_compile_definitions(ker-ethdev-tx-test PRIVATE _GNU_SOURCE)
+    target_link_libraries(ker-ethdev-tx-test PRIVATE ker_ethdev_tx_port ker_skb_headers
+        ker_neighbor_headers ker_linux_port ker_dpdk_port ker_skb_port ker_address_port ker_neighbor_port ker_tx_export_port
+        "${KER_NET_RING_PMD}" PkgConfig::DPDK Threads::Threads)
+    add_test(NAME ethdev-tx COMMAND ker-ethdev-tx-test)
+    string(JOIN ":" KER_ETHDEV_TEST_LIBRARY_PATH ${DPDK_LIBRARY_DIRS})
+    set_tests_properties(ethdev-tx PROPERTIES TIMEOUT 30
+        ENVIRONMENT "LD_LIBRARY_PATH=${KER_ETHDEV_TEST_LIBRARY_PATH}:$ENV{LD_LIBRARY_PATH}")
     add_executable(ker-tx-ring-test tx-ring.c)
     target_include_directories(ker-tx-ring-test PRIVATE "${PROJECT_SOURCE_DIR}/src")
     target_compile_definitions(ker-tx-ring-test PRIVATE _GNU_SOURCE)
