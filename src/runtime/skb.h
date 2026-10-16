@@ -33,6 +33,12 @@ int ker_skb_from_mbuf(struct ker_skb_context *ctx, struct rte_mbuf *packet, stru
  * interpreted on the head mbuf only, as defined by DPDK. */
 int ker_skb_copy_from_mbuf_chain(struct ker_skb_context *ctx,
     const struct rte_mbuf *chain, unsigned int headroom, struct sk_buff **result);
+/* Explicit borrowed-input copy profile. The input must be a valid DPDK mbuf
+ * chain owned by the caller through this call. The caller guarantees immutable
+ * bytes, descriptors and topology. Direct shared refs and DPDK indirect clones are accepted;
+ * external buffers and transformed RX metadata remain unsupported. */
+int ker_skb_copy_from_mbuf_chain_borrowed(struct ker_skb_context *ctx,
+    const struct rte_mbuf *chain, unsigned int headroom, struct sk_buff **result);
 /* Validate a bridge skb and its owning context without taking a reference. */
 int ker_skb_validate(struct sk_buff *skb, struct ker_skb_context *ctx);
 /* Stable identity for a live Ker descriptor, including while queued. This

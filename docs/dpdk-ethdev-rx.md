@@ -21,8 +21,27 @@ Malformed or unsupported frames are consumed and counted as drops. Queue
 configuration, hardware capabilities, offloads, port lifecycle, and NIC
 behavior remain caller/driver responsibilities.
 
+`ker_ethdev_rx_init` keeps the unique-reference copy profile: direct segments
+must have reference count one, and indirect chains are rejected. The explicit
+`KER_ETHDEV_RX_COPY_IMMUTABLE_BORROWED` profile accepts shared direct segments
+and valid DPDK indirect clones. The adapter owns the descriptor reference
+received from the queue. The caller guarantees that the descriptors, chain
+topology, and backing bytes remain immutable until the adapter consumes or
+returns that reference; any independent backing references the caller needs
+must remain live. A sibling clone can retain shared backing without requiring
+an extra reference to the queued clone descriptor. This profile copies bytes
+into Ker-owned skb
+storage; it does not transfer or modify the caller's references. External
+buffers, invalid clone/backing geometry, and transformed RX metadata remain
+unsupported and are consumed as drops. Pool-allocation `-ENOMEM` retains the
+adapter's chain reference for retry; `cancel` returns that same reference.
+
 The `ethdev-rx` test injects real mbuf chains through DPDK's `net_ring` PMD,
-including an Ethernet header split across segments, and verifies worker-budget
-polling, FIFO dispatch, pool-pressure retry, cancellation, and binding
-exclusion. This is a Ker RX-adapter test, not a claim of physical-NIC, RSS,
-socket, or full-stack support.
+including an Ethernet header split across segments and actual `rte_pktmbuf_clone`
+chains. It checks default unique-only rejection, borrowed direct/indirect copy,
+parent and sibling lifetime, original-reference release before copying,
+pool-pressure retry, cancellation, malformed/metadata rejection, worker-budget
+FIFO, and binding exclusion. These Ker tests add shared-reference behavior
+beyond the pinned F-Stack free/fanout scenarios; those upstream cases do not
+test indirect-clone RX. This is not a claim of physical-NIC, RSS, socket, or
+full-stack support.
