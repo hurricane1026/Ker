@@ -173,7 +173,8 @@ if(KER_WITH_DPDK)
         "${PROJECT_SOURCE_DIR}/third_party/dpdk/drivers/net/ring")
     target_compile_definitions(ker-ethdev-tx-test PRIVATE _GNU_SOURCE)
     target_link_libraries(ker-ethdev-tx-test PRIVATE ker_ethdev_tx_port ker_skb_headers
-        ker_neighbor_headers ker_linux_port ker_dpdk_port ker_skb_port ker_address_port ker_neighbor_port ker_tx_export_port
+        ker_neighbor_headers ker_linux_port ker_dpdk_port ker_skb_port ker_address_port ker_neighbor_port
+        ker_udp_create_port ker_tcp_create_port ker_tx_export_port
         "${KER_NET_RING_PMD}" PkgConfig::DPDK Threads::Threads)
     add_test(NAME ethdev-tx COMMAND ker-ethdev-tx-test)
     string(JOIN ":" KER_ETHDEV_TEST_LIBRARY_PATH ${DPDK_LIBRARY_DIRS})

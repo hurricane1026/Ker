@@ -19,11 +19,23 @@ struct ker_ethdev_tx {
  * PMDs such as net_ring that do not implement tx_done_cleanup. */
 typedef int (*ker_ethdev_tx_reclaim_fn)(uint16_t, uint16_t, uint32_t, void *);
 
+enum ker_ethdev_tx_checksum_mode {
+    KER_ETHDEV_TX_CHECKSUM_COPY,
+    KER_ETHDEV_TX_CHECKSUM_SOFTWARE,
+    KER_ETHDEV_TX_CHECKSUM_SOFTWARE_EXACT,
+};
+
 /* Initialize tx to {0}. Port/queue setup, start, stop and removal stay with
  * the caller. The port must enable TX multisegment support. */
 int ker_ethdev_tx_init(struct ker_ethdev_tx *, struct ker_skb_context *,
     uint16_t port_id, uint16_t queue_id, unsigned int packet_limit,
     size_t byte_limit, unsigned int segment_payload_limit);
+/* Private opt-in: complete supported CHECKSUM_PARTIAL packets in the copied
+ * chain. EXACT preserves a folded zero; the caller selects protocol policy. */
+int ker_ethdev_tx_init_mode(struct ker_ethdev_tx *, struct ker_skb_context *,
+    uint16_t port_id, uint16_t queue_id, unsigned int packet_limit,
+    size_t byte_limit, unsigned int segment_payload_limit,
+    enum ker_ethdev_tx_checksum_mode);
 /* Worker TX callback; delegates to the bounded copied-packet exporter. */
 int ker_ethdev_tx_poll(void *, unsigned int budget);
 int ker_ethdev_tx_poll_with_reclaim(struct ker_ethdev_tx *, unsigned int budget,

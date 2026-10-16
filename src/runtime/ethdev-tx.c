@@ -32,10 +32,14 @@ static uint16_t reported_segment_limit(const struct rte_eth_dev_info *info)
     return mtu_limit < total_limit ? mtu_limit : total_limit;
 }
 
-int ker_ethdev_tx_init(struct ker_ethdev_tx *tx, struct ker_skb_context *ctx,
+int ker_ethdev_tx_init_mode(struct ker_ethdev_tx *tx, struct ker_skb_context *ctx,
     uint16_t port_id, uint16_t queue_id, unsigned int packet_limit,
-    size_t byte_limit, unsigned int segment_payload_limit)
+    size_t byte_limit, unsigned int segment_payload_limit,
+    enum ker_ethdev_tx_checksum_mode checksum_mode)
 {
+    if (checksum_mode < KER_ETHDEV_TX_CHECKSUM_COPY ||
+        checksum_mode > KER_ETHDEV_TX_CHECKSUM_SOFTWARE_EXACT)
+        return -EINVAL;
     if (!tx || !ctx || !packet_limit || !byte_limit || !segment_payload_limit)
         return -EINVAL;
     if (tx->initialized || tx->polling || tx->last_cleanup_error || tx->port_id || tx->queue_id || tx->max_segments ||
@@ -69,14 +73,29 @@ int ker_ethdev_tx_init(struct ker_ethdev_tx *tx, struct ker_skb_context *ctx,
     tx->max_segments = reported_segment_limit(&info);
     tx->owner_lcore = ctx->lcore;
     tx->initialized = true;
-    rc = ker_tx_export_init_chain(&tx->exporter, ctx, packet_limit, byte_limit,
-        segment_payload_limit, ethdev_sink, tx);
+    if (checksum_mode == KER_ETHDEV_TX_CHECKSUM_COPY)
+        rc = ker_tx_export_init_chain(&tx->exporter, ctx, packet_limit, byte_limit,
+            segment_payload_limit, ethdev_sink, tx);
+    else if (checksum_mode == KER_ETHDEV_TX_CHECKSUM_SOFTWARE)
+        rc = ker_tx_export_init_chain_software_checksum(&tx->exporter, ctx,
+            packet_limit, byte_limit, segment_payload_limit, ethdev_sink, tx);
+    else
+        rc = ker_tx_export_init_chain_software_checksum_exact(&tx->exporter, ctx,
+            packet_limit, byte_limit, segment_payload_limit, ethdev_sink, tx);
     if (rc) {
         memset(tx, 0, sizeof(*tx));
         return rc;
     }
     tx->exporter.ethdev_refs++;
     return 0;
+}
+
+int ker_ethdev_tx_init(struct ker_ethdev_tx *tx, struct ker_skb_context *ctx,
+    uint16_t port_id, uint16_t queue_id, unsigned int packet_limit,
+    size_t byte_limit, unsigned int segment_payload_limit)
+{
+    return ker_ethdev_tx_init_mode(tx, ctx, port_id, queue_id, packet_limit,
+        byte_limit, segment_payload_limit, KER_ETHDEV_TX_CHECKSUM_COPY);
 }
 
 int ker_ethdev_tx_poll(void *arg, unsigned int budget)
