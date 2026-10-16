@@ -57,3 +57,15 @@ tests add shared-reference behavior
 beyond the pinned F-Stack free/fanout scenarios; those upstream cases do not
 test indirect-clone RX. This is not a claim of physical-NIC, RSS, socket, or
 full-stack support.
+
+The `ethdev-rebind` regression exercises this caller-owned lifecycle on one
+configured RX queue of a started `net_ring` port. A successor frame is queued
+behind a pending packet before detach; after the pending packet is canceled,
+cleanup releases Ker's binding pins but does not drain the successor. A later
+adapter generation on the same queue receives the preserved frame before a new
+frame. Callers that need generation isolation must quiesce and explicitly drain
+or discard queued frames before rebinding, while keeping the port and its queue
+pool alive. This test covers raw Ethernet classification
+and IPv4-header checksum validation only; it does not exercise transport state
+or TX. The pinned F-Stack registration roundtrip motivates the lifecycle case
+but does not promise queue flushing.

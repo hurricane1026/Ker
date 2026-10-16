@@ -371,6 +371,11 @@
       "source_case": "test_main_loop_one_iteration_then_stop",
       "adaptation": "Ker-specific borrowed ethdev RX extension around the existing worker receive path. A real pinned DPDK net_ring PMD injects Ethernet frames and segmented mbuf chains; the test checks one-packet worker budgets, FIFO classification/dispatch, pool-pressure retry, cancellation, and RX binding exclusion. Opt-in immutable shared-reference profiles test direct shared segments, actual rte_pktmbuf_clone chains, and attached external-buffer chains, including caller/sibling lifetime, extbuf callbacks and allocation retry. The upstream case only motivates one worker-loop iteration and stop; pinned free/fanout scenarios do not test indirect-clone or external-buffer RX. No NIC, RSS, socket, or full-stack behavior is claimed."
     },
+    "ethdev-rebind": {
+      "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
+      "source_case": "test_ff_dpdk_register_deregister_roundtrip",
+      "adaptation": "Ker-specific borrowed ethdev RX lifecycle extension. A real started net_ring port keeps a queued successor behind a pending frame across adapter/device/runtime teardown; a fresh callback generation rebinds the same queue and consumes it first. The test covers pending-packet cleanup exclusion, exact cancellation, invalid rebind rollback, FIFO delivery and pool reclamation. The upstream registration roundtrip motivates lifecycle testing only; PMD queues are caller-owned and are not implicitly flushed, and this does not implement full F-Stack device registration."
+    },
     "ethdev-duplex": {
       "source_file": "tests/integration/test_ff_dpdk_if_integration.c",
       "source_case": [
