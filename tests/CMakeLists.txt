@@ -665,7 +665,10 @@ if(KER_WITH_DPDK)
         ${CMAKE_CURRENT_SOURCE_DIR}/tcp-host.py $<TARGET_FILE:ker-tcp-listener-test> persist)
     add_test(NAME tcp-passive-rto-host COMMAND ${Python3_EXECUTABLE}
         ${CMAKE_CURRENT_SOURCE_DIR}/tcp-host.py $<TARGET_FILE:ker-tcp-listener-test> rto)
+    add_test(NAME tcp-passive-syn-errors COMMAND ker-tcp-listener-test syn-errors)
     set_tests_properties(tcp-listener tcp-host PROPERTIES TIMEOUT 30
+        ENVIRONMENT "LD_LIBRARY_PATH=${ker_dpdk_library_path}:$ENV{LD_LIBRARY_PATH}")
+    set_tests_properties(tcp-passive-syn-errors PROPERTIES TIMEOUT 30
         ENVIRONMENT "LD_LIBRARY_PATH=${ker_dpdk_library_path}:$ENV{LD_LIBRARY_PATH}")
     set_tests_properties(tcp-host PROPERTIES SKIP_RETURN_CODE 77)
     set_tests_properties(tcp-passive-persist-host PROPERTIES TIMEOUT 45 SKIP_RETURN_CODE 77
@@ -777,7 +780,7 @@ if(KER_WITH_DPDK)
 endif()
 
 if(KER_WITH_DPDK)
-    foreach(tcp_test ker-tcp-active-test ker-tcp-stream-test ker-tcp-send-test
+    foreach(tcp_test ker-tcp-listener-test ker-tcp-active-test ker-tcp-stream-test ker-tcp-send-test
             ker-tcp-persist-test ker-tcp-close-test ker-tcp-active-reorder-test)
         target_link_libraries(${tcp_test} PRIVATE ker_icmpv4_service_port
             ker_icmpv4_create_port ker_neighbor_timer_port ker_neighbor_timer_headers

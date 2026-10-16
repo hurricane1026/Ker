@@ -8,6 +8,20 @@ neighbor table and bounded TX exporter. Upstream Linux and DPDK remain unchanged
 
 A valid payload-free SYN allocates a request only after its SYN-ACK is admitted
 to the exporter. The listener advertises a configured unscaled window and MSS.
+The opt-in `syn_hard_errors` configuration correlates only IPv4 Destination
+Unreachable protocol (code 2) and port (code 3) errors whose quoted SYN-ACK
+matches a sink-accepted packet sent to the configured peer. These fail the
+matching half-open request with `EPROTONOSUPPORT` or `ECONNREFUSED`; aggregate
+counters remain available on the listener because failed half-open requests
+have no accepted handle. Other
+unreachable codes, fragmentation, time-exceeded, parameter-problem, PMTU and
+errors outside SYN state are ignored. This is a hard-error subset; soft-error
+notification remains future work. It requires the receiver's enabled ICMP
+service and its exclusive control-observer slot; initialization returns
+`EALREADY` if another feature owns that slot. Evidence is published only after
+the SYN-ACK sink succeeds, and its exporter drain barrier remains in force.
+Use a fresh unpredictable ISN for each request; wire quotes cannot distinguish
+identical tuple/ISN reuse across listener cleanup and reinitialization.
 Optional caller-owned flat receive and send arenas enable bounded passive
 streams. Each must cover `request_capacity * its_capacity` bytes and remain
 stable until cleanup. Capacity is isolated per slot. Receive window is capped
@@ -38,7 +52,10 @@ SYN-ACK at the configured fixed interval. Retries retain the original ISNs and
 never extend the absolute deadline. Duplicate SYNs do not trigger immediate
 responses or extend deadlines. TX admission failures are available in
 `last_tx_error`; capacity remains bounded. Expired requests cannot complete,
-even if RX sees them before the next budgeted timeout scan.
+even if RX sees them before the next budgeted timeout scan. ICMP hard-error
+correlation uses this stored sample, so callers must poll before RX; a zero-slot
+budget still advances time and expires a matching SYN before the error is
+applied.
 
 `ker_tcp_listener_read` copies contiguous bytes from an accepted handle on the
 owning worker. Each request has an isolated bounded ring. Old duplicate prefixes
@@ -99,9 +116,10 @@ remain stable and must not be edited while attached. Request retirement waits
 for the exporter to drain queued frames. This is a conservative barrier across
 that entire exporter, so unrelated traffic sharing it can delay retirement.
 
-This profile supports opt-in bounded passive send/receive and FIN close, plus
-explicit abort with RST. It does not support active connect, congestion control,
-reassembly, ICMP correlation or cross-worker listener distribution.
+This profile supports opt-in bounded passive send/receive and FIN close,
+explicit abort with RST, and the documented SYN hard-error correlation subset.
+It does not support active connect, congestion control, soft ICMP error
+notification, reassembly or cross-worker listener distribution.
 With storage disabled, data remains rejected with `-EOPNOTSUPP` and an RST when
 TX admission succeeds. `reset` is transactional on TX failure; its handle becomes stale when
 poll observes the RESET request after TX drains. Full TCP transport and public
