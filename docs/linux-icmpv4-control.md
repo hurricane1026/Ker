@@ -52,6 +52,12 @@ resolver 的显式 peer monitor。旧 echo service 与新服务互斥。服务�
 配置 peer，并将 type/code、gateway、MTU、pointer 和有界引用同步交给
 `event`。这不是 socket error queue。没有事件消费者时明确返回不支持。
 引用地址匹配也不是已经发送过该流的证据；PMTU 更新还需要独立确认。
+主动 TCP 可选择安装自己的控制观察器，但仅将已由 TX sink 接受的当前
+SYN 与完整的 IPv4 identification/length、分片字段、地址、端口和序号证据
+关联，并只将 type 3/code 2、3 映射为连接失败。它不扩大通用服务对软错误、
+PMTU 或已建立 TCP 状态的行为；引用不足八个 TCP 字节时不会匹配。
+控制观察器是服务上的单一独占槽；已有其他功能占用时，主动 TCP 启用会返回
+`-EALREADY` 并回滚，不会替换现有观察器。
 
 `ker_icmpv4_service_emit_error` 借用已分类的本地入站 skb，生成受限的
 unreachable、time-exceeded 或 parameter-problem 错误。输入 skb 始终归

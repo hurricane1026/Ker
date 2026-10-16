@@ -7,6 +7,9 @@
 #include "runtime/tcp-listener.h"
 #include "runtime/tcp-create.h"
 #include "runtime/tcp-neighbor-create.h"
+#include "runtime/icmpv4-create.h"
+#include "runtime/icmpv4-service.h"
+#include "runtime/neighbor-timer.h"
 #include "runtime/tx-ring.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -15,6 +18,7 @@
 #include <sys/random.h>
 #include <time.h>
 #include <unistd.h>
+#include <net/checksum.h>
 
 static struct ker_packet_pool pool;
 static struct ker_skb_context context;
@@ -26,13 +30,24 @@ static struct ker_transport_receiver receiver;
 static struct ker_tx_export tx;
 static struct ker_tx_ring output;
 static struct ker_arp_responder arp;
+static struct ker_runtime monitor_runtime;
+static struct ker_neighbor_monitor monitor;
+static struct ker_icmpv4_service icmp_service;
 static struct ker_tcp_active active;
 static struct ker_tcp_active_config config;
 static __be32 local_ip, peer_ip;
+static __be32 monitor_ip;
 static __be16 local_port, peer_port;
 static const unsigned char local_mac[6] = {2, 0x10, 0, 0, 0, 1};
 static const unsigned char peer_mac[6] = {2, 0x20, 0, 0, 0, 1};
 static int tap = -1, isn_error;
+static bool fail_next_sink;
+static bool inject_quote_in_sink, use_test_isn;
+static uint32_t test_isn;
+static unsigned char accepted_syn_quote[28];
+static unsigned char accepted_syn_packet[44];
+static const unsigned char router_mac[6] = {2, 0x20, 0, 0, 0, 9};
+static __be32 router_ip;
 static uint16_t injected_window = 1024;
 static bool reenter;
 static bool host_rto_mode, host_drop_next_data, host_rto_dropped, host_rto_retry_seen;
@@ -45,6 +60,8 @@ static size_t host_probe_length, host_held_ack_length, host_held_second_ack_leng
 static uint64_t host_probe_started, host_probe_rto, host_release_ack_at, host_release_second_ack_at;
 static uint64_t now_ms(void);
 static uint32_t be32(const unsigned char *p);
+static void inject_icmp(uint8_t type, uint8_t code, const unsigned char *quote,
+                        unsigned int length);
 static int receive_message(const struct ker_transport_message *m, void *arg)
 { (void)m; (void)arg; return NET_RX_DROP; }
 static int next_isn(void *arg, __be16 port, uint32_t *out)
@@ -62,7 +79,7 @@ static int next_isn(void *arg, __be16 port, uint32_t *out)
         CHECK(ker_tx_export_cleanup(&tx) == -EBUSY);
     }
     if (isn_error) return isn_error;
-    if (tap < 0) *out = UINT32_MAX; /* Deterministic tests only. */
+    if (tap < 0) *out = use_test_isn ? test_isn : UINT32_MAX; /* Deterministic tests only. */
     else {
         ssize_t n = getrandom(out, sizeof(*out), GRND_NONBLOCK);
         if (n < 0) return -errno;
@@ -73,12 +90,23 @@ static int next_isn(void *arg, __be16 port, uint32_t *out)
 static int sink(struct rte_mbuf *m, void *arg)
 {
     (void)arg;
-    if (tap < 0) return ker_tx_ring_sink(m, &output);
+    if (fail_next_sink) { fail_next_sink = false; return -EIO; }
+    if (tap < 0 && !inject_quote_in_sink) return ker_tx_ring_sink(m, &output);
     unsigned char bytes[2048];
     if (m->pkt_len > sizeof(bytes)) return -EMSGSIZE;
     const void *data = rte_pktmbuf_read(m, 0, m->pkt_len, bytes);
     if (!data) return -EIO;
     if (data != bytes) memcpy(bytes, data, m->pkt_len);
+    if (inject_quote_in_sink && m->pkt_len >= 58 && bytes[12] == 8 &&
+        bytes[13] == 0 && bytes[23] == 6 && bytes[47] == KER_TCP_SYN) {
+        unsigned char quote[28];
+        memcpy(quote, bytes + 14, sizeof(quote));
+        inject_quote_in_sink = false;
+        inject_icmp(3, 3, quote, sizeof(quote));
+        CHECK(active.status.state == KER_TCP_ACTIVE_SYN);
+        CHECK(ker_tcp_active_cleanup(&active) == -EBUSY);
+    }
+    if (tap < 0) return ker_tx_ring_sink(m, &output);
     if (host_rto_mode && m->pkt_len >= 54 && bytes[12] == 0x08 && bytes[13] == 0x00 &&
         (bytes[14] >> 4) == 4 && bytes[23] == 6) {
         unsigned int ihl = (bytes[14] & 15U) * 4U;
@@ -158,12 +186,54 @@ static void drain(uint8_t flags)
     CHECK(tcp[13] == flags);
     CHECK(be32(tcp + 4) == (flags & KER_TCP_SYN ? UINT32_MAX : 0));
     CHECK(be32(tcp + 8) == 0);
+    if (flags == KER_TCP_SYN) {
+        memcpy(accepted_syn_quote, rte_pktmbuf_mtod(frame, const unsigned char *) + 14,
+            sizeof(accepted_syn_quote));
+    }
     ker_packet_free(frame);
 }
+static uint64_t service_clock(void *arg) { (void)arg; return active.now_ms; }
+static void monitor_probe(const struct ker_neighbor_event *event, void *arg)
+{ (void)event; (void)arg; }
+static void inject_icmp(uint8_t type, uint8_t code, const unsigned char *quote,
+                        unsigned int length)
+{
+    unsigned char rest[4] = {0}; struct sk_buff *skb = NULL;
+    CHECK(ker_icmpv4_ipv4_create(&context, router_mac, local_mac, router_ip,
+        local_ip, type, code, rest, 64, quote, length, &skb) == 0);
+    struct rte_mbuf *frame = NULL;
+    CHECK(ker_skb_to_mbuf(skb, &frame) == 0 && ker_skb_free(skb) == 0);
+    dispatch(frame);
+}
+static void inject_truncated_quote(const unsigned char *quote)
+{
+    unsigned char rest[4] = {0}; struct sk_buff *skb = NULL;
+    CHECK(ker_icmpv4_ipv4_create(&context, router_mac, local_mac, router_ip,
+        local_ip, 3, 3, rest, 64, quote, 28, &skb) == 0);
+    CHECK(ker_skb_trim(skb, skb->len - 1) == 0);
+    unsigned char *ip = skb->data + ETH_HLEN;
+    unsigned int total = skb->len - ETH_HLEN;
+    ip[2] = (unsigned char)(total >> 8); ip[3] = (unsigned char)total;
+    ip[10] = ip[11] = 0;
+    __sum16 ip_sum = csum_fold(csum_partial(ip, 20, 0));
+    memcpy(ip + 10, &ip_sum, 2);
+    unsigned char *icmp = ip + 20;
+    unsigned int icmp_length = total - 20;
+    icmp[2] = icmp[3] = 0;
+    __sum16 icmp_sum = csum_fold(csum_partial(icmp, (int)icmp_length, 0));
+    memcpy(icmp + 2, &icmp_sum, 2);
+    struct rte_mbuf *frame = NULL;
+    CHECK(ker_skb_to_mbuf(skb, &frame) == 0 && ker_skb_free(skb) == 0);
+    dispatch(frame);
+}
+static int dummy_control(const struct ker_icmpv4_control_event *event, void *arg)
+{ (void)event; (void)arg; return 0; }
 static void start(uint64_t now)
 {
     reenter = true;
-    CHECK(ker_tcp_active_start(&active, &receiver, &neighbors, peer_ip, &tx, &config, now) == 0);
+    int error = ker_tcp_active_start(&active, &receiver, &neighbors, peer_ip, &tx, &config, now);
+    if (error) fprintf(stderr, "tcp active start failed: %d\n", error);
+    CHECK(error == 0);
     reenter = false;
 }
 static uint64_t now_ms(void)
@@ -306,6 +376,124 @@ static void test_active(void)
     drain(KER_TCP_RST | KER_TCP_ACK); CHECK(ker_tcp_active_cleanup(&active) == 0);
     start(700); drain(KER_TCP_SYN);
     CHECK(ker_tcp_active_reset(&active) == 0); drain(KER_TCP_RST);
+    CHECK(ker_tcp_active_cleanup(&active) == 0);
+
+    config.syn_hard_errors = true;
+    CHECK(ker_icmpv4_service_control_observer_attach(&icmp_service,
+        dummy_control, NULL) == 0);
+    unsigned int refs_before = tx.active_refs;
+    int attach_error = ker_tcp_active_start(&active, &receiver, &neighbors, peer_ip, &tx,
+        &config, 790);
+    if (attach_error != -EALREADY) fprintf(stderr, "service observer conflict returned %d\n", attach_error);
+    CHECK(attach_error == -EALREADY);
+    CHECK(!active.receiver && tx.active_refs == refs_before &&
+        icmp_service.control_observer == dummy_control);
+    CHECK(ker_icmpv4_service_control_observer_detach(&icmp_service,
+        dummy_control, NULL) == 0);
+    test_isn = UINT32_C(0x10203040); use_test_isn = true;
+    start(800);
+    use_test_isn = false;
+    CHECK(ker_icmpv4_service_disable(&icmp_service) == -EBUSY);
+    CHECK(ker_tx_export_cleanup(&tx) == -EBUSY);
+    CHECK(ker_tcp_active_cleanup(&active) == -EBUSY);
+    fail_next_sink = true;
+    int poll_result = ker_tx_export_poll(&tx, 1);
+    CHECK(poll_result == -EIO && tx.last_error == -EIO);
+    unsigned char quote[28];
+    CHECK(tx.pending && tx.pending->len >= 42);
+    memcpy(quote, tx.pending->data + ETH_HLEN, sizeof(quote));
+    inject_icmp(3, 3, quote, sizeof(quote)); /* Not sink-accepted yet. */
+    CHECK(active.status.state == KER_TCP_ACTIVE_SYN);
+    inject_quote_in_sink = true;
+    CHECK(ker_tx_export_poll(&tx, 1) == 1);
+    struct rte_mbuf *accepted_frame = NULL;
+    CHECK(ker_tx_ring_take(&output, &accepted_frame) == 1);
+    memcpy(accepted_syn_quote, rte_pktmbuf_mtod(accepted_frame, const unsigned char *) + 14,
+        sizeof(accepted_syn_quote));
+    memcpy(accepted_syn_packet, rte_pktmbuf_mtod(accepted_frame, const unsigned char *) + 14,
+        sizeof(accepted_syn_packet));
+    ker_packet_free(accepted_frame);
+    memcpy(quote, accepted_syn_quote, sizeof(quote));
+    CHECK(active.syn_accepted);
+    CHECK(ker_tcp_active_poll(&active, 810) == 1);
+    CHECK(ker_tx_export_poll(&tx, 1) == 1);
+    CHECK(ker_tx_ring_take(&output, &accepted_frame) == 1);
+    CHECK(!memcmp(accepted_syn_packet, rte_pktmbuf_mtod(accepted_frame, const unsigned char *) + 14,
+        sizeof(accepted_syn_packet)) && active.syn_accepted);
+    ker_packet_free(accepted_frame);
+    unsigned char malformed[28];
+    memcpy(malformed, quote, sizeof(malformed)); malformed[24] ^= 1;
+    inject_icmp(3, 3, malformed, sizeof(malformed));
+    inject_truncated_quote(quote);
+    memcpy(malformed, quote, sizeof(malformed)); malformed[12] ^= 1;
+    inject_icmp(3, 3, malformed, sizeof(malformed));
+    memcpy(malformed, quote, sizeof(malformed)); malformed[16] ^= 1;
+    inject_icmp(3, 3, malformed, sizeof(malformed));
+    memcpy(malformed, quote, sizeof(malformed)); malformed[20] ^= 1;
+    inject_icmp(3, 3, malformed, sizeof(malformed));
+    memcpy(malformed, quote, sizeof(malformed)); malformed[22] ^= 1;
+    inject_icmp(3, 3, malformed, sizeof(malformed));
+    memcpy(malformed, quote, sizeof(malformed)); malformed[4] ^= 1;
+    inject_icmp(3, 3, malformed, sizeof(malformed));
+    memcpy(malformed, quote, sizeof(malformed)); malformed[6] = 0x20;
+    inject_icmp(3, 3, malformed, sizeof(malformed)); /* MF is not this SYN. */
+    memcpy(malformed, quote, sizeof(malformed)); malformed[9] = 17;
+    inject_icmp(3, 3, malformed, sizeof(malformed));
+    const uint8_t ignored_codes[] = {0, 1, 4, 5, 9, 10, 13};
+    for (unsigned int i = 0; i < sizeof(ignored_codes); ++i)
+        inject_icmp(3, ignored_codes[i], quote, sizeof(quote));
+    inject_icmp(11, 0, quote, sizeof(quote));
+    inject_icmp(12, 0, quote, sizeof(quote));
+    CHECK(active.status.state == KER_TCP_ACTIVE_SYN);
+    inject_icmp(3, 3, quote, sizeof(quote));
+    CHECK(active.status.state == KER_TCP_ACTIVE_FAILED &&
+        active.status.error == -ECONNREFUSED && active.status.icmp_error_type == 3 &&
+        active.status.icmp_error_code == 3);
+    inject_icmp(3, 2, quote, sizeof(quote));
+    CHECK(active.status.error == -ECONNREFUSED && active.status.icmp_error_code == 3);
+    CHECK(ker_tcp_active_poll(&active, 811) == 0);
+    CHECK(active.status.state == KER_TCP_ACTIVE_FAILED &&
+        active.status.error == -ECONNREFUSED && active.status.icmp_error_code == 3);
+    CHECK(ker_tcp_active_cleanup(&active) == 0);
+
+    test_isn = UINT32_C(0x50607080); use_test_isn = true;
+    start(900); /* A distinct fresh ISN binds the new incarnation. */
+    use_test_isn = false;
+    CHECK(ker_tx_export_poll(&tx, 1) == 1);
+    CHECK(ker_tx_ring_take(&output, &accepted_frame) == 1);
+    memcpy(quote, rte_pktmbuf_mtod(accepted_frame, const unsigned char *) + 14, sizeof(quote));
+    ker_packet_free(accepted_frame);
+    inject_icmp(3, 3, accepted_syn_quote, sizeof(accepted_syn_quote));
+    CHECK(active.status.state == KER_TCP_ACTIVE_SYN); /* Previous incarnation. */
+    inject_icmp(3, 2, quote, sizeof(quote));
+    CHECK(active.status.state == KER_TCP_ACTIVE_FAILED &&
+        active.status.error == -EPROTONOSUPPORT && active.status.icmp_error_code == 2);
+    CHECK(ker_tcp_active_cleanup(&active) == 0);
+
+    test_isn = UINT32_MAX; use_test_isn = true;
+    start(950); use_test_isn = false;
+    CHECK(ker_tx_export_poll(&tx, 1) == 1);
+    CHECK(ker_tx_ring_take(&output, &accepted_frame) == 1);
+    memcpy(quote, rte_pktmbuf_mtod(accepted_frame, const unsigned char *) + 14, sizeof(quote));
+    ker_packet_free(accepted_frame);
+    inject(UINT32_MAX, test_isn + 1U, KER_TCP_SYN | KER_TCP_ACK, NULL, 0);
+    CHECK(active.status.state == KER_TCP_ACTIVE_READY);
+    drain(KER_TCP_ACK);
+    inject_icmp(3, 3, quote, sizeof(quote));
+    CHECK(active.status.state == KER_TCP_ACTIVE_READY && !active.status.icmp_error_type);
+    CHECK(ker_tcp_active_reset(&active) == 0); drain(KER_TCP_RST | KER_TCP_ACK);
+    CHECK(ker_tcp_active_cleanup(&active) == 0);
+
+    start(1000);
+    CHECK(ker_tx_export_poll(&tx, 1) == 1);
+    CHECK(ker_tx_ring_take(&output, &accepted_frame) == 1);
+    memcpy(quote, rte_pktmbuf_mtod(accepted_frame, const unsigned char *) + 14, sizeof(quote));
+    ker_packet_free(accepted_frame);
+    CHECK(ker_tcp_active_poll(&active, 1030) == 1 &&
+        active.status.error == -ETIMEDOUT);
+    inject_icmp(3, 3, quote, sizeof(quote));
+    CHECK(active.status.error == -ETIMEDOUT && !active.status.icmp_error_type);
+    CHECK(ker_tcp_active_cleanup(&active) == 0);
 }
 #elif defined(KER_TCP_CLOSE_TEST)
 #include "tcp-close-cases.h"
@@ -328,6 +516,8 @@ int main(int argc, char **argv)
     }
     if (argc == 3) { CHECK(!strcmp(argv[2], "rto")); host_rto_mode = true; }
     local_ip = rte_cpu_to_be_32(0xc0000201); peer_ip = rte_cpu_to_be_32(0xc0000202);
+    router_ip = rte_cpu_to_be_32(0xc0000209);
+    monitor_ip = router_ip;
     local_port = rte_cpu_to_be_16(9000); peer_port = rte_cpu_to_be_16(8000);
     ker_test_eal_init(); CHECK(ker_memory_init(SOCKET_ID_ANY, 7) == 0);
     CHECK(ker_packet_pool_init(&pool, "tcp_active", 127, 0, 4096, SOCKET_ID_ANY) == 0);
@@ -336,11 +526,23 @@ int main(int argc, char **argv)
     CHECK(ker_arp_device_setup(&device) == 0);
     CHECK(ker_ipv4_address_init(&address, &device, local_ip, 24) == 0);
     CHECK(ker_neighbor_table_init(&neighbors, &address, "tcp_active_neigh", 4, 2) == 0);
+    struct ker_neighbor_config neighbor_config = {.retrans_ticks=20, .reachable_ticks=100,
+        .delay_ticks=30, .ucast_probes=2, .mcast_probes=2, .mcast_reprobes=1,
+        .queue_bytes=8192};
+    CHECK(ker_neighbor_configure(&neighbors, &neighbor_config) == 0);
     CHECK(ker_neighbor_add(&neighbors, peer_ip, peer_mac) == 0);
+    CHECK(ker_neighbor_add(&neighbors, monitor_ip, router_mac) == 0);
     CHECK(ker_tx_ring_init(&output, "tcp_active_out", 1, SOCKET_ID_ANY) == 0);
     CHECK(ker_tx_export_init(&tx, &context, 2, 16384, sink, NULL) == 0);
     CHECK(ker_receive_runtime_init(&runtime, &context) == 0);
     CHECK(ker_transport_receiver_register(&receiver, &runtime, &device, receive_message, NULL) == 0);
+    ker_runtime_init(&monitor_runtime);
+    CHECK(ker_neighbor_monitor_init(&monitor, &neighbors, &monitor_runtime, monitor_ip,
+        monitor_probe, NULL, NULL) == 0);
+    CHECK(ker_neighbor_monitor_resolution_enable(&monitor, &tx) == 0);
+    struct ker_icmpv4_service_config icmp_config = {.ttl=64, .burst=4,
+        .refill_ms=100, .monotonic_ms=service_clock};
+    CHECK(ker_icmpv4_service_enable(&icmp_service, &receiver, &monitor, &icmp_config) == 0);
     config = (struct ker_tcp_active_config){.local_port = local_port, .peer_port = peer_port,
         .window = 1024, .mss = 1460, .ttl = 64, .retry_ms = tap < 0 ? 10 : 100,
         .timeout_ms = tap < 0 ? 30 : 3000, .next_isn = next_isn};
@@ -376,7 +578,10 @@ int main(int argc, char **argv)
     start(tap < 0 ? 100 : now_ms());
     CHECK(ker_arp_responder_register(&arp, &runtime, &address, &tx) == 0);
     if (tap < 0) test_active(); else test_host();
-    CHECK(ker_tcp_active_cleanup(&active) == 0);
+    if (active.receiver) CHECK(ker_tcp_active_cleanup(&active) == 0);
+    CHECK(ker_icmpv4_service_disable(&icmp_service) == 0);
+    CHECK(ker_neighbor_monitor_cleanup(&monitor) == 0);
+    CHECK(ker_neighbor_remove(&neighbors, monitor_ip) == 0);
     CHECK(ker_arp_responder_unregister(&arp) == 0);
     CHECK(ker_transport_receiver_unregister(&receiver) == 0);
     CHECK(ker_receive_runtime_cleanup(&runtime) == 0);

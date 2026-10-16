@@ -41,6 +41,11 @@ struct ker_tcp_active_config {
     /* Opt in to RFC 6298-style RTT estimation/backoff for ordinary DATA flights.
      * SYN, FIN and zero-window probes retain the fixed retry policy. */
     bool adaptive_rto;
+    /* Correlate opt-in ICMPv4 protocol/port unreachable errors for this
+     * active SYN. Requires an enabled ICMPv4 service on the same receiver.
+     * Quotes are matched to the first sink-accepted SYN; callers must provide
+     * a fresh unpredictable ISN across active incarnations. */
+    bool syn_hard_errors;
 };
 struct ker_tcp_active_snapshot {
     enum ker_tcp_active_state state;
@@ -53,6 +58,7 @@ struct ker_tcp_active_snapshot {
     uint32_t send_unacknowledged, send_next;
     uint16_t send_bytes;
     bool peer_eof, local_fin, local_fin_acked;
+    uint8_t icmp_error_type, icmp_error_code;
 };
 /* Caller owns zero-initialized stable storage until empty-only cleanup. One
  * active tuple per receiver, with a permanent configured IPv4 peer.
@@ -80,6 +86,15 @@ struct ker_tcp_active {
     uint32_t reorder_fin_sequence;
     uint64_t rtt_srtt_x8, rttvar_x8, rto_ms, send_first_tx_ms;
     bool send_rtt_eligible, send_retransmitted, send_zero_window_probe;
+    struct ker_tx_export_observer tx_observer;
+    struct ker_icmpv4_service *icmp_service;
+    struct {
+        __be32 source, destination;
+        __be16 identification, source_port, destination_port, fragment;
+        uint16_t ip_length;
+        uint32_t sequence;
+    } syn_evidence;
+    bool syn_accepted;
 };
 int ker_tcp_active_start(struct ker_tcp_active *, struct ker_transport_receiver *,
     struct ker_neighbor_table *, __be32 peer_ip, struct ker_tx_export *,

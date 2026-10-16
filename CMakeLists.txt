@@ -51,7 +51,8 @@ if(KER_WITH_DPDK)
     include(cmake/TCPMSS.cmake)
     add_library(ker_tcp_active_port OBJECT src/runtime/tcp-active.c)
     target_link_libraries(ker_tcp_active_port PRIVATE ker_neighbor_headers ker_eth_headers
-        ker_receive_headers ker_tcp_mss_port ker_tcp_neighbor_create_port)
+        ker_receive_headers ker_tcp_mss_port ker_tcp_neighbor_create_port
+        ker_icmpv4_service_port ker_neighbor_timer_headers ker_port_headers)
     target_compile_features(ker_tcp_active_port PRIVATE c_std_11)
     set_target_properties(ker_tcp_active_port PROPERTIES POSITION_INDEPENDENT_CODE ON C_VISIBILITY_PRESET hidden)
     add_library(ker_tcp_listener_port OBJECT src/runtime/tcp-listener.c)
