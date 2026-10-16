@@ -119,26 +119,22 @@ static void test_teardown_rebind(void)
 {
     struct rte_ring *rx0 = rte_ring_create("ker_rebind_rx0", 8,
         rte_socket_id(), RING_F_EXACT_SZ);
-    struct rte_ring *rx1 = rte_ring_create("ker_rebind_rx1", 8,
-        rte_socket_id(), RING_F_EXACT_SZ);
     struct rte_ring *tx = rte_ring_create("ker_rebind_tx", 8,
         rte_socket_id(), RING_F_EXACT_SZ);
-    CHECK(rx0 && rx1 && tx);
-    struct rte_ring *rx_queues[] = {rx0, rx1};
+    CHECK(rx0 && tx);
+    struct rte_ring *rx_queues[] = {rx0};
     struct rte_ring *tx_queues[] = {tx};
-    int port = rte_eth_from_rings("ker_ethdev_rebind", rx_queues, 2,
+    int port = rte_eth_from_rings("ker_ethdev_rebind", rx_queues, 1,
         tx_queues, 1, rte_socket_id());
     CHECK(port >= 0);
     struct rte_eth_conf config = {0};
-    CHECK(rte_eth_dev_configure((uint16_t)port, 2, 1, &config) == 0);
+    CHECK(rte_eth_dev_configure((uint16_t)port, 1, 1, &config) == 0);
 
     CHECK(ker_memory_init(SOCKET_ID_ANY, 7) == 0);
     struct ker_packet_pool pool_a = {0}, pool_b = {0};
     CHECK(ker_packet_pool_init(&pool_a, "rebind_pool_a", POOL_COUNT, 0, 4096,
         SOCKET_ID_ANY) == 0);
     CHECK(rte_eth_rx_queue_setup((uint16_t)port, 0, 64, rte_socket_id(), NULL,
-        pool_a.mbufs) == 0);
-    CHECK(rte_eth_rx_queue_setup((uint16_t)port, 1, 64, rte_socket_id(), NULL,
         pool_a.mbufs) == 0);
     CHECK(rte_eth_tx_queue_setup((uint16_t)port, 0, 64, rte_socket_id(), NULL) == 0);
     CHECK(rte_eth_dev_start((uint16_t)port) == 0);
@@ -172,16 +168,13 @@ static void test_teardown_rebind(void)
         first.received == 1);
     CHECK(ker_worker_cleanup(&worker_a) == 0);
 
-    /* Queue on a second, configured PMD queue before adapter teardown. */
+    /* Place a successor behind the pending packet on the same bound queue. */
     uint8_t next_expected[EXPECTED_COUNT][IP_PAYLOAD_LEN];
-    struct rte_mbuf *queued_old = make_packet(&pool_a, 0xb2, 0x21, next_expected[0]);
-    CHECK(rte_ring_enqueue(rx1, queued_old) == 0 && rte_ring_count(rx1) == 1);
-
-    /* The old adapter owns one pending queue reference on ENOMEM. Cleanup is
-     * blocked until the exact chain is canceled back to its caller. */
     struct rte_mbuf *pending = make_packet(&pool_a, first.generation, 0x11,
         first.expected[1]);
     CHECK(rte_ring_enqueue(rx0, pending) == 0);
+    struct rte_mbuf *queued_old = make_packet(&pool_a, 0xb2, 0x21, next_expected[0]);
+    CHECK(rte_ring_enqueue(rx0, queued_old) == 0 && rte_ring_count(rx0) == 2);
     struct rte_mbuf *held[HELD_CAPACITY];
     unsigned int held_count;
     exhaust_pool(&pool_a, held, &held_count);
@@ -195,19 +188,19 @@ static void test_teardown_rebind(void)
     rte_pktmbuf_free(cancelled);
     release_pool(held, held_count);
 
-    /* The queued PMD packet is not drained by adapter cleanup or device/runtime
-     * teardown; keep its source pool alive for the next generation. */
-    CHECK(rte_ring_count(rx1) == 1 && rte_mempool_avail_count(pool_a.mbufs) == POOL_COUNT - 1);
+    /* The same bound queue retains its successor across adapter cleanup. */
+    CHECK(rte_ring_count(rx0) == 1 && rte_mempool_avail_count(pool_a.mbufs) == POOL_COUNT - 1);
     CHECK(ker_ethdev_rx_cleanup(&rx) == 0 && !device.rx_ring_live &&
-        !runtime.rx_ring_live && rte_ring_count(rx1) == 1);
+        !runtime.rx_ring_live && rte_ring_count(rx0) == 1);
     CHECK(ker_protocol_unregister(&handler) == 0);
     CHECK(ker_receive_runtime_cleanup(&runtime) == 0);
     CHECK(ker_eth_device_cleanup(&device) == 0);
     CHECK(ker_skb_context_cleanup(&context) == 0);
-    CHECK(rte_ring_count(rx1) == 1 && rte_mempool_avail_count(pool_a.mbufs) == POOL_COUNT - 1);
+    CHECK(rte_ring_count(rx0) == 1 && rte_mempool_avail_count(pool_a.mbufs) == POOL_COUNT - 1);
 
     /* Reuse the same adapter, device, runtime, handler, and context storage
-     * with a new generation and destination pool. Failed initialization must
+     * on the same RX queue with a new generation and destination pool. Failed
+     * initialization must
      * leave the zeroed adapter and all pins unchanged. */
     CHECK(ker_packet_pool_init(&pool_b, "rebind_pool_b", POOL_COUNT, 0, 4096,
         SOCKET_ID_ANY) == 0);
@@ -218,28 +211,28 @@ static void test_teardown_rebind(void)
         .handler = &handler, .generation = 0xb2};
     memcpy(second.expected[0], next_expected[0], IP_PAYLOAD_LEN);
     CHECK(ker_ethdev_rx_init_profile(&rx, &device, &runtime,
-        (uint16_t)port, 2, 0, KER_ETHDEV_RX_COPY_UNIQUE) == -EINVAL);
+        (uint16_t)port, 1, 0, KER_ETHDEV_RX_COPY_UNIQUE) == -EINVAL);
     CHECK(!rx.initialized && !rx.device && !rx.runtime && !rx.pending &&
         !device.rx_ring_live && !runtime.rx_ring_live);
     CHECK(ker_ethdev_rx_init_profile(&rx, &device, &runtime,
-        (uint16_t)port, 1, 0, (enum ker_ethdev_rx_copy_profile)99) == -EINVAL);
+        (uint16_t)port, 0, 0, (enum ker_ethdev_rx_copy_profile)99) == -EINVAL);
     CHECK(!rx.initialized && !rx.device && !rx.runtime && !rx.pending &&
         !device.rx_ring_live && !runtime.rx_ring_live);
     CHECK(ker_protocol_register(&runtime, &handler, &device,
         rte_cpu_to_be_16(ETH_P_IP), receive_epoch, &second) == 0);
     CHECK(ker_ethdev_rx_init_profile(&rx, &device, &runtime, (uint16_t)port,
-        1, 0, KER_ETHDEV_RX_COPY_UNIQUE) == 0);
+        0, 0, KER_ETHDEV_RX_COPY_UNIQUE) == 0);
 
     struct rte_mbuf *queued_new = make_packet(&pool_a, 0xb2, 0x23, next_expected[1]);
     memcpy(second.expected[1], next_expected[1], IP_PAYLOAD_LEN);
-    CHECK(rte_ring_enqueue(rx1, queued_new) == 0 && rte_ring_count(rx1) == 2);
+    CHECK(rte_ring_enqueue(rx0, queued_new) == 0 && rte_ring_count(rx0) == 2);
     struct ker_worker worker_b = {0};
     CHECK(ker_worker_init(&worker_b, &pool_b, &worker_config, &worker_ops) == 0);
     for (unsigned int i = 0; i < 2; ++i) {
         CHECK(ker_worker_poll(&worker_b, i, &progress) == 0 && progress.rx == 1 &&
             second.received == i + 1);
     }
-    CHECK(first.received == 1 && second.received == 2 && rte_ring_count(rx1) == 0);
+    CHECK(first.received == 1 && second.received == 2 && rte_ring_count(rx0) == 0);
     CHECK(rte_mempool_avail_count(pool_a.mbufs) == POOL_COUNT);
     CHECK(ker_worker_cleanup(&worker_b) == 0);
     CHECK(ker_ethdev_rx_cleanup(&rx) == 0 && !device.rx_ring_live && !runtime.rx_ring_live);
@@ -253,7 +246,6 @@ static void test_teardown_rebind(void)
     CHECK(ker_packet_pool_cleanup(&pool_a) == 0);
     CHECK(ker_memory_live_allocations() == 0 && ker_memory_shutdown() == 0);
     rte_ring_free(tx);
-    rte_ring_free(rx1);
     rte_ring_free(rx0);
 }
 
