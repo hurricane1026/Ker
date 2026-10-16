@@ -76,8 +76,10 @@ int ker_eth_receive(struct ker_eth_device *device, struct rte_mbuf *packet,
     *result = skb;
     return 0;
 }
-int ker_eth_receive_copy_chain(struct ker_eth_device *device,
-    const struct rte_mbuf *chain, unsigned int headroom, struct sk_buff **result)
+enum eth_copy_profile { ETH_COPY_UNIQUE, ETH_COPY_BORROWED, ETH_COPY_EXTERNAL };
+static int receive_copy_chain_profile(struct ker_eth_device *device,
+    const struct rte_mbuf *chain, unsigned int headroom, struct sk_buff **result,
+    enum eth_copy_profile profile)
 {
     if (!device || !device->native || !device->context || !chain || !result)
         return -EINVAL;
@@ -93,7 +95,15 @@ int ker_eth_receive_copy_chain(struct ker_eth_device *device,
     if (headroom & 1)
         return -EINVAL;
     struct sk_buff *skb = NULL;
-    int error = ker_skb_copy_from_mbuf_chain(device->context, chain, headroom, &skb);
+    int error;
+    if (profile == ETH_COPY_EXTERNAL)
+        error = ker_skb_copy_from_mbuf_chain_external(device->context, chain,
+            headroom, &skb);
+    else if (profile == ETH_COPY_BORROWED)
+        error = ker_skb_copy_from_mbuf_chain_borrowed(device->context, chain,
+            headroom, &skb);
+    else
+        error = ker_skb_copy_from_mbuf_chain(device->context, chain, headroom, &skb);
     if (error)
         return error;
     /* The destination pool provides aligned buffers; retain this guard before
@@ -108,32 +118,20 @@ int ker_eth_receive_copy_chain(struct ker_eth_device *device,
     *result = skb;
     return 0;
 }
+int ker_eth_receive_copy_chain(struct ker_eth_device *device,
+    const struct rte_mbuf *chain, unsigned int headroom, struct sk_buff **result)
+{
+    return receive_copy_chain_profile(device, chain, headroom, result, ETH_COPY_UNIQUE);
+}
 int ker_eth_receive_copy_chain_borrowed(struct ker_eth_device *device,
     const struct rte_mbuf *chain, unsigned int headroom, struct sk_buff **result)
 {
-    if (!device || !device->native || !device->context || !chain || !result)
-        return -EINVAL;
-    if (rte_lcore_id() != device->lcore || device->context->lcore != device->lcore)
-        return -EXDEV;
-    if (device->native->type != ARPHRD_ETHER || device->native->addr_len != ETH_ALEN ||
-        !device->native->dev_addr)
-        return -ENOTSUP;
-    if (chain->pkt_len < ETH_HLEN)
-        return -EMSGSIZE;
-    if (headroom & 1)
-        return -EINVAL;
-    struct sk_buff *skb = NULL;
-    int error = ker_skb_copy_from_mbuf_chain_borrowed(device->context, chain,
-        headroom, &skb);
-    if (error)
-        return error;
-    if ((uintptr_t)skb->data & 1) {
-        ker_skb_free(skb);
-        return -EINVAL;
-    }
-    skb->protocol = eth_type_trans(skb, device->native);
-    skb->mac_len = ETH_HLEN;
-    skb_reset_network_header(skb);
-    *result = skb;
-    return 0;
+    return receive_copy_chain_profile(device, chain, headroom, result,
+        ETH_COPY_BORROWED);
+}
+int ker_eth_receive_copy_chain_external(struct ker_eth_device *device,
+    const struct rte_mbuf *chain, unsigned int headroom, struct sk_buff **result)
+{
+    return receive_copy_chain_profile(device, chain, headroom, result,
+        ETH_COPY_EXTERNAL);
 }

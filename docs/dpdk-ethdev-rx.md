@@ -24,24 +24,36 @@ behavior remain caller/driver responsibilities.
 `ker_ethdev_rx_init` keeps the unique-reference copy profile: direct segments
 must have reference count one, and indirect chains are rejected. The explicit
 `KER_ETHDEV_RX_COPY_IMMUTABLE_BORROWED` profile accepts shared direct segments
-and valid DPDK indirect clones. The adapter owns the descriptor reference
-received from the queue. The caller guarantees that the descriptors, chain
-topology, and backing bytes remain immutable until the adapter consumes or
-returns that reference; any independent backing references the caller needs
-must remain live. A sibling clone can retain shared backing without requiring
-an extra reference to the queued clone descriptor. This profile copies bytes
-into Ker-owned skb
-storage; it does not transfer or modify the caller's references. External
-buffers, invalid clone/backing geometry, and transformed RX metadata remain
-unsupported and are consumed as drops. Pool-allocation `-ENOMEM` retains the
-adapter's chain reference for retry; `cancel` returns that same reference.
+and valid DPDK indirect clones. The separate
+`KER_ETHDEV_RX_COPY_IMMUTABLE_EXTERNAL` profile accepts valid attached DPDK
+external-buffer segments and their external-buffer clones. Both profiles copy
+bytes into Ker-owned skb storage. For the external profile, input must be a
+valid native DPDK attachment; the caller guarantees that `buf_len` truthfully
+bounds the external allocation and keeps descriptor fields, chain topology,
+external storage, and shared-info stable and immutable until the adapter
+consumes or returns its received reference. The adapter cannot verify the
+actual capacity behind an opaque external pointer. Each external segment must
+have a live descriptor reference, shared-info with a free callback, positive
+external refcount, and valid data bounds. External-plus-indirect flags,
+invalid geometry, and transformed RX metadata are rejected. Existing unique
+and borrowed profiles continue to reject external buffers. The borrowed
+profile accepts direct shared references and valid indirect clones; the caller
+keeps their topology and bytes immutable, while the adapter owns the queue's
+received reference. A sibling clone may retain backing without an extra
+reference to the queued descriptor. These profiles copy bytes into Ker-owned
+skb storage and do not transfer or modify other caller references. Pool
+allocation `-ENOMEM` retains the adapter's chain reference for retry; `cancel`
+returns that same reference.
 
 The `ethdev-rx` test injects real mbuf chains through DPDK's `net_ring` PMD,
 including an Ethernet header split across segments and actual `rte_pktmbuf_clone`
 chains. It checks default unique-only rejection, borrowed direct/indirect copy,
 parent and sibling lifetime, original-reference release before copying,
 pool-pressure retry, cancellation, malformed/metadata rejection, worker-budget
-FIFO, and binding exclusion. These Ker tests add shared-reference behavior
+FIFO, and binding exclusion. External-buffer coverage uses actual attached
+multisegment buffers and `rte_pktmbuf_clone` through the PMD queue, then checks
+that copied skb bytes outlive the final external-buffer callback. These Ker
+tests add shared-reference behavior
 beyond the pinned F-Stack free/fanout scenarios; those upstream cases do not
 test indirect-clone RX. This is not a claim of physical-NIC, RSS, socket, or
 full-stack support.

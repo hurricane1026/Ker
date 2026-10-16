@@ -4,7 +4,10 @@
 
 enum ker_ethdev_rx_copy_profile {
     KER_ETHDEV_RX_COPY_UNIQUE = 0,
-    KER_ETHDEV_RX_COPY_IMMUTABLE_BORROWED = 1
+    KER_ETHDEV_RX_COPY_IMMUTABLE_BORROWED = 1,
+    /* Copies valid native external attachments. Caller guarantees buf_len
+     * bounds actual storage and keeps input immutable through consumption. */
+    KER_ETHDEV_RX_COPY_IMMUTABLE_EXTERNAL = 2
 };
 
 /* Borrows one caller-configured, started ethdev RX queue. The caller keeps the
