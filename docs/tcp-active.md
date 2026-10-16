@@ -35,6 +35,23 @@ An ACK-less RST cannot cancel an active open. A valid acknowledged reset during
 SYN reports `-ECONNREFUSED`; an exact-next-sequence reset after READY reports
 `-ECONNRESET`.
 
+An optional `syn_hard_errors` setting correlates ICMPv4 Destination Unreachable
+code 2 (protocol unreachable, `-EPROTONOSUPPORT`) and code 3 (port unreachable,
+`-ECONNREFUSED`) with a SYN only after the TX sink accepted it. The active open
+must use an enabled ICMPv4 service on the same receiver. Ker records the emitted
+IPv4 identification/length, fragment field, addresses and quoted TCP tuple/ISN;
+the service compares these with the validated eight-byte TCP quote. Exporter
+queueing alone is insufficient evidence. The caller must poll with its sampled
+monotonic clock before RX so the SYN timeout wins at its deadline. Other
+unreachable codes, PMTU code 4, redirects, time-exceeded, parameter-problem and
+errors for established states do not abort the connection. Snapshot reports
+the accepted ICMP type/code alongside `error`. As elsewhere in this API, the
+caller must supply a fresh unpredictable ISN across active incarnations:
+identical wire quotes cannot prove a generation after cleanup/restart.
+The ICMP service has one exclusive control-observer slot; if another feature
+owns it, enabling this option fails with `-EALREADY` and rolls back the active
+open without leaving either observer attached.
+
 The profile negotiates MSS only. Simultaneous open, ECN negotiation, window
 scaling, SACK, timestamps, authentication, Fast Open,
 congestion control and reassembly remain subsequent work. Graceful FIN close

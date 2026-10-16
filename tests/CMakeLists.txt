@@ -775,3 +775,13 @@ if(KER_WITH_DPDK)
         ENVIRONMENT "LD_LIBRARY_PATH=${ker_dpdk_library_path}:$ENV{LD_LIBRARY_PATH}")
     set_tests_properties(tcp-active-reorder-host PROPERTIES SKIP_RETURN_CODE 77)
 endif()
+
+if(KER_WITH_DPDK)
+    foreach(tcp_test ker-tcp-active-test ker-tcp-stream-test ker-tcp-send-test
+            ker-tcp-persist-test ker-tcp-close-test ker-tcp-active-reorder-test)
+        target_link_libraries(${tcp_test} PRIVATE ker_icmpv4_service_port
+            ker_icmpv4_create_port ker_neighbor_timer_port ker_neighbor_timer_headers
+            ker_address_headers ker_neighbor_update_headers ker_neighbor_update_port
+            ker_neighbor_event_send_headers ker_neighbor_event_send_port ker_arp_probe_port)
+    endforeach()
+endif()

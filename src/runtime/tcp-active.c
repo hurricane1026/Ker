@@ -2,11 +2,117 @@
 #include "runtime/tcp-listener.h"
 #include "runtime/tcp-mss.h"
 #include "runtime/tcp-neighbor-create.h"
+#include "runtime/icmpv4-service.h"
 #include <errno.h>
 #include <limits.h>
 #include <linux/irqflags.h>
 #include <linux/if.h>
 #include <string.h>
+
+struct syn_wire_evidence {
+    __be32 source, destination;
+    __be16 identification, source_port, destination_port;
+    __be16 fragment;
+    uint16_t ip_length;
+    uint32_t sequence;
+};
+_Static_assert(sizeof(struct syn_wire_evidence) <= KER_TX_EXPORT_NOTE_SIZE,
+               "SYN evidence must fit in the export note");
+
+static int syn_observer_prepare(const struct rte_mbuf *packet,
+    struct ker_tx_export_observer_note *note, void *arg)
+{
+    struct ker_tcp_active *t = arg;
+    unsigned char scratch[128];
+    if (packet->pkt_len < 58 || packet->pkt_len > sizeof(scratch)) return 0;
+    const unsigned char *frame = rte_pktmbuf_read(packet, 0, packet->pkt_len, scratch);
+    if (!frame) return 0;
+    if (frame != scratch) memcpy(scratch, frame, packet->pkt_len);
+    const unsigned char *ip = scratch + 14;
+    if (scratch[12] != 8 || scratch[13] != 0 || (ip[0] >> 4) != 4 ||
+        (ip[0] & 15U) != 5 || ip[9] != 6 || ip[20 + 13] != KER_TCP_SYN ||
+        ((ip[20 + 12] >> 4) & 15U) != 6) return 0;
+    unsigned int total = ((unsigned int)ip[2] << 8) | ip[3];
+    if (total != 44 || packet->pkt_len < 14U + total) return 0;
+    struct syn_wire_evidence value;
+    memcpy(&value.source, ip + 12, 4);
+    memcpy(&value.destination, ip + 16, 4);
+    memcpy(&value.identification, ip + 4, 2);
+    memcpy(&value.fragment, ip + 6, 2);
+    value.ip_length = (uint16_t)total;
+    memcpy(&value.source_port, ip + 20, 2);
+    memcpy(&value.destination_port, ip + 22, 2);
+    memcpy(&value.sequence, ip + 24, 4);
+    if (value.source != t->neighbors->address->native->ifa_list->ifa_local ||
+        value.destination != t->peer_ip || value.source_port != t->config.local_port ||
+        value.destination_port != t->config.peer_port ||
+        value.sequence != rte_cpu_to_be_32(t->status.local_isn)) return 0;
+    memcpy(note->bytes, &value, sizeof(value));
+    note->length = sizeof(value);
+    return 0;
+}
+
+static void syn_observer_complete(const struct ker_tx_export_observer_note *note,
+                                  int sink_status, void *arg)
+{
+    struct ker_tcp_active *t = arg;
+    if (sink_status || note->length != sizeof(struct syn_wire_evidence) ||
+        t->status.state != KER_TCP_ACTIVE_SYN || t->syn_accepted)
+        return;
+    struct syn_wire_evidence value;
+    memcpy(&value, note->bytes, sizeof(value));
+    t->syn_evidence.source = value.source;
+    t->syn_evidence.destination = value.destination;
+    t->syn_evidence.identification = value.identification;
+    t->syn_evidence.fragment = value.fragment;
+    t->syn_evidence.source_port = value.source_port;
+    t->syn_evidence.destination_port = value.destination_port;
+    t->syn_evidence.ip_length = value.ip_length;
+    t->syn_evidence.sequence = value.sequence;
+    t->syn_accepted = true;
+}
+
+static int observe_syn_error(const struct ker_icmpv4_control_event *event,
+                             void *arg)
+{
+    struct ker_tcp_active *t = arg;
+    if (!event || !event->has_quote || event->type != 3 ||
+        (event->code != 2 && event->code != 3) ||
+        t->status.state != KER_TCP_ACTIVE_SYN || t->busy ||
+        event->quote.protocol != 6 || !event->quote.flow_available ||
+        event->quote.header_length != 20 || event->quote.transport_length < 8 ||
+        event->quote.total_length != 44) return 0;
+    const unsigned char *ip = event->quote.header;
+    const unsigned char *tcp = event->quote.transport;
+    __be32 source, destination;
+    __be16 identification, source_port, destination_port;
+    uint32_t sequence;
+    memcpy(&source, ip + 12, 4); memcpy(&destination, ip + 16, 4);
+    memcpy(&identification, ip + 4, 2);
+    __be16 fragment; memcpy(&fragment, ip + 6, 2);
+    memcpy(&source_port, tcp, 2); memcpy(&destination_port, tcp + 2, 2);
+    memcpy(&sequence, tcp + 4, 4);
+    if (t->syn_accepted && t->syn_evidence.source == source &&
+        t->syn_evidence.destination == destination &&
+        t->syn_evidence.identification == identification &&
+        t->syn_evidence.fragment == fragment && fragment == 0 &&
+        t->syn_evidence.source_port == source_port &&
+        t->syn_evidence.destination_port == destination_port &&
+        t->syn_evidence.sequence == sequence &&
+        t->syn_evidence.ip_length == event->quote.total_length) {
+        if (t->now_ms >= t->deadline_ms) {
+            t->status.state = KER_TCP_ACTIVE_FAILED;
+            t->status.error = -ETIMEDOUT;
+        } else {
+            t->status.state = KER_TCP_ACTIVE_FAILED;
+            t->status.error = event->code == 2 ? -EPROTONOSUPPORT : -ECONNREFUSED;
+            t->status.icmp_error_type = event->type;
+            t->status.icmp_error_code = event->code;
+        }
+        return 1;
+    }
+    return 0;
+}
 
 static int owner(struct ker_tcp_active *t)
 {
@@ -417,6 +523,8 @@ int ker_tcp_active_start(struct ker_tcp_active *t, struct ker_transport_receiver
          cfg->reorder_buffer_size < ((size_t)cfg->receive_capacity + 7U) / 8U)) ||
         (!!cfg->send_buffer != !!cfg->send_capacity) ||
         (!!cfg->receive_buffer != !!cfg->receive_capacity) ||
+        (cfg->syn_hard_errors && (!r->icmpv4_service ||
+         r->icmpv4_service->receiver != r)) ||
         (cfg->receive_buffer && cfg->receive_capacity != cfg->window) || !cfg->mss || !cfg->ttl || !cfg->next_isn || !cfg->retry_ms ||
         cfg->timeout_ms < cfg->retry_ms || now > UINT64_MAX - cfg->timeout_ms ||
         !r->handler.registered || !n->native || !n->address || !n->address->native ||
@@ -441,13 +549,35 @@ int ker_tcp_active_start(struct ker_tcp_active *t, struct ker_transport_receiver
     *t = (struct ker_tcp_active){.receiver = r, .neighbors = n, .peer = entry,
         .tx = tx, .peer_ip = peer, .config = *cfg, .now_ms = now,
         .retry_ms = now + cfg->retry_ms, .deadline_ms = now + cfg->timeout_ms,
-        .rto_ms = cfg->adaptive_rto ? KER_TCP_RTO_MIN_MS : 0, .busy = true};
+        .rto_ms = cfg->adaptive_rto ? KER_TCP_RTO_MIN_MS : 0,
+        .icmp_service = cfg->syn_hard_errors ? r->icmpv4_service : NULL,
+        .busy = true};
     ++tx->active_refs;
     r->tcp_active = t; r->tcp_active_receive = receive_active;
+    if (t->icmp_service) {
+        error = ker_icmpv4_service_control_observer_attach(t->icmp_service,
+            observe_syn_error, t);
+        if (!error)
+            error = ker_tx_export_observer_attach(tx, &t->tx_observer,
+                syn_observer_prepare, syn_observer_complete, t);
+        if (error) {
+            if (t->icmp_service->control_observer == observe_syn_error &&
+                t->icmp_service->control_observer_arg == t)
+                BUG_ON(ker_icmpv4_service_control_observer_detach(
+                    t->icmp_service, observe_syn_error, t));
+            r->tcp_active = NULL; r->tcp_active_receive = NULL; --tx->active_refs;
+            BUG_ON(ker_neighbor_release(n, entry)); memset(t, 0, sizeof(*t)); return error;
+        }
+    }
     error = t->config.next_isn(t->config.arg, cfg->peer_port, &t->status.local_isn);
     if (error > 0) error = -EPROTO;
     if (!error) error = emit(t, KER_TCP_SYN, 0);
     if (error) {
+        if (t->tx_observer.attached)
+            BUG_ON(ker_tx_export_observer_detach(tx, &t->tx_observer));
+        if (t->icmp_service)
+            BUG_ON(ker_icmpv4_service_control_observer_detach(
+                t->icmp_service, observe_syn_error, t));
         r->tcp_active = NULL; r->tcp_active_receive = NULL; --tx->active_refs;
         BUG_ON(ker_neighbor_release(n, entry)); memset(t, 0, sizeof(*t)); return error;
     }
@@ -516,7 +646,22 @@ int ker_tcp_active_cleanup(struct ker_tcp_active *t)
     int error = owner(t); if (error) return error;
     if ((t->status.state != KER_TCP_ACTIVE_RESET && t->status.state != KER_TCP_ACTIVE_FAILED && t->status.state != KER_TCP_ACTIVE_CLOSED) ||
         t->tx->packets || t->status.receive_bytes || t->status.send_bytes || t->status.ack_pending ||
-        (t->status.local_fin && !t->status.local_fin_acked)) return -EBUSY;
+        (t->status.local_fin && !t->status.local_fin_acked) ||
+        t->tx_observer.busy || (t->icmp_service && t->icmp_service->busy)) return -EBUSY;
+    if (t->tx_observer.attached) {
+        error = ker_tx_export_observer_detach(t->tx, &t->tx_observer);
+        if (error) return error;
+    }
+    if (t->icmp_service) {
+        error = ker_icmpv4_service_control_observer_detach(
+            t->icmp_service, observe_syn_error, t);
+        if (error) {
+            if (t->config.syn_hard_errors)
+                BUG_ON(ker_tx_export_observer_attach(t->tx, &t->tx_observer,
+                    syn_observer_prepare, syn_observer_complete, t));
+            return error;
+        }
+    }
     t->receiver->tcp_active = NULL; t->receiver->tcp_active_receive = NULL;
     --t->tx->active_refs;
     BUG_ON(ker_neighbor_release(t->neighbors, t->peer));
